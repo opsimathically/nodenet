@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "release": "0.1.0-rc.1",
+  "platform": {
+    "os": "linux",
+    "architectures": ["x86_64", "aarch64"],
+    "libc": "glibc >=2.28",
+    "kernel": ">=4.18",
+    "node": ">=26.0.0",
+    "nodeApi": 10
+  },
+  "limits": {
+    "packetBytes": 65535,
+    "controlBytesDefault": 4096,
+    "controlBytesMaximum": 65536,
+    "rawOptionBytesMaximum": 4096,
+    "pendingOperationsPerSocket": 32,
+    "batchMessagesMaximum": 64,
+    "batchBytesMaximum": 1048576,
+    "packetRingBytesMaximum": 67108864,
+    "packetRingBytesPerEnvironmentMaximum": 134217728,
+    "classicBpfInstructionsMaximum": 4096
+  },
+  "artifacts": [
+    "nodenetraw",
+    "nodenetraw-linux-x64-gnu",
+    "nodenetraw-linux-arm64-gnu"
+  ],
+  "unsupported": [
+    "non-Linux",
+    "musl",
+    "32-bit architectures",
+    "AF_XDP",
+    "TX packet mmap"
+  ]
+}

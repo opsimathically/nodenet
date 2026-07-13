@@ -1,0 +1,78 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+
+function run(command, arguments_, options = {}) {
+  const result = spawnSync(command, arguments_, {
+    encoding: "utf8",
+    stdio: "inherit",
+    ...options,
+  });
+  if (result.status !== 0)
+    throw new Error(`${command} ${arguments_.join(" ")} failed`);
+}
+
+run("npm", ["run", "build:native:release"]);
+run(process.execPath, ["scripts/assemble-release.mjs"]);
+const target = `linux-${process.arch}-gnu`;
+const tarballs = join("release", "tarballs");
+rmSync(tarballs, { force: true, recursive: true });
+mkdirSync(tarballs, { recursive: true });
+run("npm", ["pack", "--pack-destination", "../../tarballs"], {
+  cwd: `release/stage/nodenetraw-${target}`,
+});
+run("npm", ["pack", "--pack-destination", "../../tarballs"], {
+  cwd: "release/stage/nodenetraw",
+});
+const version = JSON.parse(readFileSync("package.json", "utf8")).version;
+const consumer = mkdtempSync(join(tmpdir(), "nodenetraw-consumer-"));
+try {
+  run("npm", ["init", "--yes"], { cwd: consumer });
+  const platformTarball = join(
+    process.cwd(),
+    tarballs,
+    `nodenetraw-linux-${process.arch}-gnu-${version}.tgz`,
+  );
+  const rootTarball = join(
+    process.cwd(),
+    tarballs,
+    `nodenetraw-${version}.tgz`,
+  );
+  run(
+    "npm",
+    [
+      "install",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      platformTarball,
+      rootTarball,
+    ],
+    {
+      cwd: consumer,
+    },
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      "import('nodenetraw').then(m => { if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok') process.exit(1) })",
+    ],
+    { cwd: consumer },
+  );
+  run(
+    process.execPath,
+    [
+      "--eval",
+      "if (require('nodenetraw').nativeSmokeTest() !== 'nodenetraw:napi-ok') process.exit(1)",
+    ],
+    { cwd: consumer },
+  );
+  console.log(
+    `clean ESM and require() consumer passed for ${version} on ${target}`,
+  );
+} finally {
+  rmSync(consumer, { force: true, recursive: true });
+}

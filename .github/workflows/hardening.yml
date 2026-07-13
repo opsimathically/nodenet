@@ -1,0 +1,74 @@
+name: Hardening
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Parser and serializer fuzzing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - run:
+          cargo +nightly fuzz run surface --fuzz-dir native/fuzz --
+          -max_total_time=300 -rss_limit_mb=2048
+
+  sanitizers:
+    name: ${{ matrix.sanitizer }} sanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run:
+          rustup toolchain install nightly --profile minimal --component
+          rust-src
+      - name: Run native tests under sanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+        run: >-
+          cargo +nightly test --manifest-path native/Cargo.toml --target
+          x86_64-unknown-linux-gnu -Zbuild-std --locked --features fuzzing
+
+  advisory:
+    name: Dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9f06a71cc4710d4507903 # v6.4.0
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --file native/Cargo.lock
+      - run: cargo audit --file native/fuzz/Cargo.lock
+      - run: npm run hardening:verify
+
+  namespace-stress:
+    name: Packet ring fd/RSS stress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9f06a71cc4710d4507903 # v6.4.0
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: sudo apt-get update && sudo apt-get install --yes iproute2
+      - run: npm run hardening:stress

@@ -1,0 +1,124 @@
+# Scope and requirements
+
+## Product statement
+
+Provide Linux Node.js applications with a memory-safe, resource-safe bridge to
+raw packet networking. TypeScript defines the public API; Rust owns descriptors,
+buffers, asynchronous state, and the Linux syscall boundary through Node-API.
+
+The target is practical full capability, not a permanently narrow convenience
+wrapper. The library should eventually expose enough typed and bounded
+primitives to build protocol implementations, packet capture/injection tools,
+diagnostics, scanners, routers, and network test systems without adding another
+native addon. Completeness is measured against documented Linux socket
+capabilities, not by mirroring every numeric constant into JavaScript.
+
+## Capability baseline
+
+The release-capable baseline must cover:
+
+1. IPv4 `AF_INET`/`SOCK_RAW`, including kernel-built and user-supplied headers.
+2. IPv6 `AF_INET6`/`SOCK_RAW`, including scoped addresses and IPv6-specific
+   checksum, hop-limit, traffic-class, packet-info, and error semantics.
+3. Linux `AF_PACKET` with `SOCK_RAW` and `SOCK_DGRAM`, link-layer addresses,
+   interface binding, protocol selection, packet type, VLAN auxiliary data,
+   membership, statistics, and fanout.
+4. Message-oriented `sendmsg`/`recvmsg` I/O with bounded data and control
+   buffers, typed flags, ancillary messages, explicit data/control truncation,
+   error-queue access, and software/hardware timestamp representation.
+5. Typed common socket options plus a deliberately bounded low-level extension
+   mechanism for Linux options that are not yet modeled.
+6. Explicit cancellation, close, backpressure, fairness, Worker-environment
+   teardown, and stable Linux error reporting.
+7. Safe packet filtering and high-throughput paths: classic/eBPF attachment,
+   bounded batch I/O, and `PACKET_MMAP` rings where benchmarks justify them.
+8. Source and prebuilt distribution for the declared x86-64/AArch64 glibc
+   matrix, backed by stress, fuzz, sanitizer, leak, and privileged namespace
+   tests.
+
+The detailed capability matrix and sequencing live in
+[the full-capability plan](11-full-capability-plan.md).
+
+## Functional requirements
+
+- Create, configure, bind, optionally connect, query, and close every supported
+  socket family without exposing the owned descriptor accidentally.
+- Send and receive arbitrary initialized bytes without unintended
+  transformation, while documenting when Linux supplies or removes protocol
+  headers.
+- Represent every supported address family with a discriminated TypeScript type
+  and a checked Rust counterpart; never infer a family from buffer layout.
+- Expose per-message addresses, flags, original lengths, ancillary data, and
+  extended errors with unknown-but-safe receive control messages preserved as
+  bounded owned bytes.
+- Allow operation-level cancellation through `AbortSignal` without double
+  settlement or closing the socket.
+- Provide both one-message primitives and separately bounded batch/streaming
+  conveniences. Convenience APIs must be implementable in terms of documented
+  lower-level semantics.
+- Report unsupported family/option/control-message combinations explicitly.
+- Preserve the Linux operation, errno number, conventional errno name, and
+  useful contextual fields in stable errors.
+
+## Quality requirements
+
+- No memory corruption, use-after-free, double-close, stale-fd reuse, invalid
+  N-API access, or panic crossing the native boundary.
+- Deterministic explicit cleanup, with finalization only as a fallback.
+- Bounded allocation and queueing for data, control messages, batches, rings,
+  callbacks, and cancellation state.
+- Fair reactor progress across sockets and command types under sustained load.
+- Exactly-once completion when cancellation, readiness, close, and environment
+  teardown race.
+- Checked integer, address, header, cmsg, alignment, and kernel-length
+  conversions at both JavaScript and Rust boundaries where applicable.
+- Tests for malformed values, unknown control messages, truncation, partial
+  batch results, queue saturation, cancellation, repeated close, permission
+  failures, syscall failures, and lifecycle races.
+- Strict formatting, linting, type checking, Clippy, and reproducible locked
+  builds throughout implementation.
+
+## Dependency requirements
+
+The smallest dependency graph is not automatically the safest design. A
+dependency is acceptable when it replaces substantial hand-written FFI or
+alignment-sensitive parsing and is actively maintained, narrowly configured,
+license-compatible, and locked exactly.
+
+- Keep the public JavaScript runtime dependency count at zero unless a future
+  requirement cannot reasonably be met with Node built-ins.
+- Keep build, lint, formatting, test, and fuzz dependencies development-only.
+- Disable unused Rust default features and record every direct native dependency
+  in the decision log.
+- Prefer maintained safe syscall abstractions over project-owned `unsafe`.
+- Permit a small audited Linux FFI module only when safe crates cannot express a
+  required capability; it needs an accepted design record and dedicated tests.
+
+## Explicit non-goals
+
+- Windows, macOS, non-Linux Unix, or a pure JavaScript fallback.
+- Automatic privilege elevation or capability management.
+- Authentication, authorization policy, firewall policy, or deciding which
+  packets an application is allowed to create.
+- High-level TCP, UDP, HTTP, DNS, routing-protocol, or packet-decoding APIs.
+- Parsing arbitrary upper-layer protocols in the core package.
+- Network configuration protocols such as rtnetlink, TUN/TAP management, or
+  loading eBPF programs. Attaching an already-created compatible filter may be
+  supported without becoming an eBPF loader.
+- Claiming that every kernel-version-, driver-, or hardware-dependent feature is
+  available merely because its constant compiled.
+
+## Milestones
+
+The first usable IPv4 milestone was completed in Phases 1 through 4. Phase 5
+completed the family-neutral message-I/O and ancillary-data foundation. IPv6,
+`AF_PACKET`, extensibility/filtering, performance, and release hardening follow
+as separately gated phases.
+
+## Definition of project success
+
+The project is successful when the capability baseline above is implemented for
+the declared Linux matrix; unsupported combinations fail predictably; resource,
+memory, cancellation, and teardown invariants hold under stress; and published
+artifacts are reproducible and documented. Breadth without those properties is
+not completion.

@@ -1,0 +1,11 @@
+build/
+dist/
+native/target/
+native/fuzz/target/
+node_modules/
+coverage/
+release/
+native/fuzz/artifacts/
+native/fuzz/corpus/
+*.log
+*.node

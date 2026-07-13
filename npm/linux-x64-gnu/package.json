@@ -1,0 +1,28 @@
+{
+  "name": "nodenetraw-linux-x64-gnu",
+  "version": "0.1.0-rc.1",
+  "description": "Linux x86-64 glibc native binding for nodenetraw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opsimathically/nodenetraw.git"
+  },
+  "main": "nodenetraw.linux-x64-gnu.node",
+  "files": [
+    "nodenetraw.linux-x64-gnu.node",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}
