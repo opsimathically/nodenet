@@ -1,6 +1,6 @@
 # Planning index
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Current state
 
@@ -15,6 +15,11 @@ classic/eBPF attachment are included. Rust owns descriptors, syscall buffers,
 readiness state, and pending native operations. Bounded batch message I/O and
 receive-only TPACKET_V3 rings with copied frame leases provide measured
 high-throughput paths without exposing mmap storage.
+
+The public TypeScript surface exports common Linux `IPPROTO_*` and `ETH_P_*`
+constants for readable application code. Protocol fields remain numeric so
+custom and less-common Linux identifiers continue to work without dependency or
+registry coupling.
 
 The post-Phase-10 release-readiness audit supersedes nonblocking N-API callback
 delivery with bounded lossless backpressure, makes close wait for all admitted

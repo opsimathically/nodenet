@@ -24,5 +24,7 @@ release-candidate APIs may change before `0.1.0`.
   native boundaries.
 - Make `sudo npm run test:privileged` build as the invoking repository owner and
   elevate only an isolated network-namespace test process.
+- Export a focused zero-dependency set of Linux `IPPROTO_*` and `ETH_P_*`
+  constants and use them throughout the public examples.
 
 Nothing has been published by the Phase 10 implementation itself.

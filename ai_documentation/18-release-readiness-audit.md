@@ -48,6 +48,9 @@ also remain external compatibility evidence, as documented in the README.
    build, then runs only the already-built suite as root in a disposable network
    namespace. This avoids AppArmor user-namespace restrictions, host-network
    mutation, and root-owned build output.
+8. The public TypeScript API now provides a focused set of zero-dependency Linux
+   `IPPROTO_*` and `ETH_P_*` number constants. Numeric protocols remain accepted
+   for custom identifiers, and all public README examples use the named forms.
 
 D-026 records the completion backpressure tradeoff and D-027 records the GNU
 artifact build/ABI rule.

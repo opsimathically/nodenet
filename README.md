@@ -84,9 +84,9 @@ target-specific release rehearsal. See the
 ## API
 
 ```ts
-import { RawSocket } from "nodenetraw";
+import { IPPROTO_ICMP, RawSocket } from "nodenetraw";
 
-const socket = await RawSocket.open({ protocol: 1 }); // IPPROTO_ICMP
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
 
 try {
   await socket.bind("127.0.0.1");
@@ -129,7 +129,12 @@ const message = await incoming;
 IPv6 uses the same message API with explicit scope and flow fields:
 
 ```ts
-const socket6 = await RawSocket.open({ family: "ipv6", protocol: 58 });
+import { IPPROTO_ICMPV6, RawSocket } from "nodenetraw";
+
+const socket6 = await RawSocket.open({
+  family: "ipv6",
+  protocol: IPPROTO_ICMPV6,
+});
 await socket6.bind({ family: "ipv6", address: "::1" });
 const incoming6 = socket6.receiveMessage();
 await socket6.sendMessage({
@@ -146,18 +151,18 @@ errors are reported through ancillary controls.
 Packet sockets use link-layer addresses and interface indices:
 
 ```ts
-import { RawSocket, interfaceIndex } from "nodenetraw";
+import { ETH_P_IP, RawSocket, interfaceIndex } from "nodenetraw";
 
 const index = interfaceIndex("eth0");
 const packets = await RawSocket.open({
   family: "packet",
   mode: "cooked",
-  protocol: 0x0800,
+  protocol: ETH_P_IP,
 });
 await packets.bind({
   family: "packet",
   interfaceIndex: index,
-  protocol: 0x0800,
+  protocol: ETH_P_IP,
 });
 const message = await packets.receiveMessage();
 ```
@@ -190,8 +195,21 @@ Classic BPF programs contain at most 4096 instructions and are structurally
 checked before Linux performs its verifier pass. `attachEbpfFilter(fd)` attaches
 a close-on-exec duplicate and never consumes the caller's descriptor.
 
-`protocol` must be an integer from 1 through 255. `send()` accepts a non-empty
-`Uint8Array` of at most 65,535 bytes and a dotted-decimal IPv4 destination.
+The package exports a focused set of Linux-compatible `IPPROTO_*` and `ETH_P_*`
+constants for readable socket creation and packet binding. These names are not
+an exhaustive protocol registry; numeric values remain accepted for custom or
+less-common protocols. IP `protocol` values must be integers from 1 through 255,
+while packet-socket protocol values must be integers from 1 through 65,535.
+`send()` accepts a non-empty `Uint8Array` of at most 65,535 bytes and a
+dotted-decimal IPv4 destination.
+
+The IP exports are `IPPROTO_ICMP`, `IPPROTO_IGMP`, `IPPROTO_IPIP`,
+`IPPROTO_TCP`, `IPPROTO_UDP`, `IPPROTO_IPV6`, `IPPROTO_GRE`, `IPPROTO_ESP`,
+`IPPROTO_AH`, `IPPROTO_ICMPV6`, `IPPROTO_SCTP`, `IPPROTO_UDPLITE`, and
+`IPPROTO_RAW`. Packet exports are `ETH_P_ALL`, `ETH_P_IP`, `ETH_P_ARP`,
+`ETH_P_8021Q`, `ETH_P_IPV6`, and `ETH_P_8021AD`. Values match the Linux UAPI
+names and are ordinary zero-dependency TypeScript/JavaScript number exports.
+
 `receive()` accepts an optional buffer length from 1 through 65,535 and returns
 the received bytes, source address, and an explicit truncation flag. `close()`
 is asynchronous and idempotent; it cancels admitted operations and releases the

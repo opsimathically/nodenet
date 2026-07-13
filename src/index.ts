@@ -8,6 +8,29 @@ const MAX_SOCKET_BUFFER_SIZE = 16 * 1024 * 1024;
 const OPEN_OPERATION_ID = 0;
 const MAX_OPERATION_ID = 0xffff_ffff;
 
+/** Common Linux IP protocol numbers accepted by IPv4/IPv6 raw sockets. */
+export const IPPROTO_ICMP = 1;
+export const IPPROTO_IGMP = 2;
+export const IPPROTO_IPIP = 4;
+export const IPPROTO_TCP = 6;
+export const IPPROTO_UDP = 17;
+export const IPPROTO_IPV6 = 41;
+export const IPPROTO_GRE = 47;
+export const IPPROTO_ESP = 50;
+export const IPPROTO_AH = 51;
+export const IPPROTO_ICMPV6 = 58;
+export const IPPROTO_SCTP = 132;
+export const IPPROTO_UDPLITE = 136;
+export const IPPROTO_RAW = 255;
+
+/** Common Linux Ethernet protocol identifiers accepted by packet sockets. */
+export const ETH_P_ALL = 0x0003;
+export const ETH_P_IP = 0x0800;
+export const ETH_P_ARP = 0x0806;
+export const ETH_P_8021Q = 0x8100;
+export const ETH_P_IPV6 = 0x86dd;
+export const ETH_P_8021AD = 0x88a8;
+
 export type RawSocketStatus = "open" | "closing" | "closed";
 
 export type RawSocketErrorKind =

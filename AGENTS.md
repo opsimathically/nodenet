@@ -34,6 +34,8 @@ Bounded `sendmmsg`/`recvmmsg`, measured fairness benchmarks, and receive-only
 TPACKET_V3 rings with copied, explicitly releasable frame leases are included.
 Phase 10 adds fuzz/sanitizer/advisory gates, native x86-64/AArch64 CI, and
 rehearsed `0.1.0-rc.1` target packages. Nothing is published automatically. The
+public TypeScript surface exports a focused set of Linux-compatible `IPPROTO_*`
+and `ETH_P_*` constants while retaining numeric protocols for extensibility. The
 post-Phase-10 release-readiness audit added lossless bounded completion
 backpressure, close/admission ordering, malformed-ring recovery, and an enforced
 glibc artifact baseline. Native AArch64 remains untested until its runner
