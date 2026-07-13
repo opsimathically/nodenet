@@ -391,9 +391,11 @@ rationale to avoid repeating the investigation.
 
 ## Remaining design details
 
-Phase 10 has no remaining design question. Publishing an artifact remains an
-explicit operator action outside implementation. A future TX mmap slice requires
-its own decision and measurements.
+Phase 10 has no remaining design question. Phase 11's core event-adapter
+contract is accepted in D-028 and has no blocker for its first implementation
+slice. Publishing an artifact remains an explicit operator action outside
+implementation. A future TX mmap, stream, async-iterator, batch-event, or
+packet-ring-event slice requires its own decision and measurements.
 
 ### D-026 — Lossless bounded Node completion backpressure
 
@@ -432,6 +434,46 @@ its own decision and measurements.
   reproducibility, and artifact rehearsal all transitively enforce the ABI
   check; installing staged packages still runs no script or download.
 
+### D-028 — Typed event adapter over bounded message receives
+
+- Status: accepted and implemented in Phase 11
+- Date: 2026-07-13
+- Decision: preserve `RawSocket` as the complete low-level promise API and add a
+  separate typed `RawSocketEventEmitter` implemented in TypeScript with Node's
+  built-in `node:events`. Each explicitly started event source repeatedly issues
+  at most one bounded `receiveMessage()` for either the normal or Linux
+  error-queue lane. It provides awaitable pause and detach boundaries, explicit
+  resume, idempotent socket close, and `message`, `error`, and exactly-once
+  `close` events. Module-private lane claims reject conflicting direct, batch,
+  ring, or event receivers with `ERR_RECEIVER_ACTIVE`; packet-ring mode excludes
+  both event lanes. State-transition conflicts use `ERR_INVALID_STATE`. `peek`,
+  automatic start, configurable concurrency, internal message queues, and
+  awaited listener promises are excluded. EventEmitter rejection capture follows
+  the Node process setting; because JavaScript may reject with any value,
+  `error` accepts `unknown`, while adapter-generated receive failures remain
+  `RawSocketError`.
+- Rationale: composition provides familiar Node event ergonomics while reusing
+  the mature native cancellation, ownership, bounds, and error model. Explicit
+  start prevents listener-registration races. One operation and no adapter queue
+  bound retained memory and preserve ordering. Awaitable pause/detach avoids
+  silently losing a receive that wins cancellation. Lane arbitration prevents
+  nondeterministic packet splitting, while separate normal and error lanes
+  preserve useful Linux concurrency.
+- Consequences: the adapter adds no runtime dependency and ordinarily no native
+  or unsafe code. Synchronous listeners delay rearming; asynchronous listeners
+  are not backpressure. Pausing cannot stop kernel ingress or packet loss. A
+  non-lifecycle receive error pauses before emitting `error` and never retries
+  automatically; reactor closure is terminal. The adapter mirrors the existing
+  terminal-on-close-start `RawSocket` contract even when the cached close
+  promise rejects. A pump turn includes fulfilled-but-undispatched delivery;
+  attachment is strongly retained until explicit detach/close; per-operation
+  ring tokens and transactional claim/observer installation prevent mode races;
+  and reactor loss calls low-level close to terminalize admission. Inherited
+  EventEmitter meta-events and error monitoring retain Node semantics.
+  Packet-ring, batch, stream, and async-iterator delivery remain separate
+  designs. The changed release candidate advances to `0.1.0-rc.2`, and all Phase
+  10 artifact/provenance gates must be rerun.
+
 ## Research references
 
 Compatibility facts were verified on 2026-07-12 against primary project
@@ -443,6 +485,8 @@ documentation:
 - [Node-API version matrix](https://nodejs.org/api/n-api.html)
 - [Node.js supported Linux platforms](https://github.com/nodejs/node/blob/main/BUILDING.md)
 - [Node.js ESM and CommonJS interoperability](https://nodejs.org/api/modules.html)
+- [Node.js EventEmitter semantics](https://nodejs.org/api/events.html), checked
+  again for D-028 on 2026-07-13
 - [Rust latest stable release](https://blog.rust-lang.org/releases/latest/)
 - [napi-rs v3 setup and compatibility](https://napi.rs/docs/introduction/getting-started)
 - [napi-rs native package distribution](https://napi.rs/docs/deep-dive/release)

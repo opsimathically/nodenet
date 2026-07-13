@@ -11,6 +11,7 @@ export default tseslint.config(
       "node_modules/",
       "package-lock.json",
       "release/",
+      "test/types/",
     ],
   },
   eslint.configs.recommended,
@@ -23,6 +24,12 @@ export default tseslint.config(
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
+    },
+  },
+  {
+    files: ["src/internal/event-controller.ts"],
+    rules: {
+      "@typescript-eslint/prefer-promise-reject-errors": "off",
     },
   },
   {

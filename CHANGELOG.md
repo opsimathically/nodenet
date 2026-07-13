@@ -3,6 +3,25 @@
 All notable changes use Semantic Versioning. This project is not yet stable;
 release-candidate APIs may change before `0.1.0`.
 
+## 0.1.0-rc.2 - 2026-07-13
+
+- Add the typed, zero-runtime-dependency `RawSocketEventEmitter` adapter with
+  explicit start, awaitable pause/detach, resume, shared-socket close, and
+  exactly-once close events.
+- Keep event reception bounded to one `receiveMessage()` per source and retain
+  fulfilled messages across pause, detach, and close dispatch boundaries.
+- Add independent normal/error-queue receive claims and deterministic
+  `ERR_RECEIVER_ACTIVE` conflicts for direct, batch, event, and packet-ring
+  consumers.
+- Make pending-operation cleanup composable and idempotent so AbortSignal
+  listeners, direct-receive counts, and provisional ring claims settle in a
+  fixed order on every completion path.
+- Add native-free state-machine, listener-exception, fairness, declaration, and
+  lifecycle tests plus privileged repeated IPv4, IPv6, packet, error-queue, and
+  Worker coverage.
+- Document synchronous listener semantics, async rejection behavior, kernel
+  buffering, explicit adapter lifetime, and promise-versus-event API selection.
+
 ## 0.1.0-rc.1 - 2026-07-12
 
 - Add Linux IPv4, IPv6, and raw/cooked packet sockets through Node-API 10.
@@ -27,4 +46,4 @@ release-candidate APIs may change before `0.1.0`.
 - Export a focused zero-dependency set of Linux `IPPROTO_*` and `ETH_P_*`
   constants and use them throughout the public examples.
 
-Nothing has been published by the Phase 10 implementation itself.
+Nothing has been published by the Phase 10 or Phase 11 implementation itself.

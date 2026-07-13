@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { createSocket as createDatagramSocket } from "node:dgram";
+import { once } from "node:events";
 import { closeSync, fstatSync, openSync } from "node:fs";
 import { env } from "node:process";
 import test from "node:test";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
+import { URL } from "node:url";
+import { Worker } from "node:worker_threads";
 
-import { RawSocket, interfaceIndex, interfaceName } from "../dist/index.js";
+import {
+  IPPROTO_ICMP,
+  IPPROTO_ICMPV6,
+  IPPROTO_UDP,
+  RawSocket,
+  RawSocketEventEmitter,
+  interfaceIndex,
+  interfaceName,
+} from "../dist/index.js";
 
 const privilegedTestsEnabled = env.NODENETRAW_PRIVILEGED_TESTS === "1";
 
@@ -190,6 +202,51 @@ test(
       assert.ok(frame.packetAuxdata !== undefined);
       assert.equal(frame.packetAuxdata.originalLength, frame.dataLength);
 
+      assert.throws(
+        () => new RawSocketEventEmitter(rawReceiver, { errorQueue: true }),
+        { code: "ERR_UNSUPPORTED" },
+      );
+      const packetEvents = new RawSocketEventEmitter(rawReceiver);
+      const eventPayloads = [
+        Buffer.from("event-cooked-to-raw-1"),
+        Buffer.from("event-cooked-to-raw-2"),
+      ];
+      const eventFrames = collectMessages(
+        packetEvents,
+        eventPayloads.length,
+        (message) =>
+          message.source?.family === "packet" &&
+          eventPayloads.some((candidate) =>
+            message.data.subarray(-candidate.length).equals(candidate),
+          ),
+      );
+      packetEvents.start();
+      await setImmediate();
+      for (const eventPayload of eventPayloads) {
+        await cookedSender.sendMessage({
+          data: eventPayload,
+          destination: {
+            family: "packet",
+            interfaceIndex: firstIndex,
+            protocol,
+            address: secondMac,
+          },
+        });
+      }
+      const deliveredFrames = await withDeadline(
+        eventFrames,
+        "packet event delivery",
+      );
+      assert.equal(deliveredFrames.length, 2);
+      for (const delivered of deliveredFrames) {
+        assert.equal(delivered.source?.family, "packet");
+        assert.equal(delivered.source?.interfaceIndex, secondIndex);
+        assert.ok(delivered.packetAuxdata !== undefined);
+      }
+      await packetEvents.pause();
+      assert.equal(packetEvents.status, "paused");
+      assert.equal(await packetEvents.detach(), rawReceiver);
+
       const cookedReceiver = await RawSocket.open({
         family: "packet",
         mode: "cooked",
@@ -314,11 +371,58 @@ test(
         interfaceIndex: secondIndex,
         protocol: 0x88b7,
       });
-      await ringReceiver.configurePacketRing({
+      const prematureRingReceive = ringReceiver.receiveRingFrame();
+      assert.throws(() => new RawSocketEventEmitter(ringReceiver), {
+        code: "ERR_RECEIVER_ACTIVE",
+      });
+      await assert.rejects(prematureRingReceive, { code: "ERR_UNSUPPORTED" });
+
+      const preRingEvents = new RawSocketEventEmitter(ringReceiver);
+      await assert.rejects(
+        ringReceiver.configurePacketRing({
+          blockSize: 4096,
+          blockCount: 2,
+          frameSize: 2048,
+          retireTimeoutMs: 16,
+        }),
+        { code: "ERR_RECEIVER_ACTIVE" },
+      );
+      await preRingEvents.detach();
+      const firstRingConfiguration = ringReceiver.configurePacketRing({
         blockSize: 4096,
         blockCount: 2,
         frameSize: 2048,
         retireTimeoutMs: 16,
+      });
+      const secondRingConfiguration = ringReceiver.configurePacketRing({
+        blockSize: 4096,
+        blockCount: 2,
+        frameSize: 2048,
+        retireTimeoutMs: 16,
+      });
+      assert.throws(() => new RawSocketEventEmitter(ringReceiver), {
+        code: "ERR_RECEIVER_ACTIVE",
+      });
+      const configurationOutcomes = await Promise.allSettled([
+        firstRingConfiguration,
+        secondRingConfiguration,
+      ]);
+      assert.equal(
+        configurationOutcomes.filter(
+          (outcome) => outcome.status === "fulfilled",
+        ).length,
+        1,
+      );
+      assert.equal(
+        configurationOutcomes.filter(
+          (outcome) =>
+            outcome.status === "rejected" &&
+            outcome.reason?.code === "ERR_UNSUPPORTED",
+        ).length,
+        1,
+      );
+      assert.throws(() => new RawSocketEventEmitter(ringReceiver), {
+        code: "ERR_UNSUPPORTED",
       });
       await ringSender.bind({
         family: "packet",
@@ -602,23 +706,384 @@ test(
   },
 );
 
-function createEchoRequest() {
+test(
+  "delivers ordered IPv4 message events across pause, resume, detach, and close",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+    await socket.bind("127.0.0.1");
+    for (const options of [
+      null,
+      { dataCapacity: 0 },
+      { dataCapacity: 65_536 },
+      { controlCapacity: -1 },
+      { controlCapacity: 65_537 },
+      { errorQueue: "yes" },
+    ]) {
+      assert.throws(() => new RawSocketEventEmitter(socket, options), {
+        code: "ERR_INVALID_ARGUMENT",
+        operation: "createRawSocketEventEmitter",
+      });
+    }
+
+    const directAbort = new globalThis.AbortController();
+    const directReceive = socket.receiveMessage({ signal: directAbort.signal });
+    assert.throws(() => new RawSocketEventEmitter(socket), {
+      code: "ERR_RECEIVER_ACTIVE",
+    });
+    directAbort.abort();
+    await assert.rejects(directReceive, { code: "ERR_ABORTED" });
+
+    const source = new RawSocketEventEmitter(socket);
+    assert.equal(source.socket, socket);
+    assert.throws(() => new RawSocketEventEmitter(socket), {
+      code: "ERR_RECEIVER_ACTIVE",
+    });
+    await assert.rejects(socket.receiveMessage(), {
+      code: "ERR_RECEIVER_ACTIVE",
+    });
+    await assert.rejects(socket.receive(), { code: "ERR_RECEIVER_ACTIVE" });
+    await assert.rejects(socket.receiveBatch({ count: 1 }), {
+      code: "ERR_RECEIVER_ACTIVE",
+    });
+
+    const sequences = [];
+    let pauseBoundary;
+    let firstResolve;
+    let firstReject;
+    let secondResolve;
+    let secondReject;
+    const first = new Promise((resolve, reject) => {
+      firstResolve = resolve;
+      firstReject = reject;
+    });
+    const second = new Promise((resolve, reject) => {
+      secondResolve = resolve;
+      secondReject = reject;
+    });
+    source.on("error", (error) => {
+      firstReject(error);
+      secondReject(error);
+    });
+    source.on("message", (message) => {
+      const sequence = icmpv4EchoSequence(message);
+      if (sequence === undefined || sequence < 11 || sequence > 12) return;
+      sequences.push(sequence);
+      if (sequences.length === 1) {
+        pauseBoundary = source.pause();
+        firstResolve();
+      } else if (sequences.length === 2) {
+        secondResolve();
+      }
+    });
+    assert.equal(source.start(), source);
+    await setImmediate();
+    await socket.send(createEchoRequest(11), "127.0.0.1");
+    await withDeadline(first, "first IPv4 event");
+    await pauseBoundary;
+    assert.equal(source.status, "paused");
+
+    await socket.send(createEchoRequest(12), "127.0.0.1");
+    await delay(20, undefined, { ref: false });
+    assert.deepEqual(sequences, [11]);
+    assert.equal(source.resume(), source);
+    await withDeadline(second, "resumed IPv4 event");
+    assert.deepEqual(sequences, [11, 12]);
+
+    await source.pause();
+    assert.equal(await source.detach(), socket);
+    assert.equal(source.status, "detached");
+
+    const closingSource = new RawSocketEventEmitter(socket);
+    const closeEvent = once(closingSource, "close");
+    let adapterClose;
+    const finalMessage = new Promise((resolve, reject) => {
+      closingSource.on("error", reject);
+      closingSource.on("message", (message) => {
+        if (icmpv4EchoSequence(message) !== 13) return;
+        adapterClose = closingSource.close();
+        resolve();
+      });
+    });
+    closingSource.start();
+    await setImmediate();
+    await socket.send(createEchoRequest(13), "127.0.0.1");
+    await withDeadline(finalMessage, "closing IPv4 event");
+    await withDeadline(closeEvent, "IPv4 close event");
+    await adapterClose;
+    assert.equal(closingSource.status, "closed");
+    assert.equal(socket.status, "closed");
+  },
+);
+
+test(
+  "delivers repeated IPv6 message events with ancillary metadata",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const socket = await RawSocket.open({
+      family: "ipv6",
+      protocol: IPPROTO_ICMPV6,
+    });
+    try {
+      await socket.bind({ family: "ipv6", address: "::1" });
+      await socket.setOption("receivePacketInfo", true);
+      await socket.setOption("receiveHopLimit", true);
+      const source = new RawSocketEventEmitter(socket);
+      const messages = collectMessages(source, 3, (message) => {
+        const sequence = icmpv6EchoSequence(message);
+        return sequence !== undefined && sequence >= 21 && sequence <= 23;
+      });
+      source.start();
+      await setImmediate();
+      for (const sequence of [21, 22, 23]) {
+        await socket.sendMessage({
+          data: createEchoRequestV6(sequence),
+          destination: { family: "ipv6", address: "::1" },
+        });
+      }
+      const delivered = await withDeadline(messages, "IPv6 event delivery");
+      assert.deepEqual(delivered.map(icmpv6EchoSequence), [21, 22, 23]);
+      for (const message of delivered) {
+        assert.equal(message.source?.family, "ipv6");
+        assert.ok(
+          message.control.some((control) => control.kind === "ipv6PacketInfo"),
+        );
+        assert.ok(
+          message.control.some((control) => control.kind === "ipv6HopLimit"),
+        );
+      }
+      await source.pause();
+      await source.detach();
+    } finally {
+      await socket.close();
+    }
+  },
+);
+
+test(
+  "keeps normal and Linux error-queue event lanes independent",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const socket = await RawSocket.open({ protocol: IPPROTO_UDP });
+    const udpReceiver = createDatagramSocket("udp4");
+    let udpReceiverOpen = true;
+    try {
+      await socket.bind("127.0.0.1");
+      await socket.setOption("receiveErrors", true);
+      await new Promise((resolve, reject) => {
+        udpReceiver.once("error", reject);
+        udpReceiver.bind(49_271, "127.0.0.1", resolve);
+      });
+      const normal = new RawSocketEventEmitter(socket);
+      const errors = new RawSocketEventEmitter(socket, { errorQueue: true });
+      assert.throws(() => new RawSocketEventEmitter(socket), {
+        code: "ERR_RECEIVER_ACTIVE",
+      });
+      assert.throws(
+        () => new RawSocketEventEmitter(socket, { errorQueue: true }),
+        { code: "ERR_RECEIVER_ACTIVE" },
+      );
+      await assert.rejects(socket.receiveMessage({ flags: ["errorQueue"] }), {
+        code: "ERR_RECEIVER_ACTIVE",
+      });
+
+      const sourcePort = 45_271;
+      const destinationPort = 49_271;
+      const normalMessage = firstMessage(normal, (message) =>
+        isIpv4UdpPorts(message, sourcePort, destinationPort),
+      );
+      const errorMessage = firstMessage(
+        errors,
+        (message) =>
+          message.flags.includes("errorQueue") &&
+          message.control.some(
+            (control) => control.kind === "ipv4ExtendedError",
+          ),
+      );
+      normal.start();
+      errors.start();
+      await setImmediate();
+      await socket.sendMessage({
+        data: createUdpHeader(sourcePort, destinationPort),
+        destination: { family: "ipv4", address: "127.0.0.1" },
+      });
+      const outbound = await withDeadline(normalMessage, "normal UDP delivery");
+
+      await new Promise((resolve) => udpReceiver.close(resolve));
+      udpReceiverOpen = false;
+      await socket.sendMessage({
+        data: createUdpHeader(sourcePort, destinationPort),
+        destination: { family: "ipv4", address: "127.0.0.1" },
+      });
+
+      const queuedError = await withDeadline(
+        errorMessage,
+        "error-queue delivery",
+      );
+      assert.equal(outbound.flags.includes("errorQueue"), false);
+      assert.equal(queuedError.flags.includes("errorQueue"), true);
+      const extended = queuedError.control.find(
+        (control) => control.kind === "ipv4ExtendedError",
+      );
+      assert.equal(extended?.errno, 111);
+      assert.equal(extended?.type, 3);
+      assert.equal(extended?.code, 3);
+
+      const siblingClose = once(errors, "close");
+      await normal.close();
+      await withDeadline(siblingClose, "shared error-lane close");
+      assert.equal(normal.status, "closed");
+      assert.equal(errors.status, "closed");
+    } finally {
+      if (udpReceiverOpen) udpReceiver.close();
+      await socket.close();
+    }
+  },
+);
+
+test(
+  "cleans up event sources during cooperative and forced Worker teardown",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const externallyClosedSocket = await RawSocket.open({ protocol: 253 });
+    const externallyClosedSource = new RawSocketEventEmitter(
+      externallyClosedSocket,
+    );
+    const externalCloseEvent = once(externallyClosedSource, "close");
+    externallyClosedSource.start();
+    const rawClose = externallyClosedSocket.close();
+    const adapterClose = externallyClosedSource.close();
+    assert.equal(adapterClose, externallyClosedSource.close());
+    await rawClose;
+    await adapterClose;
+    await withDeadline(externalCloseEvent, "external raw-socket close event");
+    assert.equal(externallyClosedSource.status, "closed");
+
+    const retainedSocket = await RawSocket.open({ protocol: 253 });
+    new RawSocketEventEmitter(retainedSocket);
+    await assert.rejects(retainedSocket.receiveMessage(), {
+      code: "ERR_RECEIVER_ACTIVE",
+    });
+    await retainedSocket.close();
+
+    const fixture = new URL("./fixtures/event-worker.mjs", import.meta.url);
+    const cooperative = new Worker(fixture);
+    const cooperativeExit = once(cooperative, "exit");
+    const [ready] = await withDeadline(
+      once(cooperative, "message"),
+      "cooperative Worker startup",
+    );
+    assert.deepEqual(ready, { ready: true });
+    cooperative.postMessage("close");
+    const [closed] = await withDeadline(
+      once(cooperative, "message"),
+      "cooperative Worker close",
+    );
+    assert.deepEqual(closed, { closed: true });
+    assert.equal((await cooperativeExit)[0], 0);
+
+    const forced = new Worker(fixture);
+    const [forcedReady] = await withDeadline(
+      once(forced, "message"),
+      "forced Worker startup",
+    );
+    assert.deepEqual(forcedReady, { ready: true });
+    assert.equal(await forced.terminate(), 1);
+  },
+);
+
+function createEchoRequest(sequence = 1) {
   const packet = Buffer.alloc(12);
   packet[0] = 8;
   packet.writeUInt16BE(0x4e52, 4);
-  packet.writeUInt16BE(1, 6);
+  packet.writeUInt16BE(sequence, 6);
   packet.writeUInt32BE(0x6e6f6465, 8);
   packet.writeUInt16BE(internetChecksum(packet), 2);
   return packet;
 }
 
-function createEchoRequestV6() {
+function createEchoRequestV6(sequence = 1) {
   const packet = Buffer.alloc(12);
   packet[0] = 128;
   packet.writeUInt16BE(0x4e52, 4);
-  packet.writeUInt16BE(1, 6);
+  packet.writeUInt16BE(sequence, 6);
   packet.writeUInt32BE(0x76366e72, 8);
   return packet;
+}
+
+function createUdpHeader(sourcePort, destinationPort) {
+  const packet = Buffer.alloc(8);
+  packet.writeUInt16BE(sourcePort, 0);
+  packet.writeUInt16BE(destinationPort, 2);
+  packet.writeUInt16BE(packet.length, 4);
+  return packet;
+}
+
+function icmpv4EchoSequence(message) {
+  if (message.data.length < 28 || message.data[9] !== IPPROTO_ICMP) {
+    return undefined;
+  }
+  const headerLength = (message.data[0] & 0x0f) * 4;
+  if (
+    headerLength < 20 ||
+    message.data.length < headerLength + 8 ||
+    message.data[headerLength] !== 8 ||
+    message.data.readUInt16BE(headerLength + 4) !== 0x4e52
+  ) {
+    return undefined;
+  }
+  return message.data.readUInt16BE(headerLength + 6);
+}
+
+function icmpv6EchoSequence(message) {
+  if (
+    message.data.length < 8 ||
+    message.data[0] !== 128 ||
+    message.data.readUInt16BE(4) !== 0x4e52
+  ) {
+    return undefined;
+  }
+  return message.data.readUInt16BE(6);
+}
+
+function isIpv4UdpPorts(message, sourcePort, destinationPort) {
+  if (message.data.length < 28 || message.data[9] !== IPPROTO_UDP) return false;
+  const headerLength = (message.data[0] & 0x0f) * 4;
+  return (
+    message.data.length >= headerLength + 8 &&
+    message.data.readUInt16BE(headerLength) === sourcePort &&
+    message.data.readUInt16BE(headerLength + 2) === destinationPort
+  );
+}
+
+function firstMessage(source, predicate) {
+  return new Promise((resolve, reject) => {
+    source.on("error", reject);
+    source.on("message", (message) => {
+      if (predicate(message)) resolve(message);
+    });
+  });
+}
+
+function collectMessages(source, count, predicate = () => true) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    source.on("error", reject);
+    source.on("message", (message) => {
+      if (!predicate(message)) return;
+      messages.push(message);
+      if (messages.length === count) resolve(messages);
+    });
+  });
+}
+
+async function withDeadline(promise, description) {
+  return Promise.race([
+    promise,
+    delay(2_000, undefined, { ref: false }).then(() => {
+      throw new Error(`timed out waiting for ${description}`);
+    }),
+  ]);
 }
 
 function internetChecksum(bytes) {

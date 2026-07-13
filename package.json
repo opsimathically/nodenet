@@ -1,6 +1,6 @@
 {
   "name": "nodenetraw",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Linux raw sockets for Node.js, implemented in Rust through Node-API",
   "license": "MIT",
   "keywords": [
@@ -60,11 +60,13 @@
     "rust:fmt": "cargo fmt --manifest-path native/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path native/Cargo.toml --all-targets --locked -- -D warnings",
     "rust:test": "cargo test --manifest-path native/Cargo.toml --locked",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test:types": "tsc -p test/types/tsconfig.json --noEmit",
     "test:privileged": "sh test/run-privileged.sh root",
     "test:namespace": "sh test/run-privileged.sh namespace",
     "benchmark:namespace": "npm run build:native:release && npm run build:typescript && sh test/run-benchmark-namespace.sh",
     "test:phase9:stress": "npm run build && sh test/run-phase9-stress-namespace.sh",
+    "test:phase11:stress": "sh test/run-privileged.sh root event-stress",
     "hardening:verify": "node scripts/verify-release.mjs",
     "hardening:stress": "npm run test:phase9:stress",
     "fuzz": "cargo +nightly fuzz run surface --fuzz-dir native/fuzz -- -max_total_time=60",

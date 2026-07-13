@@ -24,7 +24,7 @@ packet bytes and invalid arguments is in scope.
 
 ## Current phase
 
-Phases 1 through 10 are complete. `RawSocket` exposes bounded IPv4/IPv6 raw and
+Phases 1 through 11 are complete. `RawSocket` exposes bounded IPv4/IPv6 raw and
 Linux packet raw/cooked message I/O, scoped and link addresses, typed metadata,
 AbortSignal cancellation, stable errors, and idempotent close. One
 environment-scoped reactor fairly serializes native work. Advanced typed and
@@ -33,13 +33,21 @@ auxdata/statistics/fanout, and classic/eBPF filter attachment are implemented.
 Bounded `sendmmsg`/`recvmmsg`, measured fairness benchmarks, and receive-only
 TPACKET_V3 rings with copied, explicitly releasable frame leases are included.
 Phase 10 adds fuzz/sanitizer/advisory gates, native x86-64/AArch64 CI, and
-rehearsed `0.1.0-rc.1` target packages. Nothing is published automatically. The
-public TypeScript surface exports a focused set of Linux-compatible `IPPROTO_*`
-and `ETH_P_*` constants while retaining numeric protocols for extensibility. The
+rehearsed target packages. Nothing is published automatically. The public
+TypeScript surface exports a focused set of Linux-compatible `IPPROTO_*` and
+`ETH_P_*` constants while retaining numeric protocols for extensibility. The
 post-Phase-10 release-readiness audit added lossless bounded completion
 backpressure, close/admission ordering, malformed-ring recovery, and an enforced
-glibc artifact baseline. Native AArch64 remains untested until its runner
-passes.
+glibc artifact baseline. Phase 11 adds the zero-dependency typed
+`RawSocketEventEmitter` over `receiveMessage()` with one receive per source,
+explicit start, awaitable pause/detach, receive-lane ownership,
+fulfilled-before-boundary dispatch, explicit attachment lifetime, and
+exactly-once close. The package is now the unpublished `0.1.0-rc.2` candidate.
+Its authoritative contract, feasibility audit, and completion report are
+`ai_documentation/19-phase-11-event-api-plan.md`,
+`ai_documentation/20-phase-11-plan-review.md`, and
+`ai_documentation/21-phase-11-report.md`. Native AArch64 remains untested until
+its runner passes.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -137,6 +145,12 @@ or dependency directories.
 
 - Keep the JavaScript layer thin. Native ownership and syscall semantics belong
   in Rust; ergonomic TypeScript types and stable exports belong in TypeScript.
+- Phase 11 event reception must remain an adapter over `receiveMessage()`: do
+  not create a parallel native receive loop, add automatic `peek`, or introduce
+  an unbounded JavaScript queue.
+- Treat a fulfilled message awaiting dispatch as part of the active event turn;
+  use one generation-checked scheduler, transactional claims/observers, distinct
+  ring-operation tokens, and explicit detach/close rather than GC claim release.
 - Prefer additive, reviewable API slices over attempting every raw socket
   feature in one change.
 - Pair each exported native operation with argument validation, lifecycle
@@ -180,6 +194,9 @@ Install reproducibly with `npm ci`. The supported commands are:
   measurements; informative rather than a timing-sensitive CI gate.
 - `npm run test:phase9:stress`: 256 isolated packet-ring configure/cancel/close
   cycles with descriptor and bounded RSS checks.
+- `sudo npm run test:phase11:stress`: 256 isolated event-adapter socket cycles,
+  each with repeated start/pause/resume and alternating detach/close, plus
+  descriptor and bounded RSS checks. The build runs as the repository owner.
 - `npm run hardening:verify`: release version, platform, license, dependency,
   target-manifest, and production advisory policy.
 - `npm run fuzz`: one minute of syscall-free parser/serializer libFuzzer work;
@@ -234,3 +251,11 @@ Do not report a change as verified without naming which gates actually ran.
 - `ai_documentation/15-phase-8-report.md`: advanced option/filter verification.
 - `ai_documentation/16-phase-9-report.md`: batch/ring benchmarks and stress.
 - `ai_documentation/17-phase-10-report.md`: release hardening and distribution.
+- `ai_documentation/18-release-readiness-audit.md`: post-Phase-10 correctness
+  and artifact audit.
+- `ai_documentation/19-phase-11-event-api-plan.md`: frozen event-adapter API,
+  lifecycle, ownership, testing, and release contract.
+- `ai_documentation/20-phase-11-plan-review.md`: implementation-feasibility and
+  completeness audit for Phase 11.
+- `ai_documentation/21-phase-11-report.md`: event adapter implementation and
+  verification record.

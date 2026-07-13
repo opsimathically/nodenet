@@ -7,9 +7,21 @@ import { Worker } from "node:worker_threads";
 import {
   RawSocket,
   RawSocketError,
+  RawSocketEventEmitter,
   interfaceIndex,
   interfaceName,
 } from "../dist/index.js";
+
+test("rejects forged event adapter sockets at runtime", () => {
+  const forged = new RawSocket();
+  assert.throws(() => new RawSocketEventEmitter(forged), {
+    code: "ERR_INVALID_ARGUMENT",
+    operation: "createRawSocketEventEmitter",
+  });
+  assert.throws(() => new RawSocketEventEmitter({}), {
+    code: "ERR_INVALID_ARGUMENT",
+  });
+});
 
 test("rejects malformed open options at the public boundary", async () => {
   const invalidOptions = [
@@ -173,6 +185,19 @@ test("preserves Linux permission errors or safely closes an available socket", a
     code: "ERR_ABORTED",
     kind: "aborted",
   });
+  const events = new RawSocketEventEmitter(socket);
+  assert.equal(events.socket, socket);
+  assert.equal(events.status, "idle");
+  assert.throws(() => {
+    events.socket = new RawSocket();
+  }, TypeError);
+  assert.throws(() => new RawSocketEventEmitter(socket), {
+    code: "ERR_RECEIVER_ACTIVE",
+  });
+  await events.pause();
+  assert.equal(events.status, "paused");
+  assert.equal(await events.detach(), socket);
+  assert.equal(events.status, "detached");
   await socket.close();
   assert.equal(socket.status, "closed");
   await socket.close();
@@ -184,6 +209,9 @@ test("preserves Linux permission errors or safely closes an available socket", a
     code: "ERR_SOCKET_CLOSED",
   });
   await assert.rejects(socket.getOption("ipTtl"), {
+    code: "ERR_SOCKET_CLOSED",
+  });
+  assert.throws(() => new RawSocketEventEmitter(socket), {
     code: "ERR_SOCKET_CLOSED",
   });
 });

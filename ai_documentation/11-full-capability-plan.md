@@ -1,6 +1,6 @@
 # Full raw-networking capability plan
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Purpose
 
@@ -29,6 +29,13 @@ mirrors.
 Netlink configuration, TUN/TAP management, protocol decoders, firewall policy,
 and eBPF program loading remain outside the baseline. AF_XDP is a post-baseline
 evaluation, not a prerequisite for the first stable release.
+
+The low-level capability baseline was implemented through Phase 10. Phase 11
+implements an additive ergonomic layer: a typed, zero-dependency EventEmitter
+repeatedly uses the existing one-message substrate without adding or weakening
+native capabilities. Its exact contract lives in
+`19-phase-11-event-api-plan.md`; stream, batch-event, and packet-ring-event
+adapters remain separate follow-up designs.
 
 ## Public API direction
 

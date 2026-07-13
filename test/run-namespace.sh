@@ -9,7 +9,18 @@ if [ "${NODENETRAW_IN_NAMESPACE:-0}" = "1" ]; then
   ip link set nr-veth0 up
   ip link set nr-veth1 up
   node=${NODENETRAW_NODE:-$(command -v node)}
-  exec env NODENETRAW_PRIVILEGED_TESTS=1 "$node" --test test/privileged.test.mjs
+  case "${NODENETRAW_TEST_SUITE:-privileged}" in
+    privileged)
+      exec env NODENETRAW_PRIVILEGED_TESTS=1 "$node" --test test/privileged.test.mjs
+      ;;
+    event-stress)
+      exec "$node" test/phase11-event-stress.mjs
+      ;;
+    *)
+      echo "unknown privileged test suite: ${NODENETRAW_TEST_SUITE:-}" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 if [ "$(id -u)" -eq 0 ]; then

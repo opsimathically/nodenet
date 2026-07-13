@@ -58,7 +58,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "import('nodenetraw').then(m => { if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok') process.exit(1) })",
+      "const m = await import('nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function') process.exit(1); try { await import('nodenetraw/internal/event-controller.js'); process.exit(1) } catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') process.exit(1) }",
     ],
     { cwd: consumer },
   );
@@ -66,7 +66,7 @@ try {
     process.execPath,
     [
       "--eval",
-      "if (require('nodenetraw').nativeSmokeTest() !== 'nodenetraw:napi-ok') process.exit(1)",
+      "const m = require('nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function') process.exit(1)",
     ],
     { cwd: consumer },
   );

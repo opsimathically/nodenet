@@ -317,6 +317,54 @@ clean-build reproducibility are implemented. All local x86-64 gates pass. Native
 AArch64 is a blocking CI/publication gate and has not been represented as
 locally tested. See the [Phase 10 report](17-phase-10-report.md).
 
+## Phase 11 — Event-driven receive adapter
+
+Status: implementation complete (2026-07-13)
+
+Purpose: add a familiar Node `EventEmitter` receive style as an optional,
+zero-dependency TypeScript layer over the complete promise-oriented `RawSocket`
+API. The exact contract is frozen in the
+[Phase 11 plan](19-phase-11-event-api-plan.md).
+
+Deliverables:
+
+- export a typed `RawSocketEventEmitter` that wraps an open `RawSocket` and uses
+  Node's built-in `node:events`;
+- preserve every existing low-level method and avoid new Rust/N-API work unless
+  a newly documented native requirement is proven;
+- emit `message`, `error`, and exactly-once `close` events with explicit start,
+  awaitable pause, resume, detach, and close lifecycle operations;
+- keep one bounded `receiveMessage()` in flight per normal or error-queue event
+  source, retain a fulfilled-but-undispatched result through lifecycle
+  boundaries, and prohibit `peek` in an automatically rearmed loop;
+- arbitrate normal/error receive lanes so direct, batch, ring, and event
+  consumers cannot silently split the same traffic;
+- make pending-operation finalizers composable before adding claims, and treat
+  each packet-ring attempt/ring-frame receive as socket-wide relative to both
+  event lanes;
+- use transactional runtime-authenticated claims/observers, explicit
+  detach/close lifetime rather than GC release, and terminalize the wrapped
+  socket on reactor loss;
+- document synchronous EventEmitter delivery, async-listener limitations, kernel
+  buffering/drop behavior, and safe retained message ownership;
+- add deterministic controller tests, unprivileged boundary/race tests, isolated
+  multi-message family tests, Worker teardown, and long-running state stress;
+- refresh the release candidate and provenance after the public API changes.
+
+Exit gate: the promise API remains compatible; the event adapter has no
+unbounded queue or runtime dependency; pause/detach/close have proven race
+boundaries; conflicting receivers fail deterministically; repeated IPv4, IPv6,
+packet, and error-queue events pass; and all ordinary, privileged, stress,
+consumer, and release gates are recorded.
+
+Implementation evidence: the native-free controller, composable pending
+finalizers, runtime-authenticated lane claims, close observers, public typed
+EventEmitter, declaration fixture, listener subprocess probes, genuine
+multi-message namespace coverage, Worker teardown, and repeat-cycle fd/RSS
+stress are implemented. No Rust, syscall, N-API, unsafe-code, or production
+dependency change was required. See the
+[Phase 11 report](21-phase-11-report.md).
+
 ## Cross-phase rule
 
 Do not expand breadth while a known descriptor-lifetime, buffer-lifetime,

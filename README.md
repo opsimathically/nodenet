@@ -7,8 +7,9 @@ reporting, and a small dependency footprint.
 
 > **Status:** IPv4, IPv6, and raw/cooked Linux packet sockets support typed
 > message I/O, metadata, advanced options, packet controls, filter attachment,
-> AbortSignal cancellation, stable errors, and explicit close. Version
-> `0.1.0-rc.1` is a release candidate; Phase 10 does not publish it.
+> AbortSignal cancellation, stable errors, explicit close, and an optional typed
+> event-driven receive adapter. Version `0.1.0-rc.2` is an unpublished release
+> candidate.
 
 The initial support baseline is Node.js 26+, Rust 1.97.0 (updated with each
 stable Rust release), and 64-bit glibc Linux on x86-64 or AArch64 with kernel
@@ -58,10 +59,10 @@ toolchain and rejected unless ELF inspection proves that its required glibc
 symbols are at or below 2.28. This verifies the addon's link baseline; the
 package still requires glibc 2.28 because that is the supported Node 26 floor.
 
-Phases 5 through 10 are complete: bounded message I/O, cancellation, IPv4/IPv6,
+Phases 5 through 11 are complete: bounded message I/O, cancellation, IPv4/IPv6,
 Linux `AF_PACKET`, advanced configuration, filtering, batching, and measured
-receive-ring work are in place, together with fuzz/sanitizer gates and
-target-specific release rehearsal. See the
+receive-ring work are in place, together with the event receive adapter,
+fuzz/sanitizer gates, and target-specific release rehearsal. See the
 [full capability plan](ai_documentation/11-full-capability-plan.md).
 
 ## Supported feature matrix
@@ -75,6 +76,7 @@ target-specific release rehearsal. See the
 | Classic BPF and compatible eBPF attachment | Implemented           | Linux verifier applies; this module does not load eBPF programs                          |
 | `sendmmsg`/`recvmmsg` batches              | Implemented           | 64 messages and 1 MiB per operation                                                      |
 | TPACKET_V3 receive ring                    | Implemented           | Receive-only, copied frame leases, 64 MiB per ring                                       |
+| Typed EventEmitter receive adapter         | Implemented           | One bounded receive per source; normal and error-queue lanes are independent             |
 | Hardware timestamps and driver behavior    | Capability-detected   | Not a portable release gate                                                              |
 | TX packet mmap and AF_XDP                  | Unsupported           | Require separate ownership and performance reviews                                       |
 | x86-64 glibc Linux                         | Tested                | Kernel 4.18+, glibc 2.28+, Node 26+                                                      |
@@ -125,6 +127,98 @@ await socket.sendMessage({
 });
 const message = await incoming;
 ```
+
+### Promise and event receive styles
+
+The low-level promise API remains the most direct choice for one receive, an
+explicit loop, `AbortSignal` control, batches, or packet-ring leases. The
+optional `RawSocketEventEmitter` continuously rearms one bounded
+`receiveMessage()` operation and exposes ordinary synchronous Node events:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  RawSocketError,
+  RawSocketEventEmitter,
+} from "nodenetraw";
+
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+await socket.bind("127.0.0.1");
+
+const source = new RawSocketEventEmitter(socket, {
+  dataCapacity: 65_535,
+  controlCapacity: 4_096,
+});
+
+source.on("message", (message) => {
+  console.log(message.source, message.control, message.data);
+});
+source.on("error", (error: unknown) => {
+  if (error instanceof RawSocketError) {
+    console.error(error.operation, error.code, error.errnoName);
+  } else {
+    // With Node's captureRejections enabled, this may be a listener rejection.
+    console.error("event listener failed", error);
+  }
+});
+source.once("close", () => console.log("socket closed"));
+
+source.start(); // Explicit: no packet is consumed before this call.
+
+// Later, stop admission and wait until no further message can be emitted.
+await source.pause();
+source.resume();
+
+// This closes the wrapped RawSocket and emits one library-generated `close`.
+await source.close();
+```
+
+| Choose promises when…                              | Choose events when…                                  |
+| -------------------------------------------------- | ---------------------------------------------------- |
+| each receive belongs to an explicit async workflow | a long-lived Node-style message listener is natural  |
+| you need caller-owned cancellation or batching     | one ordered message at a time is the desired pacing  |
+| you use `receiveRingFrame()` leases                | you use ordinary non-ring `receiveMessage()` results |
+
+Construction snapshots its options but does not start receiving. `start()` and
+`resume()` return the source synchronously. `pause()` returns a cached boundary
+promise and resolves only after an already-received message or error has been
+dispatched. `detach()` permanently quiesces the source, releases its receive
+lane, and resolves to the still-open `RawSocket`:
+
+```ts
+await source.pause();
+const lowLevelSocket = await source.detach();
+const next = await lowLevelSocket.receiveMessage();
+```
+
+The readonly status is one of `idle`, `running`, `pausing`, `paused`,
+`detaching`, `detached`, `closing`, or `closed`. Invalid lifecycle transitions
+use `ERR_INVALID_STATE`. An idle or paused source still owns its lane; only
+`detach()` or terminal socket close releases it.
+
+Normal traffic and Linux's error queue are separate lanes. At most one event
+source can own each lane, so both can operate on the same IP socket:
+
+```ts
+await socket.setOption("receiveErrors", true);
+const messages = new RawSocketEventEmitter(socket);
+const networkErrors = new RawSocketEventEmitter(socket, { errorQueue: true });
+networkErrors.on("message", (message) => {
+  // These are MSG_ERRQUEUE messages, not EventEmitter `error` events.
+  console.log(message.flags, message.control);
+});
+messages.on("error", handleReceiveFailure);
+networkErrors.on("error", handleReceiveFailure);
+messages.start();
+networkErrors.start();
+```
+
+Conflicting direct, batch, ring, or duplicate event receivers fail with
+`ERR_RECEIVER_ACTIVE` rather than silently splitting packets. Packet sockets do
+not support `errorQueue: true`, and an active TPACKET ring cannot be wrapped by
+the message-event adapter. Calling `close()` on either of two lane sources
+closes their shared socket; each source emits its own exactly-once `close`.
 
 IPv6 uses the same message API with explicit scope and flow fields:
 
@@ -266,7 +360,34 @@ fields. It is `undefined` when a short capture cannot be parsed safely.
 Failures are `RawSocketError` instances with stable `kind`, `code`, `operation`,
 optional numeric `errno`, and optional `errnoName` fields. Queue limits fail
 immediately with `ERR_QUEUE_FULL`; operations after close fail with
-`ERR_SOCKET_CLOSED`.
+`ERR_SOCKET_CLOSED`; incompatible receive ownership fails with
+`ERR_RECEIVER_ACTIVE`.
+
+### Event adapter limits and ownership
+
+Event listeners run synchronously in registration order and receive the same
+initialized, JavaScript-owned `ReceivedMessage`. A listener may retain it; copy
+the Buffer if listeners need mutation isolation. Promise values returned by
+listeners are not awaited and do not create backpressure. With Node's default
+settings, a rejected async listener is an unhandled rejection; if the process
+enables `EventEmitter.captureRejections` before construction, Node routes that
+reason to `error`, which is why the event payload is typed `unknown`.
+
+The adapter holds no message queue: each source retains at most one native
+receive, one bounded result during synchronous dispatch, and one internal
+AbortController. Slow listeners or `pause()` stop userspace rearming, not
+network ingress. Linux may fill the socket receive buffer and drop packets;
+applicable queue-overflow metadata and packet statistics remain the observation
+mechanisms.
+
+Attachment has explicit lifetime. A socket retains an idle, running, or paused
+source and its receive claim even if application code drops the source
+reference. Call `detach()` to return a live lane or `close()` to end the socket.
+A running source has the same process and Worker liveness implications as a
+pending `receiveMessage()`; Phase 11 adds no `ref()`/`unref()`. Inherited
+`newListener`, `removeListener`, `errorMonitor`, custom event names, and public
+synthetic `emit()` behavior remain standard Node behavior and do not mutate the
+adapter lifecycle.
 
 ## Documentation
 
@@ -339,7 +460,9 @@ build step can deliberately drop back to the repository owner.
 
 Implementation and verification details are in the
 [Phase 10 report](ai_documentation/17-phase-10-report.md) and the
-[release-readiness audit](ai_documentation/18-release-readiness-audit.md).
+[release-readiness audit](ai_documentation/18-release-readiness-audit.md). The
+event adapter is recorded in the
+[Phase 11 report](ai_documentation/21-phase-11-report.md).
 
 ## License
 

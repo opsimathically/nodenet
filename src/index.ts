@@ -1,5 +1,11 @@
+import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { isIPv4, isIPv6 } from "node:net";
+import { EventReceiveController } from "./internal/event-controller.js";
+import {
+  createInternalFinalizers,
+  type InternalFinalizers,
+} from "./internal/finalizers.js";
 
 const MAX_PACKET_LENGTH = 65_535;
 const DEFAULT_CONTROL_CAPACITY = 4 * 1024;
@@ -37,8 +43,10 @@ export type RawSocketErrorKind =
   | "aborted"
   | "internal"
   | "invalidArgument"
+  | "invalidState"
   | "queueFull"
   | "reactorClosed"
+  | "receiverActive"
   | "socketClosed"
   | "system"
   | "malformedControl"
@@ -53,6 +61,28 @@ export interface RawSocketOptions {
   mode?: PacketSocketMode;
 }
 export type RawSocketFamily = "ipv4" | "ipv6" | "packet";
+
+export interface RawSocketEventEmitterOptions {
+  readonly dataCapacity?: number;
+  readonly controlCapacity?: number;
+  readonly errorQueue?: boolean;
+}
+
+export type RawSocketEventEmitterStatus =
+  | "idle"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "detaching"
+  | "detached"
+  | "closing"
+  | "closed";
+
+export interface RawSocketEventMap {
+  message: [message: ReceivedMessage];
+  error: [error: unknown];
+  close: [];
+}
 export type PacketSocketMode = "raw" | "cooked";
 export interface ClassicBpfInstruction {
   readonly code: number;
@@ -668,12 +698,43 @@ interface NativeBinding {
 interface PendingOperation {
   resolve(completion: NativeCompletion): void;
   reject(error: RawSocketError): void;
-  cleanup?(): void;
+  finalizers?: InternalFinalizers;
+}
+
+type ReceiveLane = "normal" | "errorQueue";
+
+interface SocketCloseObserver {
+  closing(): void;
+  closed(error: unknown, rejected: boolean): void;
 }
 
 interface SocketState {
   readonly pending: Map<number, PendingOperation>;
+  readonly directReceives: Record<ReceiveLane, number>;
+  readonly eventClaims: Map<ReceiveLane, symbol>;
+  readonly ringConfigurations: Set<symbol>;
+  readonly closeObservers: Set<SocketCloseObserver>;
+  ringFrameReceives: number;
+  ringActive: boolean;
 }
+
+interface ClaimedReceiveOptions {
+  readonly dataCapacity: number;
+  readonly controlCapacity: number;
+  readonly errorQueue: boolean;
+}
+
+interface SocketInternals {
+  readonly state: SocketState;
+  readonly isOpen: () => boolean;
+  readonly receiveClaimed: (
+    claim: symbol,
+    options: ClaimedReceiveOptions,
+    signal: AbortSignal,
+  ) => Promise<ReceivedMessage>;
+}
+
+const socketInternals = new WeakMap<RawSocket, SocketInternals>();
 
 const require = createRequire(import.meta.url);
 const nativeBinding = require("../build/native/binding.cjs") as NativeBinding;
@@ -733,7 +794,7 @@ export class RawSocket {
         return;
       }
 
-      const state: SocketState = { pending: new Map() };
+      const state = createSocketState();
       let socket: RawSocket | undefined;
       state.pending.set(OPEN_OPERATION_ID, {
         resolve: () => {
@@ -745,7 +806,14 @@ export class RawSocket {
               ),
             );
           } else {
-            resolve(socket);
+            const openedSocket = socket;
+            socketInternals.set(openedSocket, {
+              state,
+              isOpen: () => !openedSocket.#closed,
+              receiveClaimed: (claim, options, signal) =>
+                openedSocket.#receiveMessageClaimed(claim, options, signal),
+            });
+            resolve(openedSocket);
           }
         },
         reject,
@@ -1545,6 +1613,15 @@ export class RawSocket {
       return Promise.reject(normalizeUnknownError(error, "receive"));
     }
 
+    if (this.#state.eventClaims.has("normal")) {
+      return Promise.reject(
+        receiverActive(
+          "receive",
+          "the normal receive lane is owned by an event source",
+        ),
+      );
+    }
+
     const operationId = this.#allocateOperationId();
     return new Promise((resolve, reject: (error: RawSocketError) => void) => {
       this.#state.pending.set(operationId, {
@@ -1573,6 +1650,7 @@ export class RawSocket {
         },
         reject,
       });
+      this.#trackDirectReceive(operationId, "normal");
       if (this.#attachAbort(operationId, options.signal, reject, "receive"))
         return;
       const result = callNative(
@@ -1592,12 +1670,56 @@ export class RawSocket {
   receiveMessage(
     options: ReceiveMessageOptions = {},
   ): Promise<ReceivedMessage> {
+    return this.#receiveMessageInternal(options);
+  }
+
+  #receiveMessageClaimed(
+    claim: symbol,
+    options: ClaimedReceiveOptions,
+    signal: AbortSignal,
+  ): Promise<ReceivedMessage> {
+    return this.#receiveMessageInternal(
+      {
+        dataCapacity: options.dataCapacity,
+        controlCapacity: options.controlCapacity,
+        flags: options.errorQueue ? ["errorQueue"] : [],
+        signal,
+      },
+      claim,
+    );
+  }
+
+  #receiveMessageInternal(
+    options: ReceiveMessageOptions,
+    eventClaim?: symbol,
+  ): Promise<ReceivedMessage> {
     if (this.#closed)
       return Promise.reject(socketClosedError("receiveMessage"));
     try {
       validateReceiveMessageOptions(options);
     } catch (error) {
       return Promise.reject(normalizeUnknownError(error, "receiveMessage"));
+    }
+    const flags = options.flags ?? [];
+    const lane: ReceiveLane = flags.includes("errorQueue")
+      ? "errorQueue"
+      : "normal";
+    if (eventClaim === undefined) {
+      if (this.#state.eventClaims.has(lane)) {
+        return Promise.reject(
+          receiverActive(
+            "receiveMessage",
+            `the ${lane} receive lane is owned by an event source`,
+          ),
+        );
+      }
+    } else if (this.#state.eventClaims.get(lane) !== eventClaim) {
+      return Promise.reject(
+        receiverActive(
+          "receiveMessage",
+          `the ${lane} event receive claim is no longer active`,
+        ),
+      );
     }
     const operationId = this.#allocateOperationId();
     return new Promise((resolve, reject: (error: RawSocketError) => void) => {
@@ -1616,11 +1738,13 @@ export class RawSocket {
         },
         reject,
       });
+      if (eventClaim === undefined) {
+        this.#trackDirectReceive(operationId, lane);
+      }
       if (
         this.#attachAbort(operationId, options.signal, reject, "receiveMessage")
       )
         return;
-      const flags = options.flags ?? [];
       const result = callNative(
         () =>
           nativeBinding.nativeSubmitReceiveMessage(
@@ -1645,6 +1769,14 @@ export class RawSocket {
     } catch (error) {
       return Promise.reject(normalizeUnknownError(error, "receiveBatch"));
     }
+    if (this.#state.eventClaims.has("normal")) {
+      return Promise.reject(
+        receiverActive(
+          "receiveBatch",
+          "the normal receive lane is owned by an event source",
+        ),
+      );
+    }
     const operationId = this.#allocateOperationId();
     return new Promise((resolve, reject: (error: RawSocketError) => void) => {
       this.#state.pending.set(operationId, {
@@ -1665,6 +1797,7 @@ export class RawSocket {
         },
         reject,
       });
+      this.#trackDirectReceive(operationId, "normal");
       if (
         this.#attachAbort(operationId, options.signal, reject, "receiveBatch")
       )
@@ -1695,13 +1828,39 @@ export class RawSocket {
         normalizeUnknownError(error, "configurePacketRing"),
       );
     }
-    return this.#submitVoid("configurePacketRing", (operationId) =>
-      nativeBinding.nativeConfigurePacketRing(
-        this.#handle,
-        operationId,
-        nativeConfig,
-      ),
-    );
+    if (this.#state.eventClaims.size > 0) {
+      return Promise.reject(
+        receiverActive(
+          "configurePacketRing",
+          "packet-ring mode conflicts with attached event sources",
+        ),
+      );
+    }
+    const token = Symbol("packetRingConfiguration");
+    this.#state.ringConfigurations.add(token);
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: () => {
+          this.#state.ringActive = true;
+          resolve();
+        },
+        reject,
+      });
+      addPendingFinalizer(this.#state, operationId, () => {
+        this.#state.ringConfigurations.delete(token);
+      });
+      const result = callNative(
+        () =>
+          nativeBinding.nativeConfigurePacketRing(
+            this.#handle,
+            operationId,
+            nativeConfig,
+          ),
+        "configurePacketRing",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
   }
 
   /** Waits for and leases one copied frame from the configured packet ring. */
@@ -1719,6 +1878,14 @@ export class RawSocket {
       validateSignal(options.signal, "receiveRingFrame");
     } catch (error) {
       return Promise.reject(normalizeUnknownError(error, "receiveRingFrame"));
+    }
+    if (this.#state.eventClaims.size > 0) {
+      return Promise.reject(
+        receiverActive(
+          "receiveRingFrame",
+          "packet-ring receives conflict with attached event sources",
+        ),
+      );
     }
     const operationId = this.#allocateOperationId();
     return new Promise((resolve, reject: (error: RawSocketError) => void) => {
@@ -1757,6 +1924,10 @@ export class RawSocket {
         },
         reject,
       });
+      this.#state.ringFrameReceives += 1;
+      addPendingFinalizer(this.#state, operationId, () => {
+        this.#state.ringFrameReceives -= 1;
+      });
       if (
         this.#attachAbort(
           operationId,
@@ -1785,27 +1956,58 @@ export class RawSocket {
     }
     this.#closed = true;
     const operationId = this.#allocateOperationId();
-    this.#closePromise = new Promise(
-      (resolve, reject: (error: RawSocketError) => void) => {
-        this.#state.pending.set(operationId, {
-          resolve: () => {
-            resolve();
-          },
-          reject,
-        });
-        const result = callNative(
-          () => nativeBinding.nativeClose(this.#handle, operationId),
-          "close",
-        );
-        if (!result.accepted && result.error === undefined) {
-          this.#state.pending.delete(operationId);
-          resolve();
-          return;
-        }
-        this.#settleRejectedSubmission(operationId, result, reject);
+    let resolveClose!: () => void;
+    let rejectClose!: (error: RawSocketError) => void;
+    this.#closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    void this.#closePromise.then(
+      () => {
+        this.#notifyCloseOutcome(undefined, false);
+      },
+      (error: unknown) => {
+        this.#notifyCloseOutcome(error, true);
       },
     );
+    this.#notifyClosing();
+    this.#state.pending.set(operationId, {
+      resolve: () => {
+        resolveClose();
+      },
+      reject: rejectClose,
+    });
+    const result = callNative(
+      () => nativeBinding.nativeClose(this.#handle, operationId),
+      "close",
+    );
+    if (!result.accepted && result.error === undefined) {
+      takePendingOperation(this.#state, operationId);
+      resolveClose();
+      return this.#closePromise;
+    }
+    this.#settleRejectedSubmission(operationId, result, rejectClose);
     return this.#closePromise;
+  }
+
+  #notifyClosing(): void {
+    for (const observer of [...this.#state.closeObservers]) {
+      try {
+        observer.closing();
+      } catch {
+        // Lifecycle observers are internal and isolated from RawSocket.close().
+      }
+    }
+  }
+
+  #notifyCloseOutcome(error: unknown, rejected: boolean): void {
+    for (const observer of [...this.#state.closeObservers]) {
+      try {
+        observer.closed(error, rejected);
+      } catch {
+        // One adapter cannot prevent sibling close settlement.
+      }
+    }
   }
 
   #submitVoid(
@@ -1836,6 +2038,13 @@ export class RawSocket {
     }
   }
 
+  #trackDirectReceive(operationId: number, lane: ReceiveLane): void {
+    this.#state.directReceives[lane] += 1;
+    addPendingFinalizer(this.#state, operationId, () => {
+      this.#state.directReceives[lane] -= 1;
+    });
+  }
+
   #settleRejectedSubmission(
     operationId: number,
     result: NativeSubmitResult,
@@ -1844,8 +2053,7 @@ export class RawSocket {
     if (result.accepted) {
       return;
     }
-    this.#state.pending.get(operationId)?.cleanup?.();
-    this.#state.pending.delete(operationId);
+    takePendingOperation(this.#state, operationId);
     reject(
       result.error === undefined
         ? internalError("submitOperation", "native operation was not accepted")
@@ -1861,7 +2069,7 @@ export class RawSocket {
   ): boolean {
     if (signal === undefined) return false;
     if (signal.aborted) {
-      this.#state.pending.delete(operationId);
+      takePendingOperation(this.#state, operationId);
       reject(abortedError(operation));
       return true;
     }
@@ -1869,13 +2077,153 @@ export class RawSocket {
       nativeBinding.nativeCancel(this.#handle, operationId);
     };
     signal.addEventListener("abort", abort, { once: true });
-    const pending = this.#state.pending.get(operationId);
-    if (pending !== undefined) {
-      pending.cleanup = () => {
-        signal.removeEventListener("abort", abort);
-      };
-    }
+    addPendingFinalizer(this.#state, operationId, () => {
+      signal.removeEventListener("abort", abort);
+    });
     return false;
+  }
+}
+
+/** A Node-style, bounded event adapter over one RawSocket receive lane. */
+export class RawSocketEventEmitter extends EventEmitter<RawSocketEventMap> {
+  readonly #socket: RawSocket;
+  readonly #controller: EventReceiveController<ReceivedMessage, RawSocket>;
+
+  constructor(socket: RawSocket, options: RawSocketEventEmitterOptions = {}) {
+    super();
+    const internals = socketInternals.get(socket);
+    if (internals === undefined) {
+      throw invalidArgument(
+        "createRawSocketEventEmitter",
+        "socket must be a RawSocket returned by this module",
+      );
+    }
+    const configured = validateRawSocketEventEmitterOptions(
+      options,
+      socket.family,
+    );
+    if (!internals.isOpen()) {
+      throw socketClosedError("createRawSocketEventEmitter");
+    }
+
+    const lane: ReceiveLane = configured.errorQueue ? "errorQueue" : "normal";
+    const state = internals.state;
+    if (state.ringActive) {
+      throw unsupportedError(
+        "createRawSocketEventEmitter",
+        "message events are unavailable after packet-ring configuration",
+      );
+    }
+    if (state.ringConfigurations.size > 0 || state.ringFrameReceives > 0) {
+      throw receiverActive(
+        "createRawSocketEventEmitter",
+        "packet-ring receive mode is currently active",
+      );
+    }
+    if (state.directReceives[lane] > 0 || state.eventClaims.has(lane)) {
+      throw receiverActive(
+        "createRawSocketEventEmitter",
+        `the ${lane} receive lane already has an active receiver`,
+      );
+    }
+
+    this.#socket = socket;
+    const claim = Symbol(`eventReceive:${lane}`);
+    let controller!: EventReceiveController<ReceivedMessage, RawSocket>;
+    const observer: SocketCloseObserver = {
+      closing: () => {
+        controller.notifyClosing();
+      },
+      closed: (error, rejected) => {
+        controller.notifyCloseOutcome(error, rejected);
+      },
+    };
+    state.eventClaims.set(lane, claim);
+    state.closeObservers.add(observer);
+    try {
+      controller = new EventReceiveController({
+        receive: (signal) =>
+          internals.receiveClaimed(claim, configured, signal),
+        close: () => socket.close(),
+        releaseClaim: () => {
+          if (state.eventClaims.get(lane) === claim) {
+            state.eventClaims.delete(lane);
+          }
+        },
+        removeCloseObserver: () => {
+          state.closeObservers.delete(observer);
+        },
+        detachValue: () => socket,
+        dispatchMessage: (message) => {
+          this.#emitMessage(message);
+        },
+        dispatchError: (error) => {
+          this.#emitError(error);
+        },
+        dispatchClose: () => {
+          this.#emitClose();
+        },
+        invalidState: (operation) =>
+          invalidState(
+            operation,
+            `cannot ${operation} an event source while it is ${controller.status}`,
+          ),
+        socketClosed: (operation) => socketClosedError(operation),
+        isAborted: (error) => isRawSocketErrorKind(error, "aborted"),
+        isSocketClosed: (error) => isRawSocketErrorKind(error, "socketClosed"),
+        isReactorClosed: (error) =>
+          isRawSocketErrorKind(error, "reactorClosed"),
+      });
+      this.#controller = controller;
+    } catch (error) {
+      if (state.eventClaims.get(lane) === claim) {
+        state.eventClaims.delete(lane);
+      }
+      state.closeObservers.delete(observer);
+      throw normalizeUnknownError(error, "createRawSocketEventEmitter");
+    }
+  }
+
+  get socket(): RawSocket {
+    return this.#socket;
+  }
+
+  get status(): RawSocketEventEmitterStatus {
+    return this.#controller.status;
+  }
+
+  start(): this {
+    this.#controller.start();
+    return this;
+  }
+
+  pause(): Promise<void> {
+    return this.#controller.pause();
+  }
+
+  resume(): this {
+    this.#controller.resume();
+    return this;
+  }
+
+  detach(): Promise<RawSocket> {
+    return this.#controller.detach();
+  }
+
+  close(): Promise<void> {
+    return this.#controller.close();
+  }
+
+  #emitMessage(message: ReceivedMessage): void {
+    super.emit("message", message);
+  }
+
+  #emitError(error: unknown): void {
+    super.emit("error", error);
+  }
+
+  #emitClose(): void {
+    super.emit("close");
   }
 }
 
@@ -1906,17 +2254,55 @@ function dispatchCompletion(
   state: SocketState,
   completion: NativeCompletion,
 ): void {
-  const pending = state.pending.get(completion.operationId);
+  const pending = takePendingOperation(state, completion.operationId);
   if (pending === undefined) {
     return;
   }
-  pending.cleanup?.();
-  state.pending.delete(completion.operationId);
   if (completion.error === undefined) {
     pending.resolve(completion);
   } else {
     pending.reject(new RawSocketError(completion.error));
   }
+}
+
+function takePendingOperation(
+  state: SocketState,
+  operationId: number,
+): PendingOperation | undefined {
+  const pending = state.pending.get(operationId);
+  if (pending === undefined) return undefined;
+  state.pending.delete(operationId);
+  pending.finalizers?.run();
+  return pending;
+}
+
+function addPendingFinalizer(
+  state: SocketState,
+  operationId: number,
+  finalizer: () => void,
+): void {
+  const pending = state.pending.get(operationId);
+  if (pending === undefined) {
+    throw internalError(
+      "registerOperationFinalizer",
+      "pending operation was not registered",
+    );
+  }
+  const finalizers =
+    pending.finalizers ?? (pending.finalizers = createInternalFinalizers());
+  finalizers.add(finalizer);
+}
+
+function createSocketState(): SocketState {
+  return {
+    pending: new Map(),
+    directReceives: { normal: 0, errorQueue: 0 },
+    eventClaims: new Map(),
+    ringConfigurations: new Set(),
+    closeObservers: new Set(),
+    ringFrameReceives: 0,
+    ringActive: false,
+  };
 }
 
 function callNative(
@@ -2159,6 +2545,49 @@ function validateReceiveMessageOptions(
   validateSignal(candidate.signal, "receiveMessage");
 }
 
+function validateRawSocketEventEmitterOptions(
+  options: unknown,
+  family: RawSocketFamily,
+): ClaimedReceiveOptions {
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(
+      "createRawSocketEventEmitter",
+      "options must be an object",
+    );
+  }
+  const candidate = options as Record<string, unknown>;
+  const dataCapacity = candidate.dataCapacity ?? MAX_PACKET_LENGTH;
+  const controlCapacity = candidate.controlCapacity ?? DEFAULT_CONTROL_CAPACITY;
+  const errorQueue = candidate.errorQueue ?? false;
+  validateIntegerRange(
+    dataCapacity,
+    1,
+    MAX_PACKET_LENGTH,
+    "createRawSocketEventEmitter",
+    "dataCapacity",
+  );
+  validateIntegerRange(
+    controlCapacity,
+    0,
+    MAX_CONTROL_CAPACITY,
+    "createRawSocketEventEmitter",
+    "controlCapacity",
+  );
+  if (typeof errorQueue !== "boolean") {
+    throw invalidArgument(
+      "createRawSocketEventEmitter",
+      "errorQueue must be a boolean",
+    );
+  }
+  if (errorQueue && family === "packet") {
+    throw unsupportedError(
+      "createRawSocketEventEmitter",
+      "Linux packet sockets do not support the IP error queue",
+    );
+  }
+  return { dataCapacity, controlCapacity, errorQueue };
+}
+
 function validateReceiveBatchOptions(
   options: unknown,
 ): asserts options is ReceiveBatchOptions {
@@ -2174,7 +2603,7 @@ function validateReceiveBatchOptions(
     "receiveBatch",
     "dataCapacity",
   );
-  if ((candidate.count as number) * (capacity as number) > 1024 * 1024)
+  if (candidate.count * capacity > 1024 * 1024)
     throw invalidArgument(
       "receiveBatch",
       "combined receive batch allocation must not exceed 1048576 bytes",
@@ -2230,19 +2659,19 @@ function validatePacketRingConfig(
     "retireTimeoutMs",
   );
   if (
-    (blockSize as number) % (frameSize as number) !== 0 ||
-    (frameSize as number) % 16 !== 0 ||
-    (blockSize as number) * (blockCount as number) > 64 * 1024 * 1024
+    blockSize % frameSize !== 0 ||
+    frameSize % 16 !== 0 ||
+    blockSize * blockCount > 64 * 1024 * 1024
   )
     throw invalidArgument(
       "configurePacketRing",
       "ring geometry is misaligned or exceeds 64 MiB",
     );
   return {
-    blockSize: blockSize as number,
-    blockCount: blockCount as number,
-    frameSize: frameSize as number,
-    retireTimeoutMs: retireTimeoutMs as number,
+    blockSize,
+    blockCount,
+    frameSize,
+    retireTimeoutMs,
   };
 }
 
@@ -2272,7 +2701,7 @@ function validateIntegerRange(
   maximum: number,
   operation: string,
   name: string,
-): void {
+): asserts value is number {
   if (
     typeof value !== "number" ||
     !Number.isSafeInteger(value) ||
@@ -2867,13 +3296,22 @@ function isRawSocketStatus(value: string): value is RawSocketStatus {
   return value === "open" || value === "closing" || value === "closed";
 }
 
+function isRawSocketErrorKind(
+  error: unknown,
+  kind: RawSocketErrorKind,
+): error is RawSocketError {
+  return error instanceof RawSocketError && error.kind === kind;
+}
+
 function normalizeErrorKind(value: string): RawSocketErrorKind {
   switch (value) {
     case "aborted":
     case "internal":
     case "invalidArgument":
+    case "invalidState":
     case "queueFull":
     case "reactorClosed":
+    case "receiverActive":
     case "socketClosed":
     case "system":
     case "malformedControl":
@@ -2897,6 +3335,24 @@ function invalidArgument(operation: string, message: string): RawSocketError {
   return new RawSocketError({
     kind: "invalidArgument",
     code: "ERR_INVALID_ARGUMENT",
+    operation,
+    message,
+  });
+}
+
+function invalidState(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "invalidState",
+    code: "ERR_INVALID_STATE",
+    operation,
+    message,
+  });
+}
+
+function receiverActive(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "receiverActive",
+    code: "ERR_RECEIVER_ACTIVE",
     operation,
     message,
   });

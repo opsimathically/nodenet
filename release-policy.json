@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "release": "0.1.0-rc.1",
+  "release": "0.1.0-rc.2",
   "platform": {
     "os": "linux",
     "architectures": ["x86_64", "aarch64"],

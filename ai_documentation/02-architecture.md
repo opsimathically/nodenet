@@ -147,12 +147,64 @@ Phase 5 adds operation-level cancellation and fairness. A per-socket operation
 table keyed by operation id becomes the single settlement authority for
 readiness, cancellation, close, and shutdown. Readiness and command processing
 receive finite work/byte budgets, preserving progress for other sockets and
-control commands. Completion delivery becomes nonblocking with its queue bound
-proven from per-socket admission; a full completion queue is an invariant
-failure, never permission to drop a Promise settlement.
+control commands. D-026 supersedes the original nonblocking completion proof:
+the bounded thread-safe callback queue now applies lossless blocking
+backpressure to the reactor when JavaScript is unable to drain settlements. A
+completion is never dropped merely because the queue is full.
 
 Changing away from this bounded reactor model or increasing its limits requires
 a recorded decision and targeted load and teardown tests.
+
+## Phase 11 event adapter
+
+The event-driven API is a TypeScript composition layer, not another I/O engine.
+`RawSocketEventEmitter` owns one internal AbortController and at most one pump
+turn per selected normal or error-queue lane. A turn spans its one
+`receiveMessage()` promise, any fulfilled message waiting for microtask
+dispatch, and final bookkeeping. It emits the existing owned `ReceivedMessage`,
+then a single generation-checked scheduler may admit another receive only after
+all synchronous listeners return and only while state remains running.
+
+Module-private `SocketState` lane claims prevent event sources and direct or
+batch receive methods from silently competing for the same traffic. Packet-ring
+configuration is socket-wide receive mode and excludes both normal and
+error-queue sources. Pending-operation cleanup becomes a composable exactly-once
+finalizer mechanism so receive counts and existing AbortSignal listener removal
+cannot overwrite one another. A source may detach after an awaitable quiescence
+boundary to return the still-open socket to low-level receive use. A private
+lifecycle observer reports closure initiated through either the adapter or
+`RawSocket` so the library-generated `close` event occurs once even while the
+source is idle or paused.
+
+A successful-open-only `WeakMap<RawSocket, SocketInternals>` provides runtime
+authenticity, state, and class-created friend closures without exporting hidden
+tokens or relying on TypeScript-private construction. Claim and observer
+installation are transactional. Each packet-ring configuration has its own
+provisional token; any pending ring-frame receive and active ring mode are
+socket-wide exclusions.
+
+Pause/detach stop rearming, cancel the current receive, and wait for
+cancellation or a winning result. A winning result is emitted before the
+boundary resolves; it is never discarded to simulate an immediate pause. The
+adapter stores no message queue, does not accept `peek`, and does not await
+listener promises. Linux socket buffers and drops therefore remain visible
+kernel behavior rather than being mislabeled as event-stream backpressure. D-028
+and the Phase 11 plan contain the complete public and race contract.
+
+User event dispatch crosses a `queueMicrotask` plus `try/finally` boundary. This
+preserves EventEmitter's uncaught synchronous-listener exception channel without
+turning it into an unhandled internal promise rejection, while still clearing
+controller state and settling pause/detach/close waiters. EventEmitter
+`captureRejections` remains governed by Node's process setting; captured
+listener failures are `unknown`, whereas adapter-generated socket receive
+failures are `RawSocketError`.
+
+The retained socket strongly owns attached event sources until explicit detach
+or terminal close, bounded to the normal/error lanes; garbage collection is not
+a claim-release mechanism. Reactor loss invokes `RawSocket.close()` so the
+wrapped object's JavaScript admission state becomes terminal. With two sources,
+closing either closes the shared socket, while each source waits only for its
+own turn and event dispatch.
 
 ## Error model
 
@@ -171,10 +223,12 @@ distinguishable. Messages alone are not a stable programmatic API.
 
 The Rust core implements this as `NativeError`, with stable `ErrorKind`, code,
 operation, optional numeric errno, optional conventional errno name, and a human
-message. Current stable codes are `ERR_INTERNAL`, `ERR_INVALID_ARGUMENT`,
-`ERR_QUEUE_FULL`, `ERR_REACTOR_CLOSED`, `ERR_SOCKET_CLOSED`, and `ERR_SYSTEM`.
-The TypeScript facade maps these fields onto `RawSocketError` without changing
-their machine-readable meaning.
+message. Current stable codes are `ERR_ABORTED`, `ERR_INTERNAL`,
+`ERR_INVALID_ARGUMENT`, `ERR_MALFORMED_CONTROL`, `ERR_QUEUE_FULL`,
+`ERR_REACTOR_CLOSED`, `ERR_SOCKET_CLOSED`, `ERR_SYSTEM`, and `ERR_UNSUPPORTED`.
+Phase 11 adds TypeScript-side `ERR_INVALID_STATE` and `ERR_RECEIVER_ACTIVE` for
+adapter lifecycle/ownership conflicts. The facade maps every field onto
+`RawSocketError` without changing its machine-readable meaning.
 
 ## API evolution
 

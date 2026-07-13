@@ -4,22 +4,30 @@ Last updated: 2026-07-13
 
 ## Current state
 
-Phases 0 through 9 are complete and Phase 10 implementation is complete, with
-native AArch64 execution retained as a publication gate. IPv4/IPv6 raw sockets
-and raw/cooked packet sockets now include bounded `sendmsg`/`recvmsg`, typed
-ancillary data and flags, metadata and error-queue options, device binding,
-AbortSignal cancellation, explicit data/control truncation, fair reactor
-budgets, and bounded lossless completion backpressure. Advanced typed and
-bounded opaque options, packet membership/auxdata/statistics/fanout, and
-classic/eBPF attachment are included. Rust owns descriptors, syscall buffers,
-readiness state, and pending native operations. Bounded batch message I/O and
-receive-only TPACKET_V3 rings with copied frame leases provide measured
-high-throughput paths without exposing mmap storage.
+Phases 0 through 11 are complete, with native AArch64 execution retained as a
+publication gate. IPv4/IPv6 raw sockets and raw/cooked packet sockets now
+include bounded `sendmsg`/`recvmsg`, typed ancillary data and flags, metadata
+and error-queue options, device binding, AbortSignal cancellation, explicit
+data/control truncation, fair reactor budgets, and bounded lossless completion
+backpressure. Advanced typed and bounded opaque options, packet
+membership/auxdata/statistics/fanout, and classic/eBPF attachment are included.
+Rust owns descriptors, syscall buffers, readiness state, and pending native
+operations. Bounded batch message I/O and receive-only TPACKET_V3 rings with
+copied frame leases provide measured high-throughput paths without exposing mmap
+storage.
 
 The public TypeScript surface exports common Linux `IPPROTO_*` and `ETH_P_*`
 constants for readable application code. Protocol fields remain numeric so
 custom and less-common Linux identifiers continue to work without dependency or
 registry coupling.
+
+Phase 11 implements an optional typed `RawSocketEventEmitter` as a
+zero-dependency TypeScript adapter over the existing promise API. It provides
+explicit start, awaitable pause/detach, one receive per source, independent
+normal/error-queue ownership, Node-standard listener behavior, and exactly-once
+close without changing Rust or native ownership. The candidate is now the
+unpublished `0.1.0-rc.2`; x86-64 ordinary, privileged, stress, consumer,
+artifact, and reproducibility gates pass.
 
 The post-Phase-10 release-readiness audit supersedes nonblocking N-API callback
 delivery with bounded lossless backpressure, makes close wait for all admitted
@@ -48,6 +56,9 @@ explicitly untested.
 16. [Phase 9 completion report](16-phase-9-report.md)
 17. [Phase 10 completion report](17-phase-10-report.md)
 18. [Release-readiness audit](18-release-readiness-audit.md)
+19. [Phase 11 event-driven API plan](19-phase-11-event-api-plan.md)
+20. [Phase 11 plan review](20-phase-11-plan-review.md)
+21. [Phase 11 completion report](21-phase-11-report.md)
 
 `AGENTS.md` is the compact operational context. These documents contain the
 rationale and phase details. If they disagree, resolve the discrepancy and
@@ -95,6 +106,8 @@ When work starts:
 4. Record the verification commands and results.
 5. Update this page's current state and next action.
 
-Phase 10 prepared the unpublished `0.1.0-rc.1` release candidate. The next
-action is to run the committed revision on both architecture jobs and inspect
-the manual rehearsal provenance before any explicit publish decision.
+Phase 11 prepared the unpublished `0.1.0-rc.2` release candidate. No further
+implementation phase is accepted yet. The next action is review of possible
+post-baseline adapters or publication readiness; streams, async iteration, batch
+events, packet-ring events, and `ref()`/`unref()` remain separate design
+decisions. Native AArch64 execution remains a publication gate.

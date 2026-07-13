@@ -22,6 +22,7 @@ import {
   IPPROTO_TCP,
   IPPROTO_UDP,
   IPPROTO_UDPLITE,
+  RawSocketEventEmitter,
   nativeSmokeTest,
 } from "../dist/index.js";
 
@@ -36,6 +37,13 @@ test("loads the synchronous ESM public entry point through require", () => {
   assert.equal(requiredPackage.nativeSmokeTest(), "nodenetraw:napi-ok");
   assert.equal(requiredPackage.IPPROTO_ICMP, IPPROTO_ICMP);
   assert.equal(requiredPackage.ETH_P_IP, ETH_P_IP);
+  assert.equal(requiredPackage.RawSocketEventEmitter, RawSocketEventEmitter);
+});
+
+test("keeps event controller internals outside package exports", async () => {
+  await assert.rejects(import("nodenetraw/internal/event-controller.js"), {
+    code: "ERR_PACKAGE_PATH_NOT_EXPORTED",
+  });
 });
 
 test("exports common Linux protocol constants", () => {

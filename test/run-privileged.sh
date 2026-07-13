@@ -2,10 +2,18 @@
 set -eu
 
 mode=${1:-}
+suite=${2:-privileged}
 case "$mode" in
   root|namespace) ;;
   *)
-    echo "usage: sh test/run-privileged.sh root|namespace" >&2
+    echo "usage: sh test/run-privileged.sh root|namespace [privileged|event-stress]" >&2
+    exit 2
+    ;;
+esac
+case "$suite" in
+  privileged|event-stress) ;;
+  *)
+    echo "unknown privileged test suite: $suite" >&2
     exit 2
     ;;
 esac
@@ -90,7 +98,7 @@ if [ "$(id -u)" -eq 0 ]; then
   fi
 else
   if [ "$mode" = root ]; then
-    echo "test:privileged requires root; run: sudo npm run test:privileged" >&2
+    echo "this test suite requires root; rerun the npm command with sudo" >&2
     exit 1
   fi
   node=$(command -v node)
@@ -104,5 +112,6 @@ fi
 node_bin=$(dirname "$node")
 exec env \
   NODENETRAW_NODE="$node" \
+  NODENETRAW_TEST_SUITE="$suite" \
   PATH="$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   sh test/run-namespace.sh

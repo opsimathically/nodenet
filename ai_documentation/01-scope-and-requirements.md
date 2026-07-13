@@ -35,6 +35,8 @@ The release-capable baseline must cover:
 8. Source and prebuilt distribution for the declared x86-64/AArch64 glibc
    matrix, backed by stress, fuzz, sanitizer, leak, and privileged namespace
    tests.
+9. Both explicit promise-oriented receives and an optional Node-style event
+   adapter built over the same bounded message and ownership semantics.
 
 The detailed capability matrix and sequencing live in
 [the full-capability plan](11-full-capability-plan.md).
@@ -56,6 +58,9 @@ The detailed capability matrix and sequencing live in
 - Provide both one-message primitives and separately bounded batch/streaming
   conveniences. Convenience APIs must be implementable in terms of documented
   lower-level semantics.
+- Provide an event-driven receive convenience with explicit start,
+  pause/detach/close behavior, deterministic receive ownership, and no unbounded
+  adapter queue, while preserving the promise API.
 - Report unsupported family/option/control-message combinations explicitly.
 - Preserve the Linux operation, errno number, conventional errno name, and
   useful contextual fields in stable errors.
@@ -110,10 +115,11 @@ license-compatible, and locked exactly.
 
 ## Milestones
 
-The first usable IPv4 milestone was completed in Phases 1 through 4. Phase 5
-completed the family-neutral message-I/O and ancillary-data foundation. IPv6,
-`AF_PACKET`, extensibility/filtering, performance, and release hardening follow
-as separately gated phases.
+The first usable IPv4 milestone was completed in Phases 1 through 4. Phases 5
+through 10 completed family-neutral message I/O, IPv6, `AF_PACKET`,
+extensibility/filtering, measured performance paths, and release hardening.
+Phase 11 completed the separately gated event-driven convenience layer over that
+low-level baseline.
 
 ## Definition of project success
 

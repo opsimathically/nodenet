@@ -63,9 +63,14 @@ not safe error handling for a library.
 - `npm run rust:clippy`: run all-target Clippy with warnings denied.
 - `npm run rust:test`: run Rust unit tests with the committed Cargo lockfile.
 - `npm test`: build and run the unprivileged Node tests.
+- Phase 11 adds `npm run test:types`: compile consumer-facing event API fixtures
+  against built declarations with no output; `npm test` and `npm run ci` include
+  it after the TypeScript build.
 - `sudo npm run test:privileged`: detect the invoking repository owner, build
   with that user's Node/rustup environment, then run successful raw-packet
   integration tests as root in a disposable network namespace.
+- `sudo npm run test:phase11:stress`: use the same owner-safe build and isolated
+  namespace harness for 256 event-source lifecycle cycles with fd/RSS checks.
 - `npm run ci`: run every current unprivileged quality gate.
 
 The privileged command is intentionally separate and must never be folded into
@@ -111,6 +116,45 @@ reliable, and concurrent operation ordering.
 Every `AbortSignal` path must test already-aborted, abort-after-admission,
 completion-winning, close-winning, listener removal, and Worker teardown.
 
+Phase 11 adds deterministic TypeScript controller tests using an internal fake
+receive source, plus public-boundary tests for typed EventEmitter declarations,
+one-operation rearming, pause/detach cancellation races, normal/error receive
+lane conflicts, settled-but-undispatched lifecycle races, synchronous listener
+exceptions, inherited meta-events/error monitoring, missing error listeners,
+external/shared close, and Worker teardown. Event tests use deadlines so a
+stranded pump fails rather than hanging the runner. Successful multi-message
+IPv4, IPv6, packet, and error-queue behavior remains in the isolated privileged
+suite.
+
+The fake controller module is built as an internal implementation file and is
+not a package export. A dedicated no-emit TypeScript fixture imports the built
+root package to verify consumer declarations, including expected invalid event
+payloads, inherited custom event names, and absence of claim/driver types.
+Exception-channel and `captureRejections` cases run in child Node processes so
+expected uncaught exceptions or unhandled rejections cannot corrupt the main
+test runner. The ownership matrix includes composable pending finalizers and
+simultaneous packet-ring configuration tokens, pending ring-frame receives, and
+pending/success/failure against both event lanes.
+
+Because every module-created supported socket requires raw-socket privilege,
+ordinary CI cannot deterministically construct a valid public event adapter.
+Privilege-free tests therefore exercise the internal controller and claim
+coordinator with fake owners, plus root exports, types, forged inputs, and
+permission failures. Genuine adapter construction, lane conflicts, external
+close, packet-ring interaction, and Worker integration run in the isolated
+namespace suite; they must not be falsely reported as ordinary coverage.
+
+Controller tests cover all lifecycle methods in all eight states, cached promise
+identity, same-turn start/pause/close, a fulfilled message waiting for dispatch,
+stale scheduler tasks, synchronous resume from an error listener, transactional
+constructor rollback, and dropped-emitter strong attachment. Cooperative Worker
+tests assert events; forced termination asserts native cleanup/process safety
+without requiring JavaScript callbacks after environment teardown.
+
+`npm run test:types` executes after the built declarations exist. Clean CI and
+consumer gates retain both ESM import and synchronous Node 26 `require(esm)` so
+the internal controller must not introduce top-level await.
+
 ### Unprivileged Linux integration tests
 
 Verify platform detection, permission errors, invalid protocols/options,
@@ -150,6 +194,12 @@ classic-BPF structure, message/batch allocations, ancillary serialization, and
 ring geometry. Weekly ASan and TSan jobs observe native unit/concurrency paths;
 the namespace stress job observes kernel descriptor, mmap, cancellation, and RSS
 behavior. Sanitizers do not claim to instrument V8 or the Linux kernel.
+
+Phase 11 adds native-free two-source fairness over 2,000 receive turns and the
+privileged `test:phase11:stress` gate. The latter performs 256 socket cycles
+with four start/pause/resume transitions each, alternates detach/reattach and
+direct close, requires the descriptor count to return exactly to baseline, and
+bounds RSS growth to 32 MiB.
 
 ## CI shape
 

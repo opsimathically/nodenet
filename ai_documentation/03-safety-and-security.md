@@ -66,11 +66,18 @@ process.
 - Close/receive and close/send races have specified outcomes.
 - Cancel/readiness/close/shutdown races have one native settlement authority and
   exactly one observable completion.
+- JavaScript pending-operation finalizers compose rather than overwrite one
+  another; AbortSignal removal, receive-lane release, and future finalizers each
+  run exactly once on every terminal settlement path.
+- Pending settlement deletes its operation entry, runs an isolated ordered
+  finalizer snapshot, and only then settles the promise, so reentrancy cannot
+  duplicate cleanup or observe a stale lane/ring reservation.
 - Queued work is bounded or subject to documented backpressure.
 - Readiness and command processing have fairness budgets; one hot socket cannot
   monopolize the environment reactor.
-- Completion delivery never blocks the reactor thread and never drops a result
-  when its queue is saturated.
+- Completion delivery never drops a result. Its bounded queue may deliberately
+  backpressure the reactor thread when JavaScript is unable to drain
+  settlements, as governed by D-026.
 - Teardown prevents callbacks into an invalid N-API environment.
 - Panics are caught before any FFI boundary, while normal errors remain `Result`
   values rather than panic paths.
@@ -97,9 +104,27 @@ pending operation counts. Limits must be high enough for supported Linux
 semantics but should prevent accidental multi-gigabyte allocations or an
 unbounded queue of native work.
 
-Backpressure belongs in the design of receive loops and repeated sends. If the
-API later supports callbacks or event streams, it must define pause/stop and
-overflow behavior before implementation.
+Backpressure belongs in the design of receive loops and repeated sends. Phase
+11's event adapter fixes one receive in flight, no adapter message queue,
+awaitable pause/detach quiescence, deterministic receive-lane ownership, and no
+automatic retry after errors. Pause stops userspace rearming but cannot stop
+kernel ingress or drops; asynchronous event listeners are not awaited and do not
+provide backpressure.
+
+Quiescence includes a successfully settled receive waiting for event dispatch;
+no lifecycle race may discard it or emit it after the boundary. Claim/observer
+installation and rollback are transactional, and simultaneous packet-ring calls
+use distinct tokens rather than a shared boolean. A retained socket deliberately
+retains at most its two attached lane sources until detach/close; garbage
+collection and `FinalizationRegistry` are not correctness mechanisms.
+
+Event listener failures are application exceptions, not native socket failures.
+Dispatch must keep them out of internal promise-rejection channels while still
+running controller cleanup. Node's process-wide `captureRejections` setting may
+route rejected async listener promises to `error`, so that event accepts
+`unknown`; adapter-generated receive failures remain structured `RawSocketError`
+values. The inherited caller-accessible `emit()` method never changes protected
+lifecycle or receive-claim state.
 
 Control buffers, batches, filter programs, mapped rings, fanout groups, and
 unknown option/control payloads need independent count/byte limits. A raw
