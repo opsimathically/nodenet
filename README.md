@@ -5,6 +5,8 @@ raw socket access. It exposes a TypeScript API backed by Rust through N-API,
 with an emphasis on memory safety, correct file-descriptor ownership, stable
 Linux error reporting, and a small dependency footprint.
 
+pre-monorepo
+
 > **Status:** IPv4, IPv6, and raw/cooked Linux packet sockets support typed
 > message I/O, metadata, advanced options, packet controls, filter attachment,
 > AbortSignal cancellation, stable errors, explicit close, and an optional typed
