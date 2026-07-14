@@ -6,6 +6,82 @@ import {
   createInternalFinalizers,
   type InternalFinalizers,
 } from "./internal/finalizers.js";
+import * as icmpCodec from "./internal/icmp.js";
+import type {
+  IcmpChecksumStatus,
+  IcmpMessage,
+  IcmpParseFailure,
+  IcmpParseOptions,
+  IcmpParseResult,
+  IcmpValidationIssue,
+  IcmpValidationResult,
+  ParsedIcmpPacket,
+  ParsedIpv4Header,
+} from "./internal/icmp.js";
+
+export {
+  ICMP_ADDRESS,
+  ICMP_ADDRESSREPLY,
+  ICMP_DEST_UNREACH,
+  ICMP_ECHO,
+  ICMP_ECHOREPLY,
+  ICMP_EXC_FRAGTIME,
+  ICMP_EXC_TTL,
+  ICMP_FRAG_NEEDED,
+  ICMP_HOST_ANO,
+  ICMP_HOST_ISOLATED,
+  ICMP_HOST_UNKNOWN,
+  ICMP_HOST_UNREACH,
+  ICMP_HOST_UNR_TOS,
+  ICMP_NET_ANO,
+  ICMP_NET_UNKNOWN,
+  ICMP_NET_UNREACH,
+  ICMP_NET_UNR_TOS,
+  ICMP_PARAMETERPROB,
+  ICMP_PARAMPROB_BAD_LENGTH,
+  ICMP_PARAMPROB_ERRATPTR,
+  ICMP_PARAMPROB_LENGTH,
+  ICMP_PARAMPROB_MISSING_OPTION,
+  ICMP_PARAMPROB_OPTABSENT,
+  ICMP_PARAMPROB_POINTER,
+  ICMP_PKT_FILTERED,
+  ICMP_PORT_UNREACH,
+  ICMP_PREC_CUTOFF,
+  ICMP_PREC_VIOLATION,
+  ICMP_PROT_UNREACH,
+  ICMP_REDIRECT,
+  ICMP_REDIR_HOST,
+  ICMP_REDIR_HOSTTOS,
+  ICMP_REDIR_NET,
+  ICMP_REDIR_NETTOS,
+  ICMP_ROUTERADVERT,
+  ICMP_ROUTERSOLICIT,
+  ICMP_SR_FAILED,
+  ICMP_TIMESTAMP,
+  ICMP_TIMESTAMPREPLY,
+  ICMP_TIME_EXCEEDED,
+} from "./internal/icmp.js";
+export type {
+  IcmpChecksumPolicy,
+  IcmpChecksumStatus,
+  IcmpConformance,
+  IcmpEchoReply,
+  IcmpEchoRequest,
+  IcmpMessage,
+  IcmpParseFailure,
+  IcmpParseFailureReason,
+  IcmpParseOptions,
+  IcmpParseResult,
+  IcmpValidationIssue,
+  IcmpValidationResult,
+  ParsedIcmpEchoReply,
+  ParsedIcmpEchoRequest,
+  ParsedIcmpMessage,
+  ParsedIcmpPacket,
+  ParsedIpv4Header,
+  ParsedUnknownCodeIcmpMessage,
+  ParsedUnknownIcmpMessage,
+} from "./internal/icmp.js";
 
 const MAX_PACKET_LENGTH = 65_535;
 const DEFAULT_CONTROL_CAPACITY = 4 * 1024;
@@ -347,6 +423,46 @@ export interface ReceivedMessage {
   readonly control: readonly ReceivedControlMessage[];
   readonly ipv4: Ipv4PacketMetadata | undefined;
   readonly packetAuxdata: PacketAuxdata | undefined;
+}
+
+export type IcmpReceivedParseResult =
+  | {
+      readonly ok: true;
+      readonly received: ReceivedMessage;
+      readonly ipv4: ParsedIpv4Header;
+      readonly packet: ParsedIcmpPacket;
+      readonly incomplete: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly received: ReceivedMessage;
+      readonly error: IcmpParseFailure;
+      readonly checksumStatus: IcmpChecksumStatus;
+      readonly issues: readonly IcmpValidationIssue[];
+      readonly ipv4?: ParsedIpv4Header;
+    };
+
+export interface IcmpSendOptions {
+  readonly destination: Ipv4MessageAddress;
+  readonly ttl?: number;
+  readonly flags?: readonly SendMessageFlag[];
+  readonly control?: readonly SendControlMessage[];
+  readonly signal?: AbortSignal;
+}
+
+export interface IcmpReceiveOptions {
+  readonly dataCapacity?: number;
+  readonly controlCapacity?: number;
+  readonly signal?: AbortSignal;
+  readonly parse?: IcmpParseOptions;
+}
+
+export interface IcmpEchoReplyMatch {
+  readonly identifier: number;
+  readonly sequence: number;
+  readonly expectedSourceAddress?: string;
+  readonly expectedDestinationAddress?: string;
+  readonly token?: Uint8Array;
 }
 
 export interface AbortableOperationOptions {
@@ -724,6 +840,20 @@ interface ClaimedReceiveOptions {
   readonly errorQueue: boolean;
 }
 
+interface ValidatedRawSocketOptions {
+  readonly family: RawSocketFamily;
+  readonly mode: PacketSocketMode | undefined;
+  readonly protocol: number;
+}
+
+interface ValidatedIcmpReceivedMessageInput {
+  readonly data: Uint8Array;
+  readonly dataLength: number;
+  readonly dataTruncated: boolean;
+  readonly ipv4: Ipv4PacketMetadata | undefined;
+  readonly sourceAddress: string | undefined;
+}
+
 interface SocketInternals {
   readonly state: SocketState;
   readonly isOpen: () => boolean;
@@ -764,6 +894,7 @@ export class RawSocket {
   readonly #state: SocketState;
   readonly #family: RawSocketFamily;
   readonly #mode: PacketSocketMode | undefined;
+  readonly #protocol: number;
   #nextOperationId = 1;
   #closed = false;
   #closePromise: Promise<void> | undefined;
@@ -773,11 +904,13 @@ export class RawSocket {
     state: SocketState,
     family: RawSocketFamily,
     mode: PacketSocketMode | undefined,
+    protocol: number,
   ) {
     this.#handle = handle;
     this.#state = state;
     this.#family = family;
     this.#mode = mode;
+    this.#protocol = protocol;
   }
 
   /**
@@ -787,8 +920,9 @@ export class RawSocket {
    */
   static open(options: RawSocketOptions): Promise<RawSocket> {
     return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      let validated: ValidatedRawSocketOptions;
       try {
-        validateProtocol(options);
+        validated = validateProtocol(options);
       } catch (error) {
         reject(normalizeUnknownError(error, "createRawSocket"));
         return;
@@ -820,11 +954,10 @@ export class RawSocket {
       });
 
       try {
-        const family = options.family ?? "ipv4";
         const result = nativeBinding.nativeOpenRawSocket(
-          family,
-          options.mode,
-          options.protocol,
+          validated.family,
+          validated.mode,
+          validated.protocol,
           (completion) => {
             dispatchCompletion(state, completion);
           },
@@ -834,7 +967,13 @@ export class RawSocket {
           reject(new RawSocketError(result));
           return;
         }
-        socket = new RawSocket(result, state, family, options.mode);
+        socket = new RawSocket(
+          result,
+          state,
+          validated.family,
+          validated.mode,
+          validated.protocol,
+        );
       } catch (error) {
         state.pending.delete(OPEN_OPERATION_ID);
         reject(normalizeUnknownError(error, "createRawSocket"));
@@ -854,6 +993,11 @@ export class RawSocket {
 
   get packetMode(): PacketSocketMode | undefined {
     return this.#mode;
+  }
+
+  /** The checked protocol supplied when this socket was opened. */
+  get protocol(): number {
+    return this.#protocol;
   }
 
   /** Binds the socket to a local dotted-decimal IPv4 address. */
@@ -2100,6 +2244,297 @@ export class RawSocket {
   }
 }
 
+/** Computes the RFC 1071 Internet checksum over one bounded input snapshot. */
+export function computeInternetChecksum(data: Uint8Array): number {
+  return callIcmpCodec("computeInternetChecksum", () =>
+    icmpCodec.computeInternetChecksumInternal(data),
+  );
+}
+
+/** Validates a complete checksum-covered Internet message. */
+export function validateInternetChecksum(data: Uint8Array): boolean {
+  return callIcmpCodec("validateInternetChecksum", () =>
+    icmpCodec.validateInternetChecksumInternal(data),
+  );
+}
+
+/** Canonically encodes one supported standalone ICMPv4 message. */
+export function encodeIcmpMessage(message: IcmpMessage): Buffer {
+  return callIcmpCodec("encodeIcmpMessage", () =>
+    icmpCodec.encodeIcmpMessageInternal(message),
+  );
+}
+
+/** Structurally parses one standalone ICMPv4 message. */
+export function parseIcmpMessage(
+  data: Uint8Array,
+  options?: IcmpParseOptions,
+): IcmpParseResult {
+  return callIcmpCodec("parseIcmpMessage", () =>
+    icmpCodec.parseIcmpMessageInternal(
+      data,
+      icmpCodec.normalizeIcmpParseOptions(options),
+    ),
+  );
+}
+
+/** Validates one standalone ICMPv4 message without duplicating parser rules. */
+export function validateIcmpMessage(
+  data: Uint8Array,
+  options?: IcmpParseOptions,
+): IcmpValidationResult {
+  return callIcmpCodec("validateIcmpMessage", () =>
+    icmpCodec.validateIcmpMessageInternal(
+      data,
+      icmpCodec.normalizeIcmpParseOptions(options),
+    ),
+  );
+}
+
+/** Parses the IPv4-header-prefixed layout returned by Linux raw IPv4 sockets. */
+export function parseIcmpReceivedMessage(
+  message: ReceivedMessage,
+  options?: IcmpParseOptions,
+): IcmpReceivedParseResult {
+  return callIcmpCodec("parseIcmpReceivedMessage", () => {
+    const validated = validateIcmpReceivedMessageInput(message);
+    const normalized = icmpCodec.normalizeIcmpParseOptions(options);
+    if (validated.ipv4 === undefined) {
+      return {
+        ok: false,
+        received: message,
+        error: {
+          reason: "invalidIpv4Header",
+          message: "received message does not contain parsed IPv4 metadata",
+          offset: 0,
+        },
+        checksumStatus: "unverifiable",
+        issues: [],
+      };
+    }
+    const result = icmpCodec.parseIcmpIpv4FrameInternal(
+      validated.data,
+      validated.dataLength,
+      validated.dataTruncated,
+      validated.ipv4,
+      validated.sourceAddress,
+      normalized,
+    );
+    if (result.ok) {
+      return {
+        ok: true,
+        received: message,
+        ipv4: result.ipv4,
+        packet: result.packet,
+        incomplete: result.incomplete,
+      };
+    }
+    return {
+      ok: false,
+      received: message,
+      error: result.error,
+      checksumStatus: result.checksumStatus,
+      issues: result.issues,
+      ...(result.ipv4 === undefined ? {} : { ipv4: result.ipv4 }),
+    };
+  });
+}
+
+/** Encodes and sends exactly one ICMPv4 message through an existing socket. */
+export function sendIcmpMessage(
+  socket: RawSocket,
+  message: IcmpMessage,
+  options: IcmpSendOptions,
+): Promise<number> {
+  return callIcmpCodec("sendIcmpMessage", () => {
+    validateIcmpSocket(socket, "sendIcmpMessage");
+    const rawOptions: unknown = options;
+    if (typeof rawOptions !== "object" || rawOptions === null) {
+      throw invalidArgument("sendIcmpMessage", "options must be an object");
+    }
+    const candidate = rawOptions as Record<string, unknown>;
+    const destination = candidate.destination;
+    const ttl = candidate.ttl;
+    const flags = candidate.flags;
+    const rawControl: unknown = candidate.control ?? [];
+    const signal = candidate.signal;
+    if (!Array.isArray(rawControl)) {
+      throw invalidArgument(
+        "sendIcmpMessage",
+        "control must be an array when provided",
+      );
+    }
+    const ownedControl: unknown[] = [];
+    for (const entry of rawControl as unknown[]) {
+      ownedControl.push(entry);
+    }
+    if (ttl !== undefined) {
+      validateIntegerRange(ttl, 1, 255, "sendIcmpMessage", "ttl");
+      if (
+        ownedControl.some(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            (entry as { kind?: unknown }).kind === "ipv4Ttl",
+        )
+      ) {
+        throw invalidArgument(
+          "sendIcmpMessage",
+          "ttl and an ipv4Ttl control are mutually exclusive",
+        );
+      }
+      ownedControl.push({ kind: "ipv4Ttl", value: ttl });
+    }
+    const data = encodeIcmpMessage(message);
+    return socket.sendMessage({
+      data,
+      destination: destination as Ipv4MessageAddress,
+      ...(flags === undefined
+        ? {}
+        : { flags: flags as readonly SendMessageFlag[] }),
+      ...(ownedControl.length === 0
+        ? {}
+        : { control: ownedControl as readonly SendControlMessage[] }),
+      ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+    });
+  });
+}
+
+/** Receives and parses exactly one normal-lane ICMPv4 message. */
+export function receiveIcmpMessage(
+  socket: RawSocket,
+  options: IcmpReceiveOptions = {},
+): Promise<IcmpReceivedParseResult> {
+  return callIcmpCodec("receiveIcmpMessage", () => {
+    validateIcmpSocket(socket, "receiveIcmpMessage");
+    const rawOptions: unknown = options;
+    if (typeof rawOptions !== "object" || rawOptions === null) {
+      throw invalidArgument("receiveIcmpMessage", "options must be an object");
+    }
+    const candidate = rawOptions as Record<string, unknown>;
+    const flags = candidate.flags;
+    const dataCapacity = candidate.dataCapacity;
+    const controlCapacity = candidate.controlCapacity;
+    const signal = candidate.signal;
+    const parse = candidate.parse;
+    if (flags !== undefined) {
+      throw invalidArgument(
+        "receiveIcmpMessage",
+        "peek and errorQueue flags are not supported by this helper",
+      );
+    }
+    const parseOptions = icmpCodec.normalizeIcmpParseOptions(parse);
+    return socket
+      .receiveMessage({
+        ...(dataCapacity === undefined
+          ? {}
+          : { dataCapacity: dataCapacity as number }),
+        ...(controlCapacity === undefined
+          ? {}
+          : { controlCapacity: controlCapacity as number }),
+        ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+      })
+      .then((received) => parseIcmpReceivedMessage(received, parseOptions));
+  });
+}
+
+/** Strongly matches one complete received Echo Reply against explicit fields. */
+export function matchesIcmpEchoReply(
+  received: IcmpReceivedParseResult,
+  expected: IcmpEchoReplyMatch,
+): boolean {
+  return callIcmpCodec("matchesIcmpEchoReply", () => {
+    const rawExpected: unknown = expected;
+    if (typeof rawExpected !== "object" || rawExpected === null) {
+      throw invalidArgument(
+        "matchesIcmpEchoReply",
+        "expected must be an object",
+      );
+    }
+    const candidate = rawExpected as Record<string, unknown>;
+    const identifier = candidate.identifier;
+    const sequence = candidate.sequence;
+    const expectedSourceAddress = candidate.expectedSourceAddress;
+    const expectedDestinationAddress = candidate.expectedDestinationAddress;
+    const rawToken = candidate.token;
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "matchesIcmpEchoReply",
+      "identifier",
+    );
+    validateIntegerRange(
+      sequence,
+      0,
+      0xffff,
+      "matchesIcmpEchoReply",
+      "sequence",
+    );
+    if (expectedSourceAddress !== undefined) {
+      validateIpv4Address(
+        expectedSourceAddress,
+        "matchesIcmpEchoReply",
+        "expectedSourceAddress",
+      );
+    }
+    if (expectedDestinationAddress !== undefined) {
+      validateIpv4Address(
+        expectedDestinationAddress,
+        "matchesIcmpEchoReply",
+        "expectedDestinationAddress",
+      );
+    }
+    if (
+      rawToken !== undefined &&
+      (!(rawToken instanceof Uint8Array) ||
+        rawToken.byteLength > icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8)
+    ) {
+      throw invalidArgument(
+        "matchesIcmpEchoReply",
+        "token must be a Uint8Array no larger than 65507 bytes",
+      );
+    }
+    const token = rawToken === undefined ? undefined : Buffer.from(rawToken);
+    const rawReceived: unknown = received;
+    if (
+      typeof rawReceived !== "object" ||
+      rawReceived === null ||
+      (rawReceived as { ok?: unknown }).ok !== true
+    ) {
+      return false;
+    }
+    const successful = rawReceived as Extract<
+      IcmpReceivedParseResult,
+      { readonly ok: true }
+    >;
+    if (
+      successful.incomplete ||
+      successful.packet.checksumStatus !== "valid" ||
+      successful.packet.message.kind !== "echoReply"
+    ) {
+      return false;
+    }
+    const reply = successful.packet.message;
+    if (
+      reply.identifier !== identifier ||
+      reply.sequence !== sequence ||
+      (expectedSourceAddress !== undefined &&
+        successful.ipv4.sourceAddress !== expectedSourceAddress) ||
+      (expectedDestinationAddress !== undefined &&
+        successful.ipv4.destinationAddress !== expectedDestinationAddress)
+    ) {
+      return false;
+    }
+    if (token === undefined) return true;
+    if (token.byteLength > reply.data.byteLength) return false;
+    for (let index = 0; index < token.byteLength; index += 1) {
+      if (token[index] !== reply.data[index]) return false;
+    }
+    return true;
+  });
+}
+
 /** A Node-style, bounded event adapter over one RawSocket receive lane. */
 export class RawSocketEventEmitter extends EventEmitter<RawSocketEventMap> {
   readonly #socket: RawSocket;
@@ -2337,7 +2772,9 @@ function callNative(
   }
 }
 
-function validateProtocol(options: RawSocketOptions): void {
+function validateProtocol(
+  options: RawSocketOptions,
+): ValidatedRawSocketOptions {
   const candidate: unknown = options;
   if (typeof candidate !== "object" || candidate === null) {
     throw invalidArgument("createRawSocket", "options must be an object");
@@ -2366,11 +2803,17 @@ function validateProtocol(options: RawSocketOptions): void {
       "createRawSocket",
       "mode is valid only for packet sockets",
     );
+  const protocol = (candidate as { protocol?: unknown }).protocol;
   validatePacketLength(
-    (candidate as { protocol?: unknown }).protocol,
+    protocol,
     "protocol",
     resolvedFamily === "packet" ? 0xffff : 255,
   );
+  return {
+    family: resolvedFamily,
+    mode,
+    protocol: protocol as number,
+  };
 }
 
 function validatePacketData(data: Uint8Array): void {
@@ -3313,6 +3756,187 @@ function isRawSocketErrorKind(
   kind: RawSocketErrorKind,
 ): error is RawSocketError {
   return error instanceof RawSocketError && error.kind === kind;
+}
+
+function callIcmpCodec<Result>(operation: string, call: () => Result): Result {
+  try {
+    return call();
+  } catch (error) {
+    if (error instanceof RawSocketError) throw error;
+    if (error instanceof icmpCodec.IcmpInputError) {
+      throw invalidArgument(operation, error.message);
+    }
+    throw normalizeUnknownError(error, operation);
+  }
+}
+
+function validateIcmpSocket(socket: RawSocket, operation: string): void {
+  if (socketInternals.get(socket) === undefined) {
+    throw invalidArgument(
+      operation,
+      "socket must be a RawSocket returned by this module",
+    );
+  }
+  if (socket.family !== "ipv4") {
+    throw invalidArgument(operation, "socket must use the ipv4 family");
+  }
+  if (socket.protocol !== IPPROTO_ICMP) {
+    throw invalidArgument(operation, "socket protocol must be IPPROTO_ICMP");
+  }
+}
+
+function validateIcmpReceivedMessageInput(
+  value: unknown,
+): ValidatedIcmpReceivedMessageInput {
+  if (typeof value !== "object" || value === null) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message must be a ReceivedMessage object",
+    );
+  }
+  const candidate = value as Record<string, unknown>;
+  const data = candidate.data;
+  const dataLength = candidate.dataLength;
+  const dataTruncated = candidate.dataTruncated;
+  const source = candidate.source;
+  const metadata = candidate.ipv4;
+  if (!(data instanceof Uint8Array)) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.data must be a Uint8Array",
+    );
+  }
+  validateIntegerRange(
+    dataLength,
+    0,
+    MAX_PACKET_LENGTH,
+    "parseIcmpReceivedMessage",
+    "message.dataLength",
+  );
+  if (typeof dataTruncated !== "boolean") {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.dataTruncated must be boolean",
+    );
+  }
+  let sourceAddress: string | undefined;
+  if (source !== undefined) {
+    if (
+      typeof source !== "object" ||
+      source === null ||
+      (source as { family?: unknown }).family !== "ipv4"
+    ) {
+      throw invalidArgument(
+        "parseIcmpReceivedMessage",
+        "message.source must be an IPv4 address when present",
+      );
+    }
+    const address = (source as { address?: unknown }).address;
+    validateIpv4Address(
+      address,
+      "parseIcmpReceivedMessage",
+      "message.source.address",
+    );
+    sourceAddress = address;
+  }
+  if (metadata === undefined) {
+    return { data, dataLength, dataTruncated, ipv4: undefined, sourceAddress };
+  }
+  if (typeof metadata !== "object" || metadata === null) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.ipv4 must be IPv4 metadata when present",
+    );
+  }
+  const ipv4 = metadata as Record<string, unknown>;
+  const destinationAddress = ipv4.destinationAddress;
+  const protocol = ipv4.protocol;
+  const ttl = ipv4.ttl;
+  const typeOfService = ipv4.typeOfService;
+  const headerLength = ipv4.headerLength;
+  const totalLength = ipv4.totalLength;
+  const identification = ipv4.identification;
+  const fragmentOffset = ipv4.fragmentOffset;
+  const dontFragment = ipv4.dontFragment;
+  const moreFragments = ipv4.moreFragments;
+  validateIpv4Address(
+    destinationAddress,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.destinationAddress",
+  );
+  validateIntegerRange(
+    protocol,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.protocol",
+  );
+  validateIntegerRange(
+    ttl,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.ttl",
+  );
+  validateIntegerRange(
+    typeOfService,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.typeOfService",
+  );
+  validateIntegerRange(
+    headerLength,
+    20,
+    60,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.headerLength",
+  );
+  validateIntegerRange(
+    totalLength,
+    20,
+    MAX_PACKET_LENGTH,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.totalLength",
+  );
+  validateIntegerRange(
+    identification,
+    0,
+    0xffff,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.identification",
+  );
+  validateIntegerRange(
+    fragmentOffset,
+    0,
+    0x1fff,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.fragmentOffset",
+  );
+  if (typeof dontFragment !== "boolean" || typeof moreFragments !== "boolean") {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.ipv4 fragment flags must be boolean",
+    );
+  }
+  return {
+    data,
+    dataLength,
+    dataTruncated,
+    sourceAddress,
+    ipv4: {
+      destinationAddress,
+      protocol,
+      ttl,
+      typeOfService,
+      headerLength,
+      totalLength,
+      identification,
+      fragmentOffset,
+      dontFragment,
+      moreFragments,
+    },
+  };
 }
 
 function normalizeErrorKind(value: string): RawSocketErrorKind {

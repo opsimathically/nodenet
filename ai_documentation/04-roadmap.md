@@ -365,6 +365,132 @@ stress are implemented. No Rust, syscall, N-API, unsafe-code, or production
 dependency change was required. See the [Phase 11 report](21-phase-11-report.md)
 and the corrective [implementation audit](22-phase-11-implementation-audit.md).
 
+## Phase 12 — ICMPv4 foundation and Echo utilities
+
+Status: complete (2026-07-13)
+
+Purpose: establish the pure, bounded protocol-codec layer and the first useful
+ICMPv4 request/reply workflow without changing native socket ownership. The
+complete contract is in the
+[ICMP and traceroute plan](23-icmp-and-traceroute-plan.md).
+
+Deliverables:
+
+- add named ICMP type/code constants and discriminated construction/parse types;
+- implement non-mutating Internet checksum calculation and validation;
+- implement bounded `encodeIcmpMessage()`, structured `parseIcmpMessage()`, and
+  shared `validateIcmpMessage()` results with owned output, unknown-message/
+  code retention, and compatible-versus-canonical validation;
+- expose the checked protocol captured when `RawSocket` opens so helpers can
+  reject a non-ICMP socket without a native query;
+- explicitly adapt IPv4 raw `ReceivedMessage` data, including its IPv4 header,
+  into an ICMP packet without confusing send and receive layouts;
+- implement Echo Request/Reply construction, parsing, validation, matching,
+  one-operation send, and one-operation receive;
+- document promise and existing event-adapter usage and add ordinary,
+  declaration, malformed-input, and privileged loopback tests.
+
+Exit gate: codecs cannot read outside input or allocate beyond the 65,515-byte
+ICMPv4 bound; checksums and Echo messages pass independent vectors and loopback;
+all short/malformed inputs return structured failures; canonical violations are
+reported without confusing them with unsafe structure; inputs/results do not
+alias and checksum/parse passes share one bounded input snapshot; the root
+facade preserves existing argument errors without an ESM import cycle; and the
+phase adds no runtime dependency, Rust code, native receive engine, or hidden
+socket ownership.
+
+Implementation evidence: root-exported constants/types and strict TypeScript
+codecs implement RFC 1071 checksums, owned Echo encode/parse/validation,
+compatible/canonical issues, unknown preservation, checked IPv4 raw-receive
+extraction, authenticated socket helpers, per-message TTL, and correlation. The
+ordinary test, declaration, lint, type, privileged loopback, stress, consumer,
+artifact, and reproducibility gates pass with no Rust/native/runtime dependency
+change. See the [Phase 12 report](25-phase-12-report.md).
+
+## Phase 13 — ICMPv4 errors and quoted datagrams
+
+Status: planned; depends on Phase 12
+
+Deliverables:
+
+- add a checked IPv4 quote parser with enough Echo correlation metadata for
+  diagnostic responses and traceroute;
+- implement Destination Unreachable, RFC 1191 Fragmentation Needed, Time
+  Exceeded, Parameter Problem, and Redirect codecs and code constants;
+- support historical and longer quotes, explicit truncation, and RFC 4884
+  extension envelopes while preserving unknown extension objects, using
+  length-based compliant parsing by default and an explicit non-default legacy
+  128-byte mode;
+- keep construction explicit and Redirect informational, with no automatic error
+  responses or route mutation;
+- add golden, generated malformed, quote/extension boundary, and disposable
+  namespace tests.
+
+Exit gate: every quote, IHL, total length, extension boundary, MTU, pointer,
+reserved field, and code has deterministic checked behavior; the RFC 4884 length
+octet coexists correctly with RFC 1191 MTU and the 576-byte ceiling; zero-length
+and legacy extension framing are unambiguous; all requested error messages
+round-trip; malformed packets cannot cause unexpected exceptions; and no utility
+treats unauthenticated diagnostic data as host policy.
+
+## Phase 14 — Router discovery and legacy ICMPv4 messages
+
+Status: planned; depends on Phase 12 and Phase 13 validation patterns
+
+Deliverables:
+
+- implement Router Solicitation and variable Router Advertisement codecs with
+  bounded entries, signed preferences, lifetimes, and extension-word retention;
+- implement Timestamp Request/Reply and preserve standard, high-bit
+  non-standard, and invalid-standard-range timestamp semantics, with
+  request-only fields canonically zeroed;
+- implement deprecated Address Mask Request/Reply formats and contiguous-mask
+  inspection without applying interface configuration, with canonical requests
+  carrying a zero mask;
+- expose the same explicit one-operation socket composition, enforce Router
+  Discovery multicast destination/TTL rules, retain explicit broadcast
+  permission, and add boundary, wire-vector, declaration, and isolated tests;
+- clearly distinguish supported legacy parsing/construction from recommended
+  modern host configuration.
+
+Exit gate: count/entry-size arithmetic is overflow-safe; every wire field
+extreme parses and is preserved, while canonical construction fields round-trip;
+unknown extension words remain bounded; legacy messages never change clocks,
+routes, routers, or interface masks; and documentation states their registry
+status and trust limitations.
+
+## Phase 15 — ICMP traceroute utilities
+
+Status: planned; depends on Phases 12 and 13
+
+Deliverables:
+
+- construct and send per-message-TTL Echo probes without racing a socket-wide
+  TTL option;
+- strongly correlate direct Echo Replies and quoted Time Exceeded or Destination
+  Unreachable responses using destination, protocol, identifier, sequence, and
+  bounded token evidence;
+- classify hop, destination, unreachable, and diagnostic responses; generate
+  compact timeout results locally; reject cancellation after complete cleanup;
+- add a bounded cancellable convenience traceroute over a dedicated existing
+  ICMP socket, using an internally attached/detached event source for a
+  lifetime-long lane claim, plus public builders/classifiers for callers that
+  already own an event source;
+- impose explicit hop/probe/payload/token/in-flight/per-probe/overall-time and
+  compact-result-retention bounds;
+- test fake-clock loss/reordering/late/duplicate races, callback failures, and
+  an isolated multi-router topology with intermediate hops and destination
+  detection;
+- document ICMP filtering/rate limits, asymmetric/load-balanced paths,
+  privileges, silent hops, and unauthenticated responses.
+
+Exit gate: unrelated packets cannot complete probes; every send/receive/timer/
+cancellation race settles once; configured bounds cap retained and in-flight
+work; receive conflicts remain deterministic; every terminal path releases the
+internal event claim without closing the caller-owned socket; an isolated route
+demonstrates TTL-limited hops and destination completion; and all previous
+release and stress gates remain green.
+
 ## Cross-phase rule
 
 Do not expand breadth while a known descriptor-lifetime, buffer-lifetime,

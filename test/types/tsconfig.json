@@ -11,5 +11,5 @@
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": false
   },
-  "include": ["event-api.ts"]
+  "include": ["event-api.ts", "icmp-api.ts"]
 }

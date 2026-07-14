@@ -3,6 +3,24 @@
 All notable changes use Semantic Versioning. This project is not yet stable;
 release-candidate APIs may change before `0.1.0`.
 
+## 0.1.0-rc.3 - 2026-07-13
+
+- Add zero-dependency, non-mutating RFC 1071 Internet-checksum helpers and a
+  bounded ICMPv4 codec foundation.
+- Add canonical Echo Request/Reply construction plus structured compatible or
+  canonical parsing and validation with explicit checksum policies.
+- Preserve unknown ICMP types/codes as owned bytes and distinguish malformed,
+  incomplete, invalid-checksum, and non-canonical input.
+- Add checked Linux IPv4 raw-receive extraction that cross-validates header
+  bytes, native metadata, source address, truncation, fragmentation, and both
+  IPv4 and ICMP checksums.
+- Add authenticated one-operation ICMP send/receive helpers, per-message TTL,
+  strong Echo Reply correlation, and a readonly captured `RawSocket.protocol`.
+- Add deterministic golden, boundary, arbitrary-byte, declaration, ownership,
+  and privileged promise/event loopback coverage plus end-user examples.
+- Keep all Phase 12 protocol logic in strict TypeScript with no runtime
+  dependency, Rust change, native I/O engine, or hidden receive queue.
+
 ## 0.1.0-rc.2 - 2026-07-13
 
 - Add the typed, zero-runtime-dependency `RawSocketEventEmitter` adapter with

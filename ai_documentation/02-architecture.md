@@ -8,6 +8,8 @@ Node application
       v
 TypeScript public API and declarations
       |
+      +--> Pure bounded protocol utilities (ICMPv4 Echo implemented; expansion planned)
+      |
       v
 N-API exports and value/error conversion
       |
@@ -29,6 +31,9 @@ and translations between Linux results and stable N-API values.
 
 - **Public TypeScript facade:** exports supported classes/functions and types;
   prevents consumers from relying on generated native binding details.
+- **Protocol utility layer:** pure TypeScript codecs and bounded orchestration
+  compose over public raw-socket primitives; they do not own native descriptors
+  or call generated bindings directly.
 - **N-API adapter:** converts Node values to checked Rust types, schedules work,
   and maps results/errors back to Node.
 - **Socket core:** models descriptor ownership, lifecycle, supported families,
@@ -205,6 +210,37 @@ a claim-release mechanism. Reactor loss invokes `RawSocket.close()` so the
 wrapped object's JavaScript admission state becomes terminal. With two sources,
 closing either closes the shared socket, while each source waits only for its
 own turn and event dispatch.
+
+## ICMPv4 utility layer
+
+Phase 12 adds pure packet transforms above the public message API; Phases 13
+through 15 extend the same layer. `encodeIcmpMessage()` and `parseIcmpMessage()`
+operate on standalone ICMP bytes; `parseIcmpReceivedMessage()` explicitly
+removes the checked IPv4 header present on Linux raw receives. One-operation
+socket helpers delegate to `sendMessage()`/`receiveMessage()` and inherit their
+descriptor, cancellation, queue, close, and lane semantics.
+
+Variable parsed fields are copied into bounded owned Buffers. Structured parse
+results distinguish malformed network input from local construction errors, and
+checksum state remains distinct from successful structural decoding. Compatible
+receive parsing preserves and reports ignorable/non-canonical fields; canonical
+validation turns those findings into error issues without turning readable bytes
+into an unsafe-structure failure. Internal codecs return neutral results and
+never import the package root; root wrappers perform runtime JS validation and
+preserve the existing `RawSocketError` argument shape without an ESM cycle. A
+shared quote parser exposes only bounded IPv4 and ICMP correlation metadata; it
+does not become a general transport decoder.
+
+The traceroute convenience owns no descriptor and creates no receive engine. It
+uses an existing dedicated ICMP socket, per-message TTL controls, monotonic
+deadlines, bounded compact results, and one settlement record per in-flight
+probe. Abort and local failures reject only after cleanup; overall/per-probe
+timeouts are distinct result states. One internally attached
+`RawSocketEventEmitter` provides a lifetime-long normal-lane claim and is
+detached on every terminal path, leaving the caller's socket open. Event-driven
+callers instead feed messages from their existing event source into the same
+public parser and response classifier. Detailed limits and phase gates are
+frozen in `23-icmp-and-traceroute-plan.md` and D-029.
 
 ## Error model
 

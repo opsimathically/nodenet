@@ -42,14 +42,25 @@ glibc artifact baseline. Phase 11 adds the zero-dependency typed
 `RawSocketEventEmitter` over `receiveMessage()` with one receive per source,
 explicit start, awaitable pause/detach, receive-lane ownership,
 fulfilled-before-boundary dispatch, explicit attachment lifetime, and
-exactly-once close. The package is now the unpublished `0.1.0-rc.2` candidate.
-Its authoritative contract, feasibility audit, and completion report are
+exactly-once close. Phase 12 adds pure bounded ICMPv4 checksum and Echo codecs,
+structured compatible/canonical parsing and validation, Linux raw-receive
+extraction, Echo correlation, one-operation socket helpers, and a captured
+readonly `RawSocket.protocol` getter without changing Rust or adding a runtime
+dependency. The package is now the unpublished `0.1.0-rc.3` candidate. Its
+authoritative contract, feasibility audit, and completion report are
 `ai_documentation/19-phase-11-event-api-plan.md`,
 `ai_documentation/20-phase-11-plan-review.md`, and
 `ai_documentation/21-phase-11-report.md`. The adversarial post-implementation
 review and its scheduler/quiescence corrections are recorded in
 `ai_documentation/22-phase-11-implementation-audit.md`. Native AArch64 remains
-untested until its runner passes.
+untested until its runner passes. Phase 12 implementation and its x86-64
+ordinary, privileged, stress, consumer, artifact, and reproducibility gates are
+complete. Phases 13 through 15 remain accepted plans for ICMPv4 diagnostic
+errors and quotes, router-discovery/legacy message formats, and conventional
+increasing-TTL ICMP Echo traceroute. Their authoritative scope and gates are in
+`ai_documentation/23-icmp-and-traceroute-plan.md`; the closed preimplementation
+audit is `ai_documentation/24-icmp-plan-review.md`, and Phase 12 evidence is in
+`ai_documentation/25-phase-12-report.md`.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -127,6 +138,13 @@ The current source of planning truth is
   semantics, typed plus bounded extensible options, filters, batches, measured
   packet rings, and hardened x86-64/AArch64 distribution. See
   `ai_documentation/11-full-capability-plan.md` for exact sequencing.
+- D-029 governs the planned protocol utility layer: implement the enumerated
+  ICMPv4 codecs and traceroute composition in strict TypeScript with no runtime
+  dependency or new native I/O engine. Codecs use owned bounded results and
+  structured hostile-input failures, compatible receive parsing, and canonical
+  validation; socket helpers preserve `RawSocket` ownership and receive lanes.
+  RFC 4884 legacy framing is explicit opt-in. ICMPv6 codecs are a separate
+  future design.
 
 ## Expected repository shape
 
@@ -153,6 +171,13 @@ or dependency directories.
 - Treat a fulfilled message awaiting dispatch as part of the active event turn;
   use one generation-checked scheduler, transactional claims/observers, distinct
   ring-operation tokens, and explicit detach/close rather than GC claim release.
+- For Phases 12 through 15, distinguish standalone ICMP bytes from Linux IPv4
+  raw receive frames, copy variable parsed data, check every offset/count before
+  slicing, and never apply Redirect, Router Advertisement, Timestamp, or Address
+  Mask data to host configuration.
+- Traceroute must use monotonic deadlines, strong direct/quoted probe matching,
+  bounded timers/probes/payload/results/in-flight work, cleanup-before-reject,
+  and the existing normal receive lane.
 - Prefer additive, reviewable API slices over attempting every raw socket
   feature in one change.
 - Pair each exported native operation with argument validation, lifecycle
@@ -263,3 +288,9 @@ Do not report a change as verified without naming which gates actually ran.
   verification record.
 - `ai_documentation/22-phase-11-implementation-audit.md`: post-implementation
   race, boundary, test-coverage, and release-health audit.
+- `ai_documentation/23-icmp-and-traceroute-plan.md`: accepted Phase 12–15 scope,
+  wire contracts, APIs, safety bounds, tests, and exit gates.
+- `ai_documentation/24-icmp-plan-review.md`: closed preimplementation protocol,
+  API, lifecycle, resource-bound, and test-topology review for Phases 12–15.
+- `ai_documentation/25-phase-12-report.md`: ICMPv4 foundation/Echo
+  implementation, safety, API, and verification record.

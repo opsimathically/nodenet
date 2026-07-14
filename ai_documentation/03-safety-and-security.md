@@ -131,6 +131,44 @@ unknown option/control payloads need independent count/byte limits. A raw
 networking API must not treat kernel capability as permission for unbounded
 process memory retention.
 
+## ICMPv4 codec and traceroute invariants
+
+The protocol layer treats even checksum-valid ICMP as unauthenticated input.
+Redirects, Router Advertisements, Address Masks, timestamps, quoted packets, and
+traceroute responders are reported as data and never applied automatically to
+routes, interfaces, clocks, or trust decisions.
+
+Every parser checks its common minimum before the type-specific layout. IPv4
+IHL/total length, ICMP message length, router address counts/entry words, quoted
+datagram offsets, and RFC 4884 object lengths use checked arithmetic before
+slicing or allocating. Truncation and checksum-unverifiable states are explicit.
+Unknown types, codes, and extension objects are preserved only as owned bytes
+within the 65,515-byte ICMPv4 message ceiling (the IPv4 maximum minus its
+minimum header). Receivers preserve standards-defined ignored/reserved bytes as
+validation issues instead of rejecting safely readable future-compatible data;
+canonical encoding still writes every such field deterministically. RFC 4884
+uses its length octet by default, treats zero as no extensions, and enables
+fixed-128-byte legacy detection only by explicit opt-in with a verified
+extension header and complete object chain.
+
+Encoded and parsed variable data does not alias caller-mutable buffers. Each
+public codec/checksum call first makes one bounded private copy and performs all
+checksum and structural reads from it, so concurrently mutable shared input
+cannot change meaning between passes. The first implementation deliberately
+copies bounded fields; a zero-copy codec would require a new lifetime and
+mutation review. Checksum routines do not mutate inputs and handle odd lengths
+without reading an implicit byte.
+
+Traceroute uses monotonic time, bounded probe counts/timers/in-flight work,
+bounded token/payload sizes, an overall deadline, and compact retained results.
+Strong correlation spans destination, protocol, identifier, sequence, and a
+payload token; a short historical quote is explicitly weaker, while partial or
+contradictory evidence returns unmatched rather than guessing. One settlement
+authority arbitrates reply, timeout, cancellation, and close. Cancellation and
+local I/O failure reject only after listener/timer/lane cleanup. The convenience
+uses the existing normal receive lane and must conflict deterministically with
+another receiver rather than silently split packets.
+
 ## Review checklist for every native export
 
 1. Are all JS inputs type-, range-, and combination-checked?

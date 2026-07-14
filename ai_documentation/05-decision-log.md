@@ -391,11 +391,13 @@ rationale to avoid repeating the investigation.
 
 ## Remaining design details
 
-Phase 10 has no remaining design question. Phase 11's core event-adapter
-contract is accepted in D-028 and has no blocker for its first implementation
-slice. Publishing an artifact remains an explicit operator action outside
-implementation. A future TX mmap, stream, async-iterator, batch-event, or
-packet-ring-event slice requires its own decision and measurements.
+Phase 10 has no remaining design question. Phase 11's event adapter and the
+Phase 12 ICMPv4 foundation/Echo slice are implemented. The remaining ICMPv4 and
+traceroute expansion is accepted in D-029; its preimplementation review has no
+open blocker, and Phase 13 errors/quotes/extensions are next. Publishing an
+artifact remains an explicit operator action outside implementation. A future
+ICMPv6 codec, TX mmap, stream, async-iterator, batch-event, or packet-ring-event
+slice requires its own decision and review.
 
 ### D-026 — Lossless bounded Node completion backpressure
 
@@ -474,6 +476,45 @@ packet-ring-event slice requires its own decision and measurements.
   designs. The changed release candidate advances to `0.1.0-rc.2`, and all Phase
   10 artifact/provenance gates must be rerun.
 
+### D-029 — Pure bounded ICMPv4 utilities over existing socket ownership
+
+- Status: accepted for Phases 12 through 15; Phase 12 implemented
+- Date: 2026-07-13
+- Decision: implement the enumerated ICMPv4 codecs, checksum helpers, received-
+  IPv4 adapter, one-operation socket helpers, and bounded Echo traceroute in
+  strict TypeScript with Node built-ins and zero runtime dependencies. Codecs
+  allocate owned bounded outputs, return structured failures for hostile packet
+  input, preserve unknown safe data, and separate checksum/structure/policy.
+  Receive parsing is compatible by default and reports safely decodable
+  non-canonical fields; canonical validation escalates those findings without
+  conflating them with unsafe structural failure. Internal codecs remain
+  independent of root error factories, while the root facade preserves the
+  existing runtime argument-error contract. Socket helpers accept an existing
+  `RawSocket` and delegate to its message API; event applications parse existing
+  event messages. Traceroute uses a dedicated socket, one internally
+  attached/detached event source for its lifetime-long lane claim, per-message
+  TTL, strong direct/quoted correlation, monotonic deadlines, explicit
+  probe/time/payload/in-flight/result bounds, and cleanup before cancellation or
+  local-failure rejection. RFC 4884 parsing is length-based by default; zero
+  length means no extension, and fixed-128-byte legacy detection is explicit
+  opt-in. It does not implement deprecated ICMP type 30. The accepted message
+  list is ICMPv4; ICMPv6 codecs remain a separate future design.
+- Rationale: protocol encoding and parsing are bounded byte transforms that do
+  not benefit from another N-API crossing or native ownership layer. TypeScript
+  keeps the public types and wire logic reviewable, while composition reuses the
+  already hardened Rust descriptor/reactor boundary. Explicit separation of
+  standalone ICMP bytes from Linux IPv4 raw receive frames prevents a common
+  header-offset error. Structured parse results are suitable for untrusted event
+  loops without exception-driven packet handling.
+- Consequences: no new runtime or Rust dependency is planned. Parser performance
+  includes deliberate bounded copies until measurement justifies a separately
+  reviewed immutable/zero-copy contract. Redirect, router discovery, timestamps,
+  and Address Masks remain informational and never alter host configuration. A
+  high-level traceroute owns the normal lane and conflicts with other receivers;
+  event consumers use public builders/classifiers instead. Every public-surface
+  phase advances the release candidate and reruns declaration, privileged,
+  stress, consumer, reproducibility, and artifact gates.
+
 ## Research references
 
 Compatibility facts were verified on 2026-07-12 against primary project
@@ -498,6 +539,14 @@ documentation:
 - [Linux kernel timestamping](https://www.kernel.org/doc/html/latest/networking/timestamping.html)
 - [Linux kernel Packet MMAP](https://www.kernel.org/doc/html/latest/networking/packet_mmap.html)
 - [nix 0.31.3 socket APIs](https://docs.rs/nix/0.31.3/nix/sys/socket/)
+- [IANA ICMP Parameters](https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml),
+  [RFC 792 ICMPv4](https://www.rfc-editor.org/rfc/rfc792.html),
+  [RFC 1071 Internet checksum](https://www.rfc-editor.org/rfc/rfc1071.html),
+  [RFC 1122 host requirements](https://www.rfc-editor.org/rfc/rfc1122.html),
+  [RFC 1191 Path MTU Discovery](https://www.rfc-editor.org/rfc/rfc1191.html),
+  [RFC 1256 Router Discovery](https://www.rfc-editor.org/rfc/rfc1256.html), and
+  [RFC 4884 multi-part ICMP](https://www.rfc-editor.org/rfc/rfc4884.html),
+  checked for D-029 on 2026-07-13
 
 ## Decision template
 

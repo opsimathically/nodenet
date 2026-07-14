@@ -71,6 +71,7 @@ test("validates interface lookup and packet socket permissions", async () => {
   }
   assert.equal(socket.family, "packet");
   assert.equal(socket.packetMode, "cooked");
+  assert.equal(socket.protocol, 3);
   await assert.rejects(
     socket.bind({ family: "packet", interfaceIndex: 0, protocol: 3 }),
     {
@@ -117,6 +118,7 @@ test("preserves Linux permission errors or safely closes an available socket", a
   }
 
   assert.equal(socket.status, "open");
+  assert.equal(socket.protocol, 1);
   await assert.rejects(socket.bind("localhost"), {
     code: "ERR_INVALID_ARGUMENT",
     operation: "bind",
@@ -227,6 +229,7 @@ test("preserves IPv6 permission errors or exposes the family safely", async () =
     return;
   }
   assert.equal(socket.family, "ipv6");
+  assert.equal(socket.protocol, 58);
   await assert.rejects(socket.bind({ family: "ipv4", address: "127.0.0.1" }), {
     code: "ERR_INVALID_ARGUMENT",
   });

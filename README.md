@@ -8,8 +8,9 @@ reporting, and a small dependency footprint.
 > **Status:** IPv4, IPv6, and raw/cooked Linux packet sockets support typed
 > message I/O, metadata, advanced options, packet controls, filter attachment,
 > AbortSignal cancellation, stable errors, explicit close, and an optional typed
-> event-driven receive adapter. Version `0.1.0-rc.2` is an unpublished release
-> candidate.
+> event-driven receive adapter. Bounded ICMPv4 checksum, Echo codec, parsing,
+> validation, correlation, and one-operation socket helpers are also available.
+> Version `0.1.0-rc.3` is an unpublished release candidate.
 
 The initial support baseline is Node.js 26+, Rust 1.97.0 (updated with each
 stable Rust release), and 64-bit glibc Linux on x86-64 or AArch64 with kernel
@@ -65,6 +66,14 @@ receive-ring work are in place, together with the event receive adapter,
 fuzz/sanitizer gates, and target-specific release rehearsal. See the
 [full capability plan](ai_documentation/11-full-capability-plan.md).
 
+Phase 12 is implemented with zero-dependency ICMPv4 checksum, Echo construction,
+standalone and Linux raw-receive parsing, validation, correlation, and socket
+helpers. Phases 13 through 15 remain reviewed plans for diagnostic errors,
+router discovery, Timestamp, legacy Address Mask messages, and bounded ICMP Echo
+traceroute utilities. See the
+[ICMP and traceroute plan](ai_documentation/23-icmp-and-traceroute-plan.md) and
+its [preimplementation review](ai_documentation/24-icmp-plan-review.md).
+
 ## Supported feature matrix
 
 | Area                                       | Status                | Conditions                                                                               |
@@ -77,6 +86,9 @@ fuzz/sanitizer gates, and target-specific release rehearsal. See the
 | `sendmmsg`/`recvmmsg` batches              | Implemented           | 64 messages and 1 MiB per operation                                                      |
 | TPACKET_V3 receive ring                    | Implemented           | Receive-only, copied frame leases, 64 MiB per ring                                       |
 | Typed EventEmitter receive adapter         | Implemented           | One bounded receive per source; normal and error-queue lanes are independent             |
+| ICMPv4 Echo utilities                      | Implemented           | Phase 12; bounded owned codecs and helpers over existing IPv4 ICMP sockets               |
+| ICMPv4 error/informational utilities       | Planned/reviewed      | Phases 13–14                                                                             |
+| ICMP Echo traceroute utilities             | Planned/reviewed      | Phase 15; conventional TTL-limited probes, not deprecated ICMP type 30                   |
 | Hardware timestamps and driver behavior    | Capability-detected   | Not a portable release gate                                                              |
 | TX packet mmap and AF_XDP                  | Unsupported           | Require separate ownership and performance reviews                                       |
 | x86-64 glibc Linux                         | Tested                | Kernel 4.18+, glibc 2.28+, Node 26+                                                      |
@@ -300,6 +312,118 @@ Conflicting direct, batch, ring, or duplicate event receivers fail with
 not support `errorQueue: true`, and an active TPACKET ring cannot be wrapped by
 the message-event adapter. Calling `close()` on either of two lane sources
 closes their shared socket; each source emits its own exactly-once `close`.
+
+### ICMPv4 Echo utilities
+
+Phase 12 provides non-mutating Internet-checksum helpers and bounded owned Echo
+Request/Reply codecs without changing the low-level socket API. Standalone ICMP
+bytes begin at the ICMP type field and use `parseIcmpMessage()`. Linux IPv4 raw
+receives include an IPv4 header, so use `parseIcmpReceivedMessage()` for an
+existing `ReceivedMessage`, or `receiveIcmpMessage()` for exactly one combined
+receive-and-parse operation.
+
+This promise-driven example sends one Echo Request and keeps consuming explicit
+one-shot receives until its strongly correlated reply arrives. Raw sockets may
+also observe the outbound request and unrelated ICMP traffic, so one receive is
+not assumed to be the reply:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  matchesIcmpEchoReply,
+  receiveIcmpMessage,
+  sendIcmpMessage,
+} from "nodenetraw";
+
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+const stop = new AbortController();
+const timeout = setTimeout(() => stop.abort(), 2_000);
+const identifier = 0x4e52;
+const sequence = 1;
+const token = new TextEncoder().encode("request-1");
+
+try {
+  await socket.bind("127.0.0.1");
+  const firstReceive = receiveIcmpMessage(socket, { signal: stop.signal });
+  await sendIcmpMessage(
+    socket,
+    { kind: "echoRequest", identifier, sequence, data: token },
+    {
+      destination: { family: "ipv4", address: "127.0.0.1" },
+      ttl: 64,
+      signal: stop.signal,
+    },
+  );
+
+  let received = await firstReceive;
+  while (
+    !matchesIcmpEchoReply(received, {
+      identifier,
+      sequence,
+      expectedSourceAddress: "127.0.0.1",
+      token,
+    })
+  ) {
+    received = await receiveIcmpMessage(socket, { signal: stop.signal });
+  }
+  if (!received.ok) throw new Error("correlated reply was not parseable");
+  console.log(received.ipv4, received.packet.message);
+} finally {
+  clearTimeout(timeout);
+  stop.abort();
+  await socket.close();
+}
+```
+
+Event-driven applications retain the same single receive engine. Parse each
+ordinary event synchronously; the ICMP layer does not create another emitter or
+hidden queue:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  RawSocketEventEmitter,
+  matchesIcmpEchoReply,
+  parseIcmpReceivedMessage,
+  sendIcmpMessage,
+} from "nodenetraw";
+
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+const source = new RawSocketEventEmitter(socket);
+const identifier = 0x4e52;
+const sequence = 2;
+const token = new TextEncoder().encode("request-2");
+
+source.on("message", (message) => {
+  const parsed = parseIcmpReceivedMessage(message);
+  if (
+    parsed.ok &&
+    matchesIcmpEchoReply(parsed, { identifier, sequence, token })
+  ) {
+    console.log("reply from", parsed.ipv4.sourceAddress);
+  }
+});
+source.on("error", console.error);
+source.start();
+
+process.once("SIGINT", () => void source.close());
+
+await sendIcmpMessage(
+  socket,
+  { kind: "echoRequest", identifier, sequence, data: token },
+  { destination: { family: "ipv4", address: "127.0.0.1" } },
+);
+```
+
+`receiveIcmpMessage()` performs exactly one normal-lane receive and never skips
+traffic internally. It conflicts predictably with an event source owning that
+lane. Checksum verification defaults to `require`; `report` and `ignore` are
+explicit parser policies. Decodable unknown types/codes remain available as
+owned bytes and validation issues rather than being mislabeled. These utilities
+cover ICMPv4 Echo only in Phase 12; ICMPv6 and the Phase 13–15 message families
+are not silently inferred.
 
 IPv6 uses the same message API with explicit scope and flow fields:
 
@@ -546,6 +670,12 @@ event adapter is recorded in the
 [Phase 11 report](ai_documentation/21-phase-11-report.md); its adversarial
 post-implementation review is the
 [Phase 11 implementation audit](ai_documentation/22-phase-11-implementation-audit.md).
+The Phase 12 foundation is recorded in the
+[Phase 12 report](ai_documentation/25-phase-12-report.md). The next accepted
+implementation sequence is defined by the
+[ICMPv4 and traceroute capability plan](ai_documentation/23-icmp-and-traceroute-plan.md),
+whose readiness findings are closed in the
+[preimplementation review](ai_documentation/24-icmp-plan-review.md).
 
 ## License
 

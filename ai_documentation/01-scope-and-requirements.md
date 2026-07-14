@@ -37,6 +37,9 @@ The release-capable baseline must cover:
    tests.
 9. Both explicit promise-oriented receives and an optional Node-style event
    adapter built over the same bounded message and ownership semantics.
+10. A zero-dependency ICMPv4 utility layer for the accepted Echo, diagnostic,
+    router-discovery, Timestamp, and legacy Address Mask formats, plus bounded
+    increasing-TTL Echo traceroute support composed over the raw-socket APIs.
 
 The detailed capability matrix and sequencing live in
 [the full-capability plan](11-full-capability-plan.md).
@@ -61,6 +64,12 @@ The detailed capability matrix and sequencing live in
 - Provide an event-driven receive convenience with explicit start,
   pause/detach/close behavior, deterministic receive ownership, and no unbounded
   adapter queue, while preserving the promise API.
+- Provide bounded, owned ICMPv4 construction and structured parsing that keeps
+  checksum, structural validity, and semantic policy distinct, plus one-message
+  socket helpers that preserve existing receive-lane ownership.
+- Provide traceroute probe construction, strong direct/quoted response
+  correlation, destination detection, bounded timeouts, and cancellation without
+  hiding an unbounded receive loop or global session state.
 - Report unsupported family/option/control-message combinations explicitly.
 - Preserve the Linux operation, errno number, conventional errno name, and
   useful contextual fields in stable errors.
@@ -105,8 +114,10 @@ license-compatible, and locked exactly.
 - Automatic privilege elevation or capability management.
 - Authentication, authorization policy, firewall policy, or deciding which
   packets an application is allowed to create.
-- High-level TCP, UDP, HTTP, DNS, routing-protocol, or packet-decoding APIs.
-- Parsing arbitrary upper-layer protocols in the core package.
+- High-level TCP, UDP, HTTP, DNS, routing-protocol, or general packet-decoding
+  APIs. The explicitly planned ICMPv4 diagnostics layer is the narrow exception.
+- Parsing arbitrary upper-layer protocols in the core package beyond the bounded
+  IPv4/ICMP quote metadata required by accepted ICMP and traceroute utilities.
 - Network configuration protocols such as rtnetlink, TUN/TAP management, or
   loading eBPF programs. Attaching an already-created compatible filter may be
   supported without becoming an eBPF loader.
@@ -119,7 +130,9 @@ The first usable IPv4 milestone was completed in Phases 1 through 4. Phases 5
 through 10 completed family-neutral message I/O, IPv6, `AF_PACKET`,
 extensibility/filtering, measured performance paths, and release hardening.
 Phase 11 completed the separately gated event-driven convenience layer over that
-low-level baseline.
+low-level baseline. Phase 12 implements the ICMPv4 checksum/codec foundation and
+Echo utilities. Phases 13 through 15 are accepted plans for ICMPv4 errors,
+router-discovery/legacy messages, and conventional ICMP Echo traceroute.
 
 ## Definition of project success
 

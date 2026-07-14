@@ -201,6 +201,27 @@ with four start/pause/resume transitions each, alternates detach/reattach and
 direct close, requires the descriptor count to return exactly to baseline, and
 bounds RSS growth to 32 MiB.
 
+Phase 12 begins, and Phases 13 through 15 extend, native-free ICMPv4 codec tests
+in the ordinary Node gate: independent wire vectors, every short length,
+odd/even/max checksums, runtime numeric boundaries, deterministic valid-message
+generation, arbitrary byte parsing, compatible/canonical validation differences,
+input/result ownership (including shared-memory snapshot isolation), and
+TypeScript narrowing fixtures. Packet parsers must return structured results for
+hostile bytes and must not leak `RangeError` or allocate from unchecked wire
+lengths. RFC 4884 coverage includes exact length/MTU byte layouts, zero-length
+default behavior, explicit legacy framing, extension checksums/objects, and the
+576-byte ceiling.
+
+Privileged ICMP coverage uses loopback for Echo and a disposable veth/network-
+namespace router chain for quoted errors, MTU, TTL expiry, and traceroute. The
+traceroute coordinator also receives a native-free fake-clock/fake-socket suite
+covering loss, reordering, duplicates, late replies, per-probe/overall timeout,
+cancellation, identifier reuse, short-quote match strength, callback failure,
+lane conflict, and terminal destination/unreachable outcomes. Router Discovery
+tests assert multicast destinations/TTL and explicit broadcast permission.
+Repeated cancel/close runs retain descriptor and bounded-RSS checks. These
+additions do not make ordinary CI privileged.
+
 ## CI shape
 
 The first CI workflow should be unprivileged and should run formatting, linting,

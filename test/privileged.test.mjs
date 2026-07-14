@@ -15,6 +15,10 @@ import {
   IPPROTO_UDP,
   RawSocket,
   RawSocketEventEmitter,
+  matchesIcmpEchoReply,
+  parseIcmpReceivedMessage,
+  receiveIcmpMessage,
+  sendIcmpMessage,
   interfaceIndex,
   interfaceName,
 } from "../dist/index.js";
@@ -126,6 +130,98 @@ test(
 
       await socket.connect({ family: "ipv4", address: "127.0.0.1" });
       await socket.disconnect();
+    } finally {
+      await socket.close();
+    }
+  },
+);
+
+test(
+  "composes ICMP utilities with one-shot and event-driven loopback receives",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+    try {
+      assert.equal(socket.family, "ipv4");
+      assert.equal(socket.protocol, IPPROTO_ICMP);
+      await socket.bind("127.0.0.1");
+
+      const identifier = 0x4e52;
+      const sequence = 0x1201;
+      const token = Buffer.from("phase-12-one-shot");
+      const receives = [receiveIcmpMessage(socket), receiveIcmpMessage(socket)];
+      await setImmediate();
+      assert.equal(
+        await sendIcmpMessage(
+          socket,
+          {
+            kind: "echoRequest",
+            identifier,
+            sequence,
+            data: token,
+          },
+          {
+            destination: { family: "ipv4", address: "127.0.0.1" },
+            ttl: 43,
+          },
+        ),
+        token.byteLength + 8,
+      );
+      const oneShotResults = await withDeadline(
+        Promise.all(receives),
+        "ICMP one-shot request and reply",
+      );
+      const reply = oneShotResults.find((received) =>
+        matchesIcmpEchoReply(received, {
+          identifier,
+          sequence,
+          expectedSourceAddress: "127.0.0.1",
+          expectedDestinationAddress: "127.0.0.1",
+          token,
+        }),
+      );
+      assert.ok(reply?.ok);
+      assert.equal(reply.incomplete, false);
+      assert.equal(reply.packet.checksumStatus, "valid");
+
+      const eventSequence = 0x1202;
+      const eventToken = Buffer.from("phase-12-event");
+      const source = new RawSocketEventEmitter(socket);
+      const eventReply = new Promise((resolve, reject) => {
+        source.on("error", reject);
+        source.on("message", (message) => {
+          const parsed = parseIcmpReceivedMessage(message);
+          if (
+            matchesIcmpEchoReply(parsed, {
+              identifier,
+              sequence: eventSequence,
+              expectedSourceAddress: "127.0.0.1",
+              token: eventToken,
+            })
+          ) {
+            resolve(parsed);
+          }
+        });
+      });
+      source.start();
+      await setImmediate();
+      await sendIcmpMessage(
+        socket,
+        {
+          kind: "echoRequest",
+          identifier,
+          sequence: eventSequence,
+          data: eventToken,
+        },
+        { destination: { family: "ipv4", address: "127.0.0.1" } },
+      );
+      const eventResult = await withDeadline(
+        eventReply,
+        "parsed ICMP event reply",
+      );
+      assert.equal(eventResult.ok, true);
+      await source.pause();
+      assert.equal(await source.detach(), socket);
     } finally {
       await socket.close();
     }
