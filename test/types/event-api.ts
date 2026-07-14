@@ -4,7 +4,7 @@ import {
   type RawSocketEventEmitterOptions,
   type RawSocketEventEmitterStatus,
   type ReceivedMessage,
-} from "nodenetraw";
+} from "@opsimathically/nodenetraw";
 
 declare const socket: RawSocket;
 declare const message: ReceivedMessage;
@@ -41,6 +41,6 @@ emitter.socket = socket;
 options.dataCapacity = 1;
 
 // @ts-expect-error internal claim types are not exported.
-import type { RawSocketReceiveClaim } from "nodenetraw";
+import type { RawSocketReceiveClaim } from "@opsimathically/nodenetraw";
 declare const hidden: RawSocketReceiveClaim;
 void hidden;

@@ -409,7 +409,7 @@ change. See the [Phase 12 report](25-phase-12-report.md).
 
 ## Phase 13 — ICMPv4 errors and quoted datagrams
 
-Status: planned; depends on Phase 12
+Status: complete (2026-07-13); depends on Phase 12
 
 Deliverables:
 
@@ -433,9 +433,18 @@ and legacy extension framing are unambiguous; all requested error messages
 round-trip; malformed packets cannot cause unexpected exceptions; and no utility
 treats unauthenticated diagnostic data as host policy.
 
+Implementation evidence: strict TypeScript codecs cover every registered code in
+the accepted error families, independently checked golden layouts, bounded owned
+quotes, IPv4 options/fragments/truncation/checksums, MTU and pointer semantics,
+weak/strong Echo correlation, compliant and explicit legacy RFC 4884 framing,
+the exact 576-byte ceiling, and preserved unknown objects. Ordinary,
+declaration, privileged crafted-packet, stress, clean-consumer, artifact, and
+reproducibility gates pass without a native or runtime dependency change. See
+the [Phase 13 report](26-phase-13-report.md).
+
 ## Phase 14 — Router discovery and legacy ICMPv4 messages
 
-Status: planned; depends on Phase 12 and Phase 13 validation patterns
+Status: complete (2026-07-13)
 
 Deliverables:
 
@@ -459,9 +468,17 @@ unknown extension words remain bounded; legacy messages never change clocks,
 routes, routers, or interface masks; and documentation states their registry
 status and trust limitations.
 
+Implementation evidence: bounded owned codecs cover Router Solicitation and
+Advertisement, all timestamp semantic ranges, and deprecated Address Mask
+messages; captured multicast packets prove the correct destinations and
+per-message TTL 1; wrong groups/conflicting TTLs and implicit broadcast are
+rejected; declaration, malformed-input, ordinary, privileged, stress, consumer,
+artifact, and reproducibility gates pass. See the
+[Phase 14 report](27-phase-14-report.md).
+
 ## Phase 15 — ICMP traceroute utilities
 
-Status: planned; depends on Phases 12 and 13
+Status: complete (2026-07-13); depends on Phases 12 through 14
 
 Deliverables:
 
@@ -490,6 +507,16 @@ work; receive conflicts remain deterministic; every terminal path releases the
 internal event claim without closing the caller-owned socket; an isolated route
 demonstrates TTL-limited hops and destination completion; and all previous
 release and stress gates remain green.
+
+Implementation evidence: owned probe construction, pure strong/weak response
+classification, monotonic RTTs, compact ordered results, exact deadline rules,
+bounded one-hop scheduling, cancellation, and cleanup-ordered failure are
+implemented in strict TypeScript. Fake-clock tests cover race boundaries; an
+isolated source/router/destination topology proves intermediate and destination
+hops, unreachable and silent targets, lane conflicts, cleanup, and socket reuse;
+ordinary, declaration, privileged, repeated-cancellation stress, consumer,
+artifact, and reproducibility gates pass. See the
+[Phase 15 report](28-phase-15-report.md).
 
 ## Cross-phase rule
 

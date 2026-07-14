@@ -1,21 +1,34 @@
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { isIPv4, isIPv6 } from "node:net";
+import { clearTimeout, setTimeout } from "node:timers";
 import { EventReceiveController } from "./internal/event-controller.js";
 import {
   createInternalFinalizers,
   type InternalFinalizers,
 } from "./internal/finalizers.js";
 import * as icmpCodec from "./internal/icmp.js";
+import * as traceroute from "./internal/traceroute.js";
 import type {
   IcmpChecksumStatus,
+  IcmpAddressMaskInfo,
+  IcmpDestinationUnreachableClassification,
+  IcmpDestinationUnreachableCode,
+  IcmpEchoQuoteMatchOptions,
+  IcmpEchoQuoteMatchResult,
   IcmpMessage,
   IcmpParseFailure,
   IcmpParseOptions,
   IcmpParseResult,
   IcmpValidationIssue,
   IcmpValidationResult,
+  IcmpTimestampReply,
+  IcmpTimestampReplyTimes,
+  IcmpTimestampValue,
+  ParsedIcmpTimestampRequest,
   ParsedIcmpPacket,
+  ParsedIcmpQuote,
   ParsedIpv4Header,
 } from "./internal/icmp.js";
 
@@ -65,23 +78,78 @@ export type {
   IcmpChecksumPolicy,
   IcmpChecksumStatus,
   IcmpConformance,
+  IcmpAddressMaskInfo,
+  IcmpAddressMaskReply,
+  IcmpAddressMaskRequest,
+  IcmpDestinationUnreachable,
+  IcmpDestinationUnreachableCategory,
+  IcmpDestinationUnreachableClassification,
+  IcmpDestinationUnreachableCode,
   IcmpEchoReply,
   IcmpEchoRequest,
+  IcmpEchoQuoteMatchOptions,
+  IcmpEchoQuoteMatchResult,
+  IcmpExtensionChecksumStatus,
+  IcmpExtensionObject,
   IcmpMessage,
+  IcmpParameterProblem,
+  IcmpParameterProblemCode,
   IcmpParseFailure,
   IcmpParseFailureReason,
   IcmpParseOptions,
   IcmpParseResult,
   IcmpValidationIssue,
   IcmpValidationResult,
+  IcmpRedirect,
+  IcmpRedirectCode,
+  IcmpRouterAdvertisement,
+  IcmpRouterAdvertisementEntry,
+  IcmpRouterSolicitation,
+  IcmpTimestampClassification,
+  IcmpTimestampReply,
+  IcmpTimestampReplyTimes,
+  IcmpTimestampRequest,
+  IcmpTimestampValue,
+  IcmpTimeExceeded,
+  IcmpTimeExceededCode,
+  ParsedIcmpDestinationUnreachable,
   ParsedIcmpEchoReply,
   ParsedIcmpEchoRequest,
+  ParsedIcmpExtensionObject,
+  ParsedIcmpExtensions,
   ParsedIcmpMessage,
   ParsedIcmpPacket,
+  ParsedIcmpParameterProblem,
+  ParsedIcmpQuote,
+  ParsedIcmpRedirect,
+  ParsedIcmpRouterAdvertisement,
+  ParsedIcmpRouterAdvertisementEntry,
+  ParsedIcmpRouterSolicitation,
+  ParsedIcmpTimestampReply,
+  ParsedIcmpTimestampRequest,
+  ParsedIcmpAddressMaskReply,
+  ParsedIcmpAddressMaskRequest,
+  ParsedIcmpTimeExceeded,
+  ParsedQuotedIcmpPrefix,
   ParsedIpv4Header,
   ParsedUnknownCodeIcmpMessage,
   ParsedUnknownIcmpMessage,
 } from "./internal/icmp.js";
+export type {
+  IcmpTracerouteExtensionSummary,
+  IcmpTracerouteHopResult,
+  IcmpTracerouteIpv4Destination,
+  IcmpTracerouteMatch,
+  IcmpTracerouteMatchStrength,
+  IcmpTracerouteProbe,
+  IcmpTracerouteProbeOptions,
+  IcmpTracerouteProbeResult,
+  IcmpTracerouteProgress,
+  IcmpTracerouteResult,
+  IcmpTracerouteTermination,
+  IcmpTracerouteTimeoutKind,
+  TraceIcmpRouteOptions,
+} from "./internal/traceroute.js";
 
 const MAX_PACKET_LENGTH = 65_535;
 const DEFAULT_CONTROL_CAPACITY = 4 * 1024;
@@ -2353,20 +2421,34 @@ export function sendIcmpMessage(
       throw invalidArgument("sendIcmpMessage", "options must be an object");
     }
     const candidate = rawOptions as Record<string, unknown>;
-    const destination = candidate.destination;
+    const destination = validateIcmpTracerouteDestination(
+      candidate.destination,
+      "sendIcmpMessage",
+    );
     const ttl = candidate.ttl;
-    const flags = candidate.flags;
+    const flags = snapshotIcmpSendFlags(candidate.flags);
     const rawControl: unknown = candidate.control ?? [];
     const signal = candidate.signal;
     if (!Array.isArray(rawControl)) {
       throw invalidArgument(
         "sendIcmpMessage",
-        "control must be an array when provided",
+        "control must contain at most 64 messages",
+      );
+    }
+    const controlCount = rawControl.length;
+    if (
+      !Number.isSafeInteger(controlCount) ||
+      controlCount < 0 ||
+      controlCount > 64
+    ) {
+      throw invalidArgument(
+        "sendIcmpMessage",
+        "control must contain at most 64 messages",
       );
     }
     const ownedControl: unknown[] = [];
-    for (const entry of rawControl as unknown[]) {
-      ownedControl.push(entry);
+    for (let index = 0; index < controlCount; index += 1) {
+      ownedControl.push(snapshotIcmpSendControl(rawControl[index]));
     }
     if (ttl !== undefined) {
       validateIntegerRange(ttl, 1, 255, "sendIcmpMessage", "ttl");
@@ -2386,12 +2468,49 @@ export function sendIcmpMessage(
       ownedControl.push({ kind: "ipv4Ttl", value: ttl });
     }
     const data = encodeIcmpMessage(message);
+    const sendDestination = destination;
+    if (
+      data[0] === icmpCodec.ICMP_ROUTERSOLICIT ||
+      data[0] === icmpCodec.ICMP_ROUTERADVERT
+    ) {
+      const address = destination.address;
+      if (isIpv4MulticastAddress(address)) {
+        const expected =
+          data[0] === icmpCodec.ICMP_ROUTERSOLICIT ? "224.0.0.2" : "224.0.0.1";
+        if (address !== expected) {
+          throw invalidArgument(
+            "sendIcmpMessage",
+            `Router Discovery multicast destination must be ${expected}`,
+          );
+        }
+        let ttlControl: unknown;
+        let index = 0;
+        while (index < ownedControl.length) {
+          const entry = ownedControl[index];
+          if (
+            typeof entry === "object" &&
+            entry !== null &&
+            (entry as { kind?: unknown }).kind === "ipv4Ttl"
+          ) {
+            ttlControl = (entry as { value?: unknown }).value;
+            break;
+          }
+          index += 1;
+        }
+        if (ttlControl === undefined) {
+          ownedControl.push({ kind: "ipv4Ttl", value: 1 });
+        } else if (ttlControl !== 1) {
+          throw invalidArgument(
+            "sendIcmpMessage",
+            "Router Discovery multicast TTL must be 1",
+          );
+        }
+      }
+    }
     return socket.sendMessage({
       data,
-      destination: destination as Ipv4MessageAddress,
-      ...(flags === undefined
-        ? {}
-        : { flags: flags as readonly SendMessageFlag[] }),
+      destination: sendDestination,
+      ...(flags === undefined ? {} : { flags }),
       ...(ownedControl.length === 0
         ? {}
         : { control: ownedControl as readonly SendControlMessage[] }),
@@ -2485,17 +2604,15 @@ export function matchesIcmpEchoReply(
         "expectedDestinationAddress",
       );
     }
-    if (
-      rawToken !== undefined &&
-      (!(rawToken instanceof Uint8Array) ||
-        rawToken.byteLength > icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8)
-    ) {
-      throw invalidArgument(
-        "matchesIcmpEchoReply",
-        "token must be a Uint8Array no larger than 65507 bytes",
-      );
-    }
-    const token = rawToken === undefined ? undefined : Buffer.from(rawToken);
+    const token =
+      rawToken === undefined
+        ? undefined
+        : snapshotIcmpBytes(
+            rawToken,
+            icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8,
+            "matchesIcmpEchoReply",
+            "token",
+          );
     const rawReceived: unknown = received;
     if (
       typeof rawReceived !== "object" ||
@@ -2532,6 +2649,279 @@ export function matchesIcmpEchoReply(
       if (token[index] !== reply.data[index]) return false;
     }
     return true;
+  });
+}
+
+/** Correlates a checked quoted IPv4/ICMP prefix with an Echo Request tuple. */
+export function matchIcmpEchoQuote(
+  quote: ParsedIcmpQuote,
+  expected: IcmpEchoQuoteMatchOptions,
+): IcmpEchoQuoteMatchResult {
+  return callIcmpCodec("matchIcmpEchoQuote", () => {
+    const rawQuote: unknown = quote;
+    if (typeof rawQuote !== "object" || rawQuote === null) {
+      throw invalidArgument("matchIcmpEchoQuote", "quote must be an object");
+    }
+    const quoteCandidate = rawQuote as Record<string, unknown>;
+    const quotedIcmp = quoteCandidate.icmp;
+    if (
+      typeof quoteCandidate.valid !== "boolean" ||
+      !(quoteCandidate.bytes instanceof Uint8Array) ||
+      (quoteCandidate.ipv4 !== undefined &&
+        (typeof quoteCandidate.ipv4 !== "object" ||
+          quoteCandidate.ipv4 === null)) ||
+      (quotedIcmp !== undefined &&
+        (typeof quotedIcmp !== "object" ||
+          quotedIcmp === null ||
+          !(
+            (quotedIcmp as { dataPrefix?: unknown }).dataPrefix instanceof
+            Uint8Array
+          )))
+    ) {
+      throw invalidArgument(
+        "matchIcmpEchoQuote",
+        "quote must be a ParsedIcmpQuote",
+      );
+    }
+    const rawExpected: unknown = expected;
+    if (typeof rawExpected !== "object" || rawExpected === null) {
+      throw invalidArgument("matchIcmpEchoQuote", "expected must be an object");
+    }
+    const candidate = rawExpected as Record<string, unknown>;
+    const expectedDestinationAddress = candidate.expectedDestinationAddress;
+    const identifier = candidate.identifier;
+    const sequence = candidate.sequence;
+    const rawToken = candidate.token;
+    validateIpv4Address(
+      expectedDestinationAddress,
+      "matchIcmpEchoQuote",
+      "expectedDestinationAddress",
+    );
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "matchIcmpEchoQuote",
+      "identifier",
+    );
+    validateIntegerRange(sequence, 0, 0xffff, "matchIcmpEchoQuote", "sequence");
+    const token =
+      rawToken === undefined
+        ? undefined
+        : snapshotIcmpBytes(
+            rawToken,
+            icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8,
+            "matchIcmpEchoQuote",
+            "token",
+          );
+    return icmpCodec.matchIcmpEchoQuoteInternal(quote, {
+      expectedDestinationAddress,
+      identifier,
+      sequence,
+      token,
+    });
+  });
+}
+
+/** Classifies a registered Destination Unreachable code without applying policy. */
+export function classifyIcmpDestinationUnreachable(
+  code: IcmpDestinationUnreachableCode,
+): IcmpDestinationUnreachableClassification {
+  return callIcmpCodec("classifyIcmpDestinationUnreachable", () => {
+    const rawCode: unknown = code;
+    validateIntegerRange(
+      rawCode,
+      0,
+      15,
+      "classifyIcmpDestinationUnreachable",
+      "code",
+    );
+    return icmpCodec.classifyDestinationUnreachableInternal(
+      rawCode as IcmpDestinationUnreachableCode,
+    );
+  });
+}
+
+/** Classifies one raw RFC 792 timestamp without consulting a clock. */
+export function classifyIcmpTimestamp(value: number): IcmpTimestampValue {
+  return callIcmpCodec("classifyIcmpTimestamp", () =>
+    icmpCodec.classifyIcmpTimestampInternal(value),
+  );
+}
+
+/** Inspects a dotted-decimal IPv4 mask without applying host configuration. */
+export function inspectIpv4AddressMask(mask: string): IcmpAddressMaskInfo {
+  return callIcmpCodec("inspectIpv4AddressMask", () =>
+    icmpCodec.inspectIpv4AddressMaskInternal(mask),
+  );
+}
+
+/** Copies a parsed request tuple into an explicit Timestamp Reply value. */
+export function createIcmpTimestampReply(
+  request: ParsedIcmpTimestampRequest,
+  times: IcmpTimestampReplyTimes,
+): IcmpTimestampReply {
+  return callIcmpCodec("createIcmpTimestampReply", () => {
+    const rawRequest: unknown = request;
+    if (
+      typeof rawRequest !== "object" ||
+      rawRequest === null ||
+      (rawRequest as { kind?: unknown }).kind !== "timestampRequest"
+    ) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "request must be a parsed Timestamp Request",
+      );
+    }
+    const requestCandidate = rawRequest as Record<string, unknown>;
+    const identifier = requestCandidate.identifier;
+    const sequence = requestCandidate.sequence;
+    const rawOriginate = requestCandidate.originateTimestamp;
+    if (typeof rawOriginate !== "object" || rawOriginate === null) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "request.originateTimestamp must be a parsed timestamp",
+      );
+    }
+    const originateTimestamp = (rawOriginate as { raw?: unknown }).raw;
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "createIcmpTimestampReply",
+      "request.identifier",
+    );
+    validateIntegerRange(
+      sequence,
+      0,
+      0xffff,
+      "createIcmpTimestampReply",
+      "request.sequence",
+    );
+    const rawTimes: unknown = times;
+    if (typeof rawTimes !== "object" || rawTimes === null) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "times must be an object",
+      );
+    }
+    const timesCandidate = rawTimes as Record<string, unknown>;
+    const receiveTimestamp = timesCandidate.receiveTimestamp;
+    const transmitTimestamp = timesCandidate.transmitTimestamp;
+    const reply: IcmpTimestampReply = {
+      kind: "timestampReply",
+      identifier,
+      sequence,
+      originateTimestamp: originateTimestamp as number,
+      receiveTimestamp: receiveTimestamp as number,
+      transmitTimestamp: transmitTimestamp as number,
+    };
+    icmpCodec.encodeIcmpMessageInternal(reply);
+    return reply;
+  });
+}
+
+/** Builds one deterministic TTL-limited ICMP Echo traceroute probe. */
+export function createIcmpTracerouteProbe(
+  options: traceroute.IcmpTracerouteProbeOptions,
+): traceroute.IcmpTracerouteProbe {
+  return callIcmpCodec("createIcmpTracerouteProbe", () =>
+    traceroute.createIcmpTracerouteProbeInternal(
+      validateIcmpTracerouteProbeOptions(options),
+    ),
+  );
+}
+
+/** Purely classifies one parsed ICMPv4 receive against one explicit probe. */
+export function classifyIcmpTracerouteResponse(
+  probe: traceroute.IcmpTracerouteProbe,
+  received: IcmpReceivedParseResult,
+  receivedAt: bigint,
+): traceroute.IcmpTracerouteMatch {
+  return callIcmpCodec("classifyIcmpTracerouteResponse", () => {
+    const validatedProbe = validateIcmpTracerouteProbe(probe);
+    if (typeof receivedAt !== "bigint" || receivedAt < validatedProbe.sentAt) {
+      throw invalidArgument(
+        "classifyIcmpTracerouteResponse",
+        "receivedAt must be a nonnegative monotonic bigint no earlier than probe.sentAt",
+      );
+    }
+    const validatedReceived = validateIcmpTracerouteReceived(received);
+    return traceroute.classifyIcmpTracerouteResponseInternal(
+      validatedProbe,
+      validatedReceived,
+      receivedAt,
+    );
+  });
+}
+
+/** Runs one bounded conventional ICMP Echo traceroute on a dedicated socket. */
+export function traceIcmpRoute(
+  socket: RawSocket,
+  destination: Ipv4MessageAddress,
+  options: traceroute.TraceIcmpRouteOptions = {},
+): Promise<traceroute.IcmpTracerouteResult> {
+  return callIcmpCodec("traceIcmpRoute", () => {
+    validateIcmpSocket(socket, "traceIcmpRoute");
+    const normalized = normalizeTraceIcmpRouteOptions(destination, options);
+    return traceroute.traceIcmpRouteInternal(normalized, {
+      now: () => process.hrtime.bigint(),
+      send: async (probe, signal) => {
+        await sendIcmpMessage(
+          socket,
+          {
+            kind: "echoRequest",
+            identifier: probe.identifier,
+            sequence: probe.sequence,
+            data: probe.data,
+          },
+          {
+            destination: probe.destination,
+            ttl: probe.ttl,
+            signal,
+          },
+        );
+      },
+      attach: (callbacks) => {
+        const source = new RawSocketEventEmitter(socket);
+        const onMessage = (message: ReceivedMessage): void => {
+          try {
+            callbacks.message(parseIcmpReceivedMessage(message));
+          } catch (error) {
+            callbacks.error(error);
+          }
+        };
+        const onError = (error: unknown): void => {
+          callbacks.error(error);
+        };
+        const onClose = (): void => {
+          callbacks.close();
+        };
+        source.on("message", onMessage);
+        source.on("error", onError);
+        source.on("close", onClose);
+        return {
+          start(): void {
+            source.start();
+          },
+          async detach(): Promise<void> {
+            try {
+              await source.detach();
+            } finally {
+              source.off("message", onMessage);
+              source.off("error", onError);
+              source.off("close", onClose);
+            }
+          },
+        };
+      },
+      setTimer: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimer: (timer) => {
+        clearTimeout(timer as NodeJS.Timeout);
+      },
+      abortedError: () => abortedError("traceIcmpRoute"),
+      socketClosedError: () => socketClosedError("traceIcmpRoute"),
+    });
   });
 }
 
@@ -3459,6 +3849,11 @@ function validateIpv4Address(
   }
 }
 
+function isIpv4MulticastAddress(address: string): boolean {
+  const firstOctet = Number(address.slice(0, address.indexOf(".")));
+  return firstOctet >= 224 && firstOctet <= 239;
+}
+
 function validateIpv6Address(
   value: unknown,
   operation: string,
@@ -3768,6 +4163,380 @@ function callIcmpCodec<Result>(operation: string, call: () => Result): Result {
     }
     throw normalizeUnknownError(error, operation);
   }
+}
+
+function validateIcmpTracerouteProbeOptions(
+  options: unknown,
+  operation = "createIcmpTracerouteProbe",
+): traceroute.IcmpTracerouteProbeOptions {
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(operation, "options must be an object");
+  }
+  const candidate = options as Record<string, unknown>;
+  const destination = validateIcmpTracerouteDestination(
+    candidate.destination,
+    operation,
+  );
+  const identifier = candidate.identifier;
+  const sequence = candidate.sequence;
+  const ttl = candidate.ttl;
+  validateIntegerRange(identifier, 0, 0xffff, operation, "identifier");
+  validateIntegerRange(sequence, 0, 0xffff, operation, "sequence");
+  validateIntegerRange(ttl, 1, 255, operation, "ttl");
+  const token = validateIcmpTracerouteBytes(
+    candidate.token,
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH,
+    operation,
+    "token",
+  );
+  const payload = validateIcmpTracerouteBytes(
+    candidate.payload ?? new Uint8Array(),
+    0,
+    traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    operation,
+    "payload",
+  );
+  const sentAt = candidate.sentAt;
+  if (typeof sentAt !== "bigint" || sentAt < 0n) {
+    throw invalidArgument(
+      operation,
+      "sentAt must be a nonnegative monotonic bigint",
+    );
+  }
+  return {
+    destination,
+    identifier,
+    sequence,
+    token,
+    payload,
+    ttl,
+    sentAt,
+  };
+}
+
+function validateIcmpTracerouteProbe(
+  probe: unknown,
+): traceroute.IcmpTracerouteProbe {
+  const options = validateIcmpTracerouteProbeOptions(
+    probe,
+    "classifyIcmpTracerouteResponse",
+  );
+  const candidate = probe as Record<string, unknown>;
+  const data = validateIcmpTracerouteBytes(
+    candidate.data,
+    options.token.byteLength,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH +
+      traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    "classifyIcmpTracerouteResponse",
+    "probe.data",
+  );
+  const expected = Buffer.concat([
+    Buffer.from(options.token),
+    Buffer.from(options.payload ?? new Uint8Array()),
+  ]);
+  if (!data.equals(expected)) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "probe.data must equal probe.token followed by probe.payload",
+    );
+  }
+  return traceroute.createIcmpTracerouteProbeInternal(options);
+}
+
+function validateIcmpTracerouteReceived(
+  received: unknown,
+): traceroute.IcmpTracerouteReceived {
+  if (typeof received !== "object" || received === null) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received must be an IcmpReceivedParseResult",
+    );
+  }
+  const candidate = received as Record<string, unknown>;
+  if (candidate.ok === false) return { ok: false };
+  const ipv4 = candidate.ipv4;
+  const packet = candidate.packet;
+  if (
+    candidate.ok !== true ||
+    typeof candidate.incomplete !== "boolean" ||
+    typeof ipv4 !== "object" ||
+    ipv4 === null ||
+    typeof (ipv4 as { sourceAddress?: unknown }).sourceAddress !== "string" ||
+    typeof packet !== "object" ||
+    packet === null ||
+    typeof (packet as { incomplete?: unknown }).incomplete !== "boolean" ||
+    typeof (packet as { checksumStatus?: unknown }).checksumStatus !==
+      "string" ||
+    typeof (packet as { message?: unknown }).message !== "object" ||
+    (packet as { message?: unknown }).message === null
+  ) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received must be an IcmpReceivedParseResult",
+    );
+  }
+  const message = (packet as { message: Record<string, unknown> }).message;
+  if (typeof message.kind !== "string") {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received packet message must have a valid kind",
+    );
+  }
+  if (
+    (message.kind === "echoReply" && !(message.data instanceof Uint8Array)) ||
+    ((message.kind === "timeExceeded" ||
+      message.kind === "destinationUnreachable" ||
+      message.kind === "parameterProblem" ||
+      message.kind === "redirect") &&
+      (typeof message.quote !== "object" || message.quote === null))
+  ) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received packet message is not structurally valid",
+    );
+  }
+  return candidate as unknown as traceroute.IcmpTracerouteReceived;
+}
+
+function normalizeTraceIcmpRouteOptions(
+  destination: unknown,
+  options: unknown,
+): traceroute.NormalizedTraceIcmpRouteOptions {
+  const operation = "traceIcmpRoute";
+  const checkedDestination = validateIcmpTracerouteDestination(
+    destination,
+    operation,
+  );
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(operation, "options must be an object");
+  }
+  const candidate = options as Record<string, unknown>;
+  const firstHop = candidate.firstHop ?? 1;
+  const maxHops = candidate.maxHops ?? 30;
+  const probesPerHop = candidate.probesPerHop ?? 3;
+  const timeoutMilliseconds = candidate.timeoutMilliseconds ?? 3_000;
+  const overallTimeoutMilliseconds =
+    candidate.overallTimeoutMilliseconds ?? 300_000;
+  const maxInFlight = candidate.maxInFlight ?? 1;
+  const stopOnUnreachable = candidate.stopOnUnreachable ?? true;
+  validateIntegerRange(firstHop, 1, 255, operation, "firstHop");
+  validateIntegerRange(maxHops, 1, 255, operation, "maxHops");
+  if (maxHops < firstHop) {
+    throw invalidArgument(operation, "maxHops must not be less than firstHop");
+  }
+  validateIntegerRange(
+    probesPerHop,
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_PROBES_PER_HOP,
+    operation,
+    "probesPerHop",
+  );
+  validateIntegerRange(
+    timeoutMilliseconds,
+    1,
+    60_000,
+    operation,
+    "timeoutMilliseconds",
+  );
+  validateIntegerRange(
+    overallTimeoutMilliseconds,
+    1,
+    3_600_000,
+    operation,
+    "overallTimeoutMilliseconds",
+  );
+  validateIntegerRange(maxInFlight, 1, probesPerHop, operation, "maxInFlight");
+  if (typeof stopOnUnreachable !== "boolean") {
+    throw invalidArgument(operation, "stopOnUnreachable must be a boolean");
+  }
+  const payload = validateIcmpTracerouteBytes(
+    candidate.payload ?? new Uint8Array(),
+    0,
+    traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    operation,
+    "payload",
+  );
+  const token = validateIcmpTracerouteBytes(
+    candidate.token ?? randomBytes(16),
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH,
+    operation,
+    "token",
+  );
+  const identifierValue = candidate.identifier;
+  const initialSequenceValue = candidate.initialSequence;
+  const randomTuple =
+    identifierValue === undefined || initialSequenceValue === undefined
+      ? randomBytes(4)
+      : undefined;
+  const identifier = identifierValue ?? randomTuple?.readUInt16BE(0);
+  const initialSequence = initialSequenceValue ?? randomTuple?.readUInt16BE(2);
+  validateIntegerRange(identifier, 0, 0xffff, operation, "identifier");
+  validateIntegerRange(
+    initialSequence,
+    0,
+    0xffff,
+    operation,
+    "initialSequence",
+  );
+  const signal = candidate.signal;
+  validateSignal(signal, operation);
+  const onProgress = candidate.onProgress;
+  if (onProgress !== undefined && typeof onProgress !== "function") {
+    throw invalidArgument(operation, "onProgress must be a function");
+  }
+  return {
+    destination: checkedDestination,
+    firstHop,
+    maxHops,
+    probesPerHop,
+    timeoutNanoseconds: BigInt(timeoutMilliseconds) * 1_000_000n,
+    overallTimeoutNanoseconds: BigInt(overallTimeoutMilliseconds) * 1_000_000n,
+    payload,
+    token,
+    identifier,
+    initialSequence,
+    maxInFlight,
+    stopOnUnreachable,
+    signal: signal as AbortSignal | undefined,
+    onProgress: onProgress as
+      ((progress: traceroute.IcmpTracerouteProgress) => void) | undefined,
+  };
+}
+
+function validateIcmpTracerouteDestination(
+  destination: unknown,
+  operation: string,
+): traceroute.IcmpTracerouteIpv4Destination {
+  if (
+    typeof destination !== "object" ||
+    destination === null ||
+    (destination as { family?: unknown }).family !== "ipv4"
+  ) {
+    throw invalidArgument(
+      operation,
+      "destination must be an IPv4 message address",
+    );
+  }
+  const address = (destination as { address?: unknown }).address;
+  validateIpv4Address(address, operation, "destination.address");
+  return { family: "ipv4", address };
+}
+
+function validateIcmpTracerouteBytes(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+  operation: string,
+  name: string,
+): Buffer {
+  let snapshot: Buffer;
+  try {
+    snapshot = icmpCodec.snapshotByteInputInternal(value, maximumLength, name);
+  } catch {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array from ${String(minimumLength)} through ${String(maximumLength)} bytes`,
+    );
+  }
+  if (snapshot.byteLength < minimumLength) {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array from ${String(minimumLength)} through ${String(maximumLength)} bytes`,
+    );
+  }
+  return snapshot;
+}
+
+function snapshotIcmpBytes(
+  value: unknown,
+  maximumLength: number,
+  operation: string,
+  name: string,
+): Buffer {
+  try {
+    return icmpCodec.snapshotByteInputInternal(value, maximumLength, name);
+  } catch {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array no larger than ${String(maximumLength)} bytes`,
+    );
+  }
+}
+
+function snapshotIcmpSendFlags(
+  value: unknown,
+): readonly SendMessageFlag[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "flags must contain unique supported values",
+    );
+  }
+  const count = value.length;
+  if (!Number.isSafeInteger(count) || count < 0 || count > 1) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "flags must contain unique supported values",
+    );
+  }
+  const flags: unknown[] = [];
+  for (let index = 0; index < count; index += 1) flags.push(value[index]);
+  validateFlagList(flags, ["dontRoute"], "sendIcmpMessage");
+  return flags as readonly SendMessageFlag[];
+}
+
+function snapshotIcmpSendControl(value: unknown): SendControlMessage {
+  if (typeof value !== "object" || value === null) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "control messages must be valid and unique by kind",
+    );
+  }
+  const candidate = value as Record<string, unknown>;
+  const kind = candidate.kind;
+  if (kind === "ipv4Ttl") {
+    const controlValue = candidate.value;
+    validateIntegerRange(
+      controlValue,
+      1,
+      255,
+      "sendIcmpMessage",
+      "ipv4Ttl.value",
+    );
+    return { kind, value: controlValue };
+  }
+  if (kind !== "ipv4PacketInfo") {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "control messages must use an IPv4 control kind",
+    );
+  }
+  const interfaceIndex = candidate.interfaceIndex;
+  const sourceAddress = candidate.sourceAddress;
+  if (interfaceIndex !== undefined) {
+    validateIntegerRange(
+      interfaceIndex,
+      0,
+      0x7fff_ffff,
+      "sendIcmpMessage",
+      "ipv4PacketInfo.interfaceIndex",
+    );
+  }
+  if (sourceAddress !== undefined) {
+    validateIpv4Address(
+      sourceAddress,
+      "sendIcmpMessage",
+      "ipv4PacketInfo.sourceAddress",
+    );
+  }
+  return {
+    kind,
+    ...(interfaceIndex === undefined ? {} : { interfaceIndex }),
+    ...(sourceAddress === undefined ? {} : { sourceAddress }),
+  };
 }
 
 function validateIcmpSocket(socket: RawSocket, operation: string): void {

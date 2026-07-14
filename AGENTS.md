@@ -6,9 +6,10 @@ decision changes the commands, architecture, safety rules, or repository layout.
 
 ## Project purpose
 
-`nodenetraw` is a Linux-only Node.js native module intended to expose low-level
-raw socket capabilities. TypeScript is the public Node-facing environment. Rust
-implements the native operations and crosses into Node through N-API.
+`@opsimathically/nodenetraw` is a Linux-only Node.js native module intended to
+expose low-level raw socket capabilities. TypeScript is the public Node-facing
+environment. Rust implements the native operations and crosses into Node through
+N-API.
 
 The project prioritizes:
 
@@ -46,21 +47,30 @@ exactly-once close. Phase 12 adds pure bounded ICMPv4 checksum and Echo codecs,
 structured compatible/canonical parsing and validation, Linux raw-receive
 extraction, Echo correlation, one-operation socket helpers, and a captured
 readonly `RawSocket.protocol` getter without changing Rust or adding a runtime
-dependency. The package is now the unpublished `0.1.0-rc.3` candidate. Its
-authoritative contract, feasibility audit, and completion report are
-`ai_documentation/19-phase-11-event-api-plan.md`,
+dependency. Phase 11's authoritative contract, feasibility audit, and completion
+report are `ai_documentation/19-phase-11-event-api-plan.md`,
 `ai_documentation/20-phase-11-plan-review.md`, and
 `ai_documentation/21-phase-11-report.md`. The adversarial post-implementation
 review and its scheduler/quiescence corrections are recorded in
 `ai_documentation/22-phase-11-implementation-audit.md`. Native AArch64 remains
 untested until its runner passes. Phase 12 implementation and its x86-64
 ordinary, privileged, stress, consumer, artifact, and reproducibility gates are
-complete. Phases 13 through 15 remain accepted plans for ICMPv4 diagnostic
-errors and quotes, router-discovery/legacy message formats, and conventional
-increasing-TTL ICMP Echo traceroute. Their authoritative scope and gates are in
+complete. Phase 13 adds bounded ICMPv4 diagnostic-error codecs, quoted IPv4
+validation and Echo correlation, RFC 1191 MTU handling, and RFC 4884 compliant
+plus explicit legacy extension framing without automatic network policy. Phase
+14 adds bounded Router Discovery, Timestamp, and deprecated Address Mask codecs,
+timestamp/mask inspection, and enforced Router Discovery multicast destination
+and per-message TTL without automatic host policy. Phase 15 adds conventional
+increasing-TTL ICMP Echo traceroute with owned probes, pure response
+classification, monotonic deadlines, compact bounded results, and deterministic
+normal-lane cleanup. The package is now the unpublished `0.1.0-rc.6` candidate.
+The authoritative Phase 12–15 scope and gates are in
 `ai_documentation/23-icmp-and-traceroute-plan.md`; the closed preimplementation
-audit is `ai_documentation/24-icmp-plan-review.md`, and Phase 12 evidence is in
-`ai_documentation/25-phase-12-report.md`.
+audit is `ai_documentation/24-icmp-plan-review.md`. Completion evidence is in
+`ai_documentation/25-phase-12-report.md` through
+`ai_documentation/28-phase-15-report.md`. The post-implementation hostile-input,
+policy-snapshot, callback-quiescence, and release-health review is
+`ai_documentation/29-phase-12-15-implementation-audit.md`.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -224,6 +234,9 @@ Install reproducibly with `npm ci`. The supported commands are:
 - `sudo npm run test:phase11:stress`: 256 isolated event-adapter socket cycles,
   each with repeated start/pause/resume and alternating detach/close, plus
   descriptor and bounded RSS checks. The build runs as the repository owner.
+- `sudo npm run test:phase15:stress`: 256 isolated traceroute cancellation and
+  normal-lane reuse cycles with descriptor and bounded RSS checks. The build
+  runs as the repository owner.
 - `npm run hardening:verify`: release version, platform, license, dependency,
   target-manifest, and production advisory policy.
 - `npm run fuzz`: one minute of syscall-free parser/serializer libFuzzer work;
@@ -294,3 +307,12 @@ Do not report a change as verified without naming which gates actually ran.
   API, lifecycle, resource-bound, and test-topology review for Phases 12–15.
 - `ai_documentation/25-phase-12-report.md`: ICMPv4 foundation/Echo
   implementation, safety, API, and verification record.
+- `ai_documentation/26-phase-13-report.md`: ICMPv4 errors, quoted-datagram
+  correlation, RFC 4884 extensions, and verification record.
+- `ai_documentation/27-phase-14-report.md`: Router Discovery, Timestamp,
+  deprecated Address Mask, multicast send policy, and verification record.
+- `ai_documentation/28-phase-15-report.md`: bounded ICMP Echo traceroute,
+  correlation, orchestration, routed-topology, cleanup, and verification record.
+- `ai_documentation/29-phase-12-15-implementation-audit.md`: post-implementation
+  protocol, hostile-input, lifecycle, privileged, stress, packaging, and
+  release-health audit.

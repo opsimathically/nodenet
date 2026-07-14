@@ -33,6 +33,13 @@ export default tseslint.config(
     },
   },
   {
+    files: ["src/internal/traceroute.ts"],
+    rules: {
+      "@typescript-eslint/only-throw-error": "off",
+      "@typescript-eslint/prefer-promise-reject-errors": "off",
+    },
+  },
+  {
     files: ["**/*.{js,mjs,cjs}"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: {

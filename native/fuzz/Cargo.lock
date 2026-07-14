@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "nodenetraw-native"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.6"
 dependencies = [
  "napi",
  "napi-build",

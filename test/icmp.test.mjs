@@ -250,6 +250,28 @@ test("snapshots construction and parse-option getters once", () => {
   assert.equal(parseIcmpMessage(encoded, options).ok, true);
   assert.equal(optionReads.get("checksum"), 1);
   assert.equal(optionReads.get("conformance"), 1);
+
+  const disguisedOversized = new Uint8Array(65_536);
+  Object.defineProperty(disguisedOversized, "byteLength", { value: 1 });
+  assert.throws(() => computeInternetChecksum(disguisedOversized), {
+    code: "ERR_INVALID_ARGUMENT",
+  });
+  const oversizedParse = parseIcmpMessage(disguisedOversized);
+  assert.equal(oversizedParse.ok, false);
+  assert.equal(oversizedParse.error.reason, "invalidLength");
+
+  const disguisedEchoData = new Uint8Array(65_508);
+  Object.defineProperty(disguisedEchoData, "byteLength", { value: 0 });
+  assert.throws(
+    () =>
+      encodeIcmpMessage({
+        kind: "echoRequest",
+        identifier: 1,
+        sequence: 2,
+        data: disguisedEchoData,
+      }),
+    { code: "ERR_INVALID_ARGUMENT" },
+  );
 });
 
 test("separates checksum policy, structural failure, and conformance issues", () => {

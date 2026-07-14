@@ -3,6 +3,77 @@
 All notable changes use Semantic Versioning. This project is not yet stable;
 release-candidate APIs may change before `0.1.0`.
 
+## 0.1.0-rc.6 - 2026-07-13
+
+- Add deterministic owned TTL-limited Echo probe construction and pure
+  classification of direct Echo Replies and strongly or explicitly weakly
+  correlated ICMPv4 diagnostics with monotonic `bigint` RTTs.
+- Add bounded `traceIcmpRoute()` orchestration over a caller-owned dedicated
+  ICMP socket, with per-message TTL, one internal normal-lane event claim,
+  deterministic result ordering, compact retention, and no DNS or route policy.
+- Bound hops, probes, active work, token/payload bytes, probe and overall
+  deadlines, timers, and retained results; exact deadline equality is a timeout.
+- Distinguish destination, unreachable, maximum-hop, overall-timeout, per-probe
+  timeout, cancellation, send/receive failure, socket close, and callback
+  failure while detaching before resolve or reject.
+- Add fake-clock/fake-driver race coverage for loss, reordering, late and
+  unrelated responses, weak historical quotes, cancellation, callback and detach
+  failure, plus declaration and runtime-bound tests.
+- Add a disposable source/router/destination namespace topology proving TTL 1
+  intermediate discovery, TTL 2 destination detection, unreachable handling,
+  silent probes, lane conflicts, and caller-socket reuse.
+- Harden all ICMP byte boundaries against shadowed typed-array lengths and bound
+  forged traceroute extension summaries to the RFC 4884 construction ceiling.
+- Snapshot ICMP send destinations, flags, and control messages before Router
+  Discovery policy checks so stateful getters cannot change the transmitted TTL,
+  and stop progress callbacks after their first recorded failure.
+- Keep conventional traceroute in strict TypeScript with zero runtime
+  dependencies and no deprecated ICMP type-30, native I/O, hidden global state,
+  DNS lookup, or retained raw-packet history.
+
+## 0.1.0-rc.5 - 2026-07-13
+
+- Add canonical Router Solicitation and bounded Router Advertisement
+  construction with checked lifetimes, up to 255 addresses, signed preference
+  extremes, and standard two-word entries.
+- Add compatible Router Discovery parsing that preserves reserved/trailing data,
+  forward-compatible entry words, and the minimum preference's not-default
+  meaning while retaining code-16 Mobile IP advertisements as unknown-code data.
+- Enforce the correct Router Discovery multicast destination and per-message TTL
+  1, while leaving interface choice, group membership, broadcast enablement,
+  scheduling, and router selection explicit.
+- Add Timestamp Request/Reply construction, semantic classification of all
+  32-bit timestamp ranges, explicit parsed-request reply composition, and
+  compatible preservation of noncanonical request/trailing fields.
+- Add deprecated Address Mask Request/Reply construction, owned parsing,
+  dotted-decimal/byte preservation, and non-mutating contiguous-prefix
+  inspection without applying host configuration.
+- Add independent wire, boundary, malformed, ownership, declaration, namespace
+  multicast/broadcast, stress, consumer, artifact, and reproducibility coverage
+  plus end-user examples.
+- Keep Phase 14 in strict TypeScript with no runtime dependency, native I/O
+  change, timer, hidden queue, automatic responder, or host configuration
+  mutation.
+
+## 0.1.0-rc.4 - 2026-07-13
+
+- Add bounded ICMPv4 Destination Unreachable, Time Exceeded, Parameter Problem,
+  and Redirect construction, parsing, validation, and named registered-code
+  constants.
+- Add checked owned quoted-IPv4 decoding with options, fragmentation, total
+  length, header-checksum, leading-payload, and Echo Request evidence handling.
+- Add weak/strong quoted Echo correlation and informational Destination
+  Unreachable classification without automatic response or routing policy.
+- Add RFC 1191 next-hop MTU handling and RFC 4884 compliant extension framing,
+  128-byte padding, 576-byte construction ceiling, checksums, bounded unknown
+  objects, and explicit legacy framing compatibility.
+- Add independent golden, boundary, malformed, ownership, declaration, and
+  privileged crafted-packet coverage plus promise/event documentation.
+- Align source self-import, release manifests, target packages, and clean
+  consumer checks with the scoped `@opsimathically/nodenetraw` package name.
+- Keep Phase 13 in strict TypeScript with no runtime dependency, native-code
+  change, hidden receive loop, automatic ICMP response, or route mutation.
+
 ## 0.1.0-rc.3 - 2026-07-13
 
 - Add zero-dependency, non-mutating RFC 1071 Internet-checksum helpers and a

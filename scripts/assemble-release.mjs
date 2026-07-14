@@ -57,7 +57,7 @@ const rootManifest = {
   ],
   optionalDependencies: Object.fromEntries(
     Object.keys(targets).map((name) => [
-      `nodenetraw-${name}`,
+      `@opsimathically/nodenetraw-${name}`,
       packageJson.version,
     ]),
   ),

@@ -10,20 +10,29 @@ import { URL } from "node:url";
 import { Worker } from "node:worker_threads";
 
 import {
+  ETH_P_IP,
+  ICMP_FRAG_NEEDED,
+  ICMP_ROUTERADVERT,
+  ICMP_ROUTERSOLICIT,
   IPPROTO_ICMP,
   IPPROTO_ICMPV6,
   IPPROTO_UDP,
   RawSocket,
   RawSocketEventEmitter,
   matchesIcmpEchoReply,
+  parseIcmpMessage,
   parseIcmpReceivedMessage,
   receiveIcmpMessage,
   sendIcmpMessage,
+  traceIcmpRoute,
   interfaceIndex,
   interfaceName,
+  matchIcmpEchoQuote,
 } from "../dist/index.js";
 
 const privilegedTestsEnabled = env.NODENETRAW_PRIVILEGED_TESTS === "1";
+const tracerouteTopologyEnabled =
+  privilegedTestsEnabled && env.NODENETRAW_TRACEROUTE_TOPOLOGY === "1";
 
 test(
   "settles completion bursts larger than the native callback queue",
@@ -222,6 +231,316 @@ test(
       assert.equal(eventResult.ok, true);
       await source.pause();
       assert.equal(await source.detach(), socket);
+    } finally {
+      await socket.close();
+    }
+  },
+);
+
+test(
+  "sends and parses a crafted extended ICMPv4 diagnostic on loopback",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+    try {
+      await socket.bind("127.0.0.1");
+      const sequence = 0x1301;
+      const quote = createQuotedEchoDatagram(sequence);
+      const waiting = receiveIcmpMessage(socket);
+      await setImmediate();
+      await sendIcmpMessage(
+        socket,
+        {
+          kind: "destinationUnreachable",
+          code: ICMP_FRAG_NEEDED,
+          nextHopMtu: 1500,
+          quote,
+          extensions: [
+            {
+              classNumber: 250,
+              cType: 1,
+              data: Buffer.from([0x13, 0, 0, 1]),
+            },
+          ],
+        },
+        { destination: { family: "ipv4", address: "127.0.0.1" } },
+      );
+      const parsed = await withDeadline(waiting, "extended ICMP diagnostic");
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.packet.message.kind, "destinationUnreachable");
+      assert.equal(parsed.packet.message.nextHopMtu, 1500);
+      assert.equal(parsed.packet.message.extensions.framing, "rfc4884");
+      assert.equal(parsed.packet.message.extensions.checksumStatus, "valid");
+      assert.deepEqual(
+        matchIcmpEchoQuote(parsed.packet.message.quote, {
+          expectedDestinationAddress: "127.0.0.1",
+          identifier: 0x4e52,
+          sequence,
+          token: Buffer.from("node"),
+        }),
+        { matched: true, strength: "strong", tokenCompared: true },
+      );
+    } finally {
+      await socket.close();
+    }
+  },
+);
+
+test(
+  "enforces Router Discovery multicast TTL and explicit broadcast permission",
+  { skip: !privilegedTestsEnabled, timeout: 5_000 },
+  async () => {
+    const sender = await RawSocket.open({ protocol: IPPROTO_ICMP });
+    const capture = await RawSocket.open({
+      family: "packet",
+      mode: "raw",
+      protocol: ETH_P_IP,
+    });
+    try {
+      await sender.bind("192.0.2.1");
+      await sender.setOption("multicastTtl", 9);
+      await capture.bind({
+        family: "packet",
+        interfaceIndex: interfaceIndex("nr-veth1"),
+        protocol: ETH_P_IP,
+      });
+
+      const solicitationCapture = capture.receiveMessage({
+        dataCapacity: 2048,
+      });
+      const controlReads = new Map();
+      const ttlControl = new Proxy(
+        { kind: "ipv4Ttl", value: 1 },
+        {
+          get(target, property, receiver) {
+            controlReads.set(property, (controlReads.get(property) ?? 0) + 1);
+            return Reflect.get(target, property, receiver);
+          },
+        },
+      );
+      let controlLengthReads = 0;
+      const controls = new Proxy([ttlControl], {
+        get(target, property, receiver) {
+          if (property === "length") controlLengthReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      assert.equal(
+        await sendIcmpMessage(
+          sender,
+          { kind: "routerSolicitation" },
+          {
+            destination: { family: "ipv4", address: "224.0.0.2" },
+            control: controls,
+          },
+        ),
+        8,
+      );
+      assert.equal(controlLengthReads, 1);
+      assert.equal(controlReads.get("kind"), 1);
+      assert.equal(controlReads.get("value"), 1);
+      assertRouterDiscoveryFrame(
+        await withDeadline(solicitationCapture, "Router Solicitation capture"),
+        ICMP_ROUTERSOLICIT,
+      );
+
+      const invalidControls = new Proxy([], {
+        get(target, property, receiver) {
+          if (property === "length") return -1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      assert.throws(
+        () =>
+          sendIcmpMessage(
+            sender,
+            { kind: "routerSolicitation" },
+            {
+              destination: { family: "ipv4", address: "224.0.0.2" },
+              control: invalidControls,
+            },
+          ),
+        { code: "ERR_INVALID_ARGUMENT" },
+      );
+
+      const advertisementCapture = capture.receiveMessage({
+        dataCapacity: 2048,
+      });
+      assert.equal(
+        await sendIcmpMessage(
+          sender,
+          {
+            kind: "routerAdvertisement",
+            lifetime: 1800,
+            addresses: [{ address: "192.0.2.1", preference: 0 }],
+          },
+          {
+            destination: { family: "ipv4", address: "224.0.0.1" },
+          },
+        ),
+        16,
+      );
+      assertRouterDiscoveryFrame(
+        await withDeadline(
+          advertisementCapture,
+          "Router Advertisement capture",
+        ),
+        ICMP_ROUTERADVERT,
+      );
+
+      await assert.rejects(
+        async () =>
+          sendIcmpMessage(
+            sender,
+            { kind: "routerSolicitation" },
+            {
+              destination: { family: "ipv4", address: "224.0.0.1" },
+            },
+          ),
+        { code: "ERR_INVALID_ARGUMENT" },
+      );
+      await assert.rejects(
+        async () =>
+          sendIcmpMessage(
+            sender,
+            { kind: "routerSolicitation" },
+            {
+              destination: { family: "ipv4", address: "224.0.0.2" },
+              ttl: 2,
+            },
+          ),
+        { code: "ERR_INVALID_ARGUMENT" },
+      );
+
+      await sender.setOption("broadcast", false);
+      await assert.rejects(
+        sendIcmpMessage(
+          sender,
+          { kind: "routerSolicitation" },
+          {
+            destination: { family: "ipv4", address: "255.255.255.255" },
+          },
+        ),
+        (error) => error instanceof Error && error.code === "ERR_SYSTEM",
+      );
+      await sender.setOption("broadcast", true);
+      assert.equal(
+        await sendIcmpMessage(
+          sender,
+          { kind: "routerSolicitation" },
+          {
+            destination: { family: "ipv4", address: "255.255.255.255" },
+          },
+        ),
+        8,
+      );
+    } finally {
+      await capture.close();
+      await sender.close();
+    }
+  },
+);
+
+test(
+  "traces a routed ICMP path, unreachable route, and silent hop with lane cleanup",
+  { skip: !tracerouteTopologyEnabled, timeout: 15_000 },
+  async () => {
+    const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+    try {
+      await socket.bind("198.18.1.1");
+      const common = {
+        probesPerHop: 1,
+        maxInFlight: 1,
+        timeoutMilliseconds: 250,
+        overallTimeoutMilliseconds: 5_000,
+        identifier: 0x5152,
+        token: Buffer.from("phase-15-route"),
+      };
+      for (const options of [
+        { firstHop: 0 },
+        { firstHop: 3, maxHops: 2 },
+        { probesPerHop: 11 },
+        { timeoutMilliseconds: 0 },
+        { overallTimeoutMilliseconds: 3_600_001 },
+        { payload: Buffer.alloc(4097) },
+        { token: Buffer.alloc(0) },
+        { token: Buffer.alloc(65) },
+        { probesPerHop: 1, maxInFlight: 2 },
+        { identifier: 0x1_0000 },
+        { initialSequence: -1 },
+        { stopOnUnreachable: "yes" },
+        { signal: {} },
+        { onProgress: "callback" },
+      ]) {
+        assert.throws(
+          () =>
+            traceIcmpRoute(
+              socket,
+              { family: "ipv4", address: "198.18.2.2" },
+              options,
+            ),
+          { code: "ERR_INVALID_ARGUMENT" },
+        );
+      }
+      const routed = await traceIcmpRoute(
+        socket,
+        { family: "ipv4", address: "198.18.2.2" },
+        { ...common, maxHops: 3, initialSequence: 0x1500 },
+      );
+      assert.equal(routed.termination, "destination");
+      assert.deepEqual(
+        routed.hops.map((hop) => hop.hop),
+        [1, 2],
+      );
+      assert.equal(routed.hops[0].probes[0].kind, "hop");
+      assert.equal(routed.hops[0].probes[0].responderAddress, "198.18.1.2");
+      assert.equal(routed.hops[1].probes[0].kind, "destination");
+      assert.equal(routed.hops[1].probes[0].responderAddress, "198.18.2.2");
+      assert.equal(
+        typeof routed.hops[1].probes[0].roundTripNanoseconds,
+        "bigint",
+      );
+
+      const unreachable = await traceIcmpRoute(
+        socket,
+        { family: "ipv4", address: "198.18.3.1" },
+        { ...common, maxHops: 3, initialSequence: 0x1510 },
+      );
+      assert.equal(unreachable.termination, "unreachable");
+      assert.equal(unreachable.hops.at(-1).probes[0].kind, "unreachable");
+
+      const silent = await traceIcmpRoute(
+        socket,
+        { family: "ipv4", address: "198.18.4.1" },
+        { ...common, maxHops: 2, initialSequence: 0x1520 },
+      );
+      assert.equal(silent.termination, "maxHops");
+      assert.ok(
+        silent.hops.some((hop) =>
+          hop.probes.some((probe) => probe.kind === "timeout"),
+        ),
+      );
+      assert.deepEqual(silent.hops[1].probes[0], {
+        kind: "timeout",
+        hop: 2,
+        ordinal: 0,
+        sequence: 0x1521,
+        timeoutKind: "probe",
+      });
+
+      const existingSource = new RawSocketEventEmitter(socket);
+      await assert.rejects(
+        traceIcmpRoute(
+          socket,
+          { family: "ipv4", address: "198.18.2.2" },
+          { ...common, maxHops: 2, initialSequence: 0x1530 },
+        ),
+        { code: "ERR_RECEIVER_ACTIVE" },
+      );
+      assert.equal(await existingSource.detach(), socket);
+
+      const cleanupProbe = new RawSocketEventEmitter(socket);
+      assert.equal(await cleanupProbe.detach(), socket);
     } finally {
       await socket.close();
     }
@@ -1225,6 +1544,40 @@ function createEchoRequest(sequence = 1) {
   packet.writeUInt16BE(sequence, 6);
   packet.writeUInt32BE(0x6e6f6465, 8);
   packet.writeUInt16BE(internetChecksum(packet), 2);
+  return packet;
+}
+
+function assertRouterDiscoveryFrame(message, expectedType) {
+  assert.equal(message.dataTruncated, false);
+  assert.ok(message.data.byteLength >= 14 + 20 + 8);
+  assert.equal(message.data.readUInt16BE(12), ETH_P_IP);
+  const ipOffset = 14;
+  const headerLength = (message.data[ipOffset] & 0x0f) * 4;
+  assert.ok(headerLength >= 20);
+  assert.equal(message.data[ipOffset + 8], 1);
+  assert.equal(message.data[ipOffset + 9], IPPROTO_ICMP);
+  assert.equal(message.data[ipOffset + headerLength], expectedType);
+  const totalLength = message.data.readUInt16BE(ipOffset + 2);
+  const parsed = parseIcmpMessage(
+    message.data.subarray(ipOffset + headerLength, ipOffset + totalLength),
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.packet.type, expectedType);
+}
+
+function createQuotedEchoDatagram(sequence) {
+  const echo = createEchoRequest(sequence);
+  const packet = Buffer.alloc(20 + echo.byteLength);
+  packet[0] = 0x45;
+  packet.writeUInt16BE(packet.byteLength, 2);
+  packet.writeUInt16BE(0x1301, 4);
+  packet.writeUInt16BE(0x4000, 6);
+  packet[8] = 1;
+  packet[9] = IPPROTO_ICMP;
+  packet.set([127, 0, 0, 1], 12);
+  packet.set([127, 0, 0, 1], 16);
+  packet.writeUInt16BE(internetChecksum(packet.subarray(0, 20)), 10);
+  echo.copy(packet, 20);
   return packet;
 }
 

@@ -1,13 +1,17 @@
 # ICMPv4 utilities and traceroute capability plan
 
-Status: Phase 12 complete; Phases 13–15 planned
+Status: Phases 12–15 complete
 
 Last updated: 2026-07-13
 
 The preimplementation audit and closed findings are recorded in
 [the Phase 12–15 plan review](24-icmp-plan-review.md). This document remains the
 authoritative implementation contract. Phase 12 evidence is recorded in the
-[completion report](25-phase-12-report.md).
+[Phase 12 completion report](25-phase-12-report.md), and Phase 13 evidence is
+recorded in the [Phase 13 completion report](26-phase-13-report.md). Phase 14
+evidence is recorded in the [Phase 14 completion report](27-phase-14-report.md).
+Phase 15 evidence is recorded in the
+[Phase 15 completion report](28-phase-15-report.md).
 
 ## Purpose
 
@@ -654,7 +658,7 @@ Implementation order:
 
 ### Phase 13 — ICMPv4 errors, quotes, and extensions
 
-Status: planned; depends on Phase 12
+Status: complete (2026-07-13); depends on Phase 12
 
 Deliverables:
 
@@ -684,7 +688,7 @@ Exit gate:
 
 ### Phase 14 — Router discovery and legacy informational messages
 
-Status: planned; depends on Phase 12 and reuses Phase 13 validation patterns
+Status: complete (2026-07-13)
 
 Deliverables:
 
@@ -713,9 +717,17 @@ Exit gate:
 - README/API docs distinguish supported legacy wire formats from recommended
   modern configuration mechanisms.
 
+Implementation evidence: strict TypeScript codecs use bounded checked count and
+entry-size arithmetic, retain signed preferences and forward-compatible words,
+classify every raw timestamp value, inspect masks without applying them, and
+preserve compatible noncanonical fields as owned data with issues. An isolated
+packet capture proves correct Router Discovery multicast destinations and IPv4
+TTL 1, while ordinary, declaration, privileged, stress, consumer, artifact, and
+reproducibility gates pass. See the [Phase 14 report](27-phase-14-report.md).
+
 ### Phase 15 — ICMP traceroute utilities
 
-Status: planned; depends on Phases 12 and 13
+Status: complete (2026-07-13); depends on Phases 12 through 14
 
 Deliverables:
 
@@ -748,6 +760,15 @@ Exit gate:
   caller-owned socket open unless it was externally closed;
 - all earlier quality, privileged, stress, consumer, and release gates remain
   green.
+
+Implementation evidence: the three public traceroute entry points, owned and
+bounded probe data, exact monotonic deadlines, deterministic one-hop scheduling,
+strong/weak quote correlation, compact ordered results, synchronous terminal
+detach, and cleanup-ordered failure are implemented. Fake-clock tests close the
+race matrix; an isolated three-node route proves TTL-limited hop and destination
+detection plus unreachable, silent, lane-conflict, and reuse behavior; all
+ordinary, declaration, privileged, stress, consumer, artifact, and
+reproducibility gates pass. See the [Phase 15 report](28-phase-15-report.md).
 
 ## Verification plan
 

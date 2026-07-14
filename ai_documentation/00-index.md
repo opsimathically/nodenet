@@ -4,7 +4,7 @@ Last updated: 2026-07-13
 
 ## Current state
 
-Phases 0 through 11 are complete, with native AArch64 execution retained as a
+Phases 0 through 15 are complete, with native AArch64 execution retained as a
 publication gate. IPv4/IPv6 raw sockets and raw/cooked packet sockets now
 include bounded `sendmsg`/`recvmsg`, typed ancillary data and flags, metadata
 and error-queue options, device binding, AbortSignal cancellation, explicit
@@ -25,11 +25,16 @@ Phase 11 implements an optional typed `RawSocketEventEmitter` as a
 zero-dependency TypeScript adapter over the existing promise API. It provides
 explicit start, awaitable pause/detach, one receive per source, independent
 normal/error-queue ownership, Node-standard listener behavior, and exactly-once
-close without changing Rust or native ownership. Phase 12 adds pure bounded
-ICMPv4 checksum and Echo codecs, structured validation, Linux raw-receive
-extraction, correlation, and one-operation helpers over the same socket API. The
-candidate is now the unpublished `0.1.0-rc.3`; x86-64 ordinary, privileged,
-stress, consumer, artifact, and reproducibility gates pass.
+close without changing Rust or native ownership. Phases 12 through 14 add pure
+bounded ICMPv4 checksum, Echo, diagnostic-error, Router Discovery, Timestamp,
+and deprecated Address Mask codecs; structured validation; Linux raw-receive
+extraction; quoted-packet correlation; RFC 1191 MTU; RFC 4884 extensions; and
+one-operation helpers over the same socket API. Phase 15 adds deterministic
+TTL-limited Echo probes, pure strong/weak response classification, and bounded
+increasing-TTL orchestration with exact monotonic deadlines and cleanup-ordered
+receive-lane ownership. The candidate is now the unpublished `0.1.0-rc.6`;
+x86-64 ordinary, privileged routed-topology, stress, consumer, artifact, and
+reproducibility gates pass.
 
 The adversarial post-implementation audit found and corrected a stale same-turn
 pump replacement race, non-abort error wins that could strand pause or detach
@@ -44,14 +49,14 @@ packet addresses more defensively, and enforces the declared glibc baseline on
 release artifacts. See D-026, D-027, and the audit report. AArch64 remains
 explicitly untested.
 
-Phases 12 through 15 are accepted and have passed their preimplementation
-protocol/API/safety review. Phase 12 is implemented; Phases 13 through 15 remain
-planned for diagnostic errors, router discovery, Timestamp, deprecated Address
-Mask formats, and conventional increasing-TTL ICMP traceroute. The work composes
-over the existing promise and event receive APIs; it does not add another native
-I/O engine or silently include the distinct ICMPv6 protocol. See the capability
-plan, review, and Phase 12 report for the frozen scope, wire-validation rules,
-safety bounds, implementation evidence, and remaining phase gates.
+Phases 12 through 15 passed their preimplementation protocol/API/safety review
+and are implemented. The work composes over the existing promise and event
+receive APIs; it does not add another native I/O engine or silently include the
+distinct ICMPv6 protocol. See the capability plan, review, and Phase 12–15
+reports for the frozen scope, wire-validation rules, safety bounds, and
+implementation evidence. The post-implementation audit corrected four hostile
+JavaScript boundary and callback-quiescence gaps and repeated all release gates.
+No subsequent implementation phase is currently accepted.
 
 ## Documents
 
@@ -80,6 +85,10 @@ safety bounds, implementation evidence, and remaining phase gates.
 23. [ICMPv4 utilities and traceroute capability plan](23-icmp-and-traceroute-plan.md)
 24. [ICMPv4 and traceroute plan review](24-icmp-plan-review.md)
 25. [Phase 12 completion report](25-phase-12-report.md)
+26. [Phase 13 completion report](26-phase-13-report.md)
+27. [Phase 14 completion report](27-phase-14-report.md)
+28. [Phase 15 completion report](28-phase-15-report.md)
+29. [Phase 12–15 implementation audit](29-phase-12-15-implementation-audit.md)
 
 `AGENTS.md` is the compact operational context. These documents contain the
 rationale and phase details. If they disagree, resolve the discrepancy and
@@ -130,9 +139,8 @@ When work starts:
 4. Record the verification commands and results.
 5. Update this page's current state and next action.
 
-Phase 12 prepared the unpublished `0.1.0-rc.3` release candidate. Phase 13 is
-the next reviewed implementation phase: ICMPv4 errors, bounded quoted packets,
-and extensions. Phases 14 and 15 then add router-discovery/legacy messages and
-bounded ICMP traceroute. Streams, async iteration, batch events, packet-ring
-events, `ref()`/`unref()`, and ICMPv6 protocol codecs remain separate design
-decisions. Native AArch64 execution remains a publication gate.
+Phase 15 prepared the unpublished `0.1.0-rc.6` release candidate with bounded
+conventional ICMP Echo traceroute over the Phase 12–14 protocol foundation.
+Streams, async iteration, batch events, packet-ring events, `ref()`/`unref()`,
+and ICMPv6 protocol codecs remain separate design decisions. Native AArch64
+execution remains a publication gate.

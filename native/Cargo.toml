@@ -1,6 +1,6 @@
 [package]
 name = "nodenetraw-native"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.6"
 edition = "2024"
 rust-version = "1.97.0"
 license = "MIT"

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "release": "0.1.0-rc.3",
+  "release": "0.1.0-rc.6",
   "platform": {
     "os": "linux",
     "architectures": ["x86_64", "aarch64"],
@@ -22,9 +22,9 @@
     "classicBpfInstructionsMaximum": 4096
   },
   "artifacts": [
-    "nodenetraw",
-    "nodenetraw-linux-x64-gnu",
-    "nodenetraw-linux-arm64-gnu"
+    "@opsimathically/nodenetraw",
+    "@opsimathically/nodenetraw-linux-x64-gnu",
+    "@opsimathically/nodenetraw-linux-arm64-gnu"
   ],
   "unsupported": [
     "non-Linux",

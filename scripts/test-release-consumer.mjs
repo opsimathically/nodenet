@@ -32,12 +32,12 @@ try {
   const platformTarball = join(
     process.cwd(),
     tarballs,
-    `nodenetraw-linux-${process.arch}-gnu-${version}.tgz`,
+    `opsimathically-nodenetraw-linux-${process.arch}-gnu-${version}.tgz`,
   );
   const rootTarball = join(
     process.cwd(),
     tarballs,
-    `nodenetraw-${version}.tgz`,
+    `opsimathically-nodenetraw-${version}.tgz`,
   );
   run(
     "npm",
@@ -58,7 +58,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "const m = await import('nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function') process.exit(1); try { await import('nodenetraw/internal/event-controller.js'); process.exit(1) } catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') process.exit(1) }",
+      "const m = await import('@opsimathically/nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function' || typeof m.createIcmpTracerouteProbe !== 'function' || typeof m.classifyIcmpTracerouteResponse !== 'function' || typeof m.traceIcmpRoute !== 'function') process.exit(1); try { await import('@opsimathically/nodenetraw/internal/event-controller.js'); process.exit(1) } catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') process.exit(1) }",
     ],
     { cwd: consumer },
   );
@@ -66,7 +66,7 @@ try {
     process.execPath,
     [
       "--eval",
-      "const m = require('nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function') process.exit(1)",
+      "const m = require('@opsimathically/nodenetraw'); if (m.nativeSmokeTest() !== 'nodenetraw:napi-ok' || typeof m.RawSocketEventEmitter !== 'function' || typeof m.createIcmpTracerouteProbe !== 'function' || typeof m.classifyIcmpTracerouteResponse !== 'function' || typeof m.traceIcmpRoute !== 'function') process.exit(1)",
     ],
     { cwd: consumer },
   );

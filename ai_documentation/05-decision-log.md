@@ -373,11 +373,12 @@ rationale to avoid repeating the investigation.
 - Decision: use `0.1.0-rc.1` as the first externally installable version and
   keep publication a separate human-authorized action. Distribute an
   architecture-independent root package plus exact-version optional
-  `nodenetraw-linux-x64-gnu` and `nodenetraw-linux-arm64-gnu` packages. Target
-  packages contain only the native addon, license, readme, and manifest; they
-  have Linux/CPU/glibc selectors and no install scripts. Release assembly
-  records SHA-256 file provenance, clean-consumer tests both ESM and
-  `require()`, and a double optimized build must have identical native hashes.
+  `@opsimathically/nodenetraw-linux-x64-gnu` and
+  `@opsimathically/nodenetraw-linux-arm64-gnu` packages. Target packages contain
+  only the native addon, license, readme, and manifest; they have
+  Linux/CPU/glibc selectors and no install scripts. Release assembly records
+  SHA-256 file provenance, clean-consumer tests both ESM and `require()`, and a
+  double optimized build must have identical native hashes.
 - Rationale: target packages allow npm to select one checked artifact without
   installation-time network scripts or compilation, while the repository remains
   a documented source-build path. An RC communicates that the complete low-level
@@ -544,8 +545,10 @@ documentation:
   [RFC 1071 Internet checksum](https://www.rfc-editor.org/rfc/rfc1071.html),
   [RFC 1122 host requirements](https://www.rfc-editor.org/rfc/rfc1122.html),
   [RFC 1191 Path MTU Discovery](https://www.rfc-editor.org/rfc/rfc1191.html),
-  [RFC 1256 Router Discovery](https://www.rfc-editor.org/rfc/rfc1256.html), and
+  [RFC 1256 Router Discovery](https://www.rfc-editor.org/rfc/rfc1256.html),
   [RFC 4884 multi-part ICMP](https://www.rfc-editor.org/rfc/rfc4884.html),
+  [RFC 950 subnetting](https://www.rfc-editor.org/rfc/rfc950.html), and
+  [RFC 6918 legacy ICMP deprecation](https://www.rfc-editor.org/rfc/rfc6918.html),
   checked for D-029 on 2026-07-13
 
 ## Decision template

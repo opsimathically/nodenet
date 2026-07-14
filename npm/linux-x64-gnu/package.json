@@ -1,6 +1,6 @@
 {
-  "name": "nodenetraw-linux-x64-gnu",
-  "version": "0.1.0-rc.3",
+  "name": "@opsimathically/nodenetraw-linux-x64-gnu",
+  "version": "0.1.0-rc.6",
   "description": "Linux x86-64 glibc native binding for nodenetraw",
   "license": "MIT",
   "repository": {

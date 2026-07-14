@@ -1,16 +1,19 @@
-# nodenetraw
+# @opsimathically/nodenetraw
 
-`nodenetraw` is a Linux-only Node.js native module for low-level raw socket
-access. It exposes a TypeScript API backed by Rust through N-API, with an
-emphasis on memory safety, correct file-descriptor ownership, stable Linux error
-reporting, and a small dependency footprint.
+`@opsimathically/nodenetraw` is a Linux-only Node.js native module for low-level
+raw socket access. It exposes a TypeScript API backed by Rust through N-API,
+with an emphasis on memory safety, correct file-descriptor ownership, stable
+Linux error reporting, and a small dependency footprint.
 
 > **Status:** IPv4, IPv6, and raw/cooked Linux packet sockets support typed
 > message I/O, metadata, advanced options, packet controls, filter attachment,
 > AbortSignal cancellation, stable errors, explicit close, and an optional typed
 > event-driven receive adapter. Bounded ICMPv4 checksum, Echo codec, parsing,
-> validation, correlation, and one-operation socket helpers are also available.
-> Version `0.1.0-rc.3` is an unpublished release candidate.
+> validation, correlation, ICMPv4 diagnostic-error codecs, quoted-packet
+> matching, RFC 4884 extension parsing, Router Discovery, Timestamp and legacy
+> Address Mask codecs, one-operation socket helpers, and bounded conventional
+> ICMP Echo traceroute are also available. Version `0.1.0-rc.6` is an
+> unpublished release candidate.
 
 The initial support baseline is Node.js 26+, Rust 1.97.0 (updated with each
 stable Rust release), and 64-bit glibc Linux on x86-64 or AArch64 with kernel
@@ -66,11 +69,11 @@ receive-ring work are in place, together with the event receive adapter,
 fuzz/sanitizer gates, and target-specific release rehearsal. See the
 [full capability plan](ai_documentation/11-full-capability-plan.md).
 
-Phase 12 is implemented with zero-dependency ICMPv4 checksum, Echo construction,
-standalone and Linux raw-receive parsing, validation, correlation, and socket
-helpers. Phases 13 through 15 remain reviewed plans for diagnostic errors,
-router discovery, Timestamp, legacy Address Mask messages, and bounded ICMP Echo
-traceroute utilities. See the
+Phases 12 through 15 are implemented with zero-dependency ICMPv4 checksum, Echo,
+diagnostic-error, Router Discovery, Timestamp, and deprecated Address Mask
+construction; standalone and Linux raw-receive parsing; quoted-packet
+correlation; RFC 4884 extensions; validation; socket helpers; and bounded
+increasing-TTL ICMP Echo traceroute. See the
 [ICMP and traceroute plan](ai_documentation/23-icmp-and-traceroute-plan.md) and
 its [preimplementation review](ai_documentation/24-icmp-plan-review.md).
 
@@ -87,8 +90,9 @@ its [preimplementation review](ai_documentation/24-icmp-plan-review.md).
 | TPACKET_V3 receive ring                    | Implemented           | Receive-only, copied frame leases, 64 MiB per ring                                       |
 | Typed EventEmitter receive adapter         | Implemented           | One bounded receive per source; normal and error-queue lanes are independent             |
 | ICMPv4 Echo utilities                      | Implemented           | Phase 12; bounded owned codecs and helpers over existing IPv4 ICMP sockets               |
-| ICMPv4 error/informational utilities       | Planned/reviewed      | Phases 13–14                                                                             |
-| ICMP Echo traceroute utilities             | Planned/reviewed      | Phase 15; conventional TTL-limited probes, not deprecated ICMP type 30                   |
+| ICMPv4 diagnostic-error utilities          | Implemented           | Phase 13; bounded quotes, error codecs, MTU, correlation, and RFC 4884 envelopes         |
+| ICMPv4 informational utilities             | Implemented           | Phase 14; Router Discovery, Timestamp, and deprecated Address Mask formats               |
+| ICMP Echo traceroute utilities             | Implemented           | Phase 15; bounded conventional TTL-limited probes, not deprecated ICMP type 30           |
 | Hardware timestamps and driver behavior    | Capability-detected   | Not a portable release gate                                                              |
 | TX packet mmap and AF_XDP                  | Unsupported           | Require separate ownership and performance reviews                                       |
 | x86-64 glibc Linux                         | Tested                | Kernel 4.18+, glibc 2.28+, Node 26+                                                      |
@@ -98,7 +102,7 @@ its [preimplementation review](ai_documentation/24-icmp-plan-review.md).
 ## API
 
 ```ts
-import { IPPROTO_ICMP, RawSocket } from "nodenetraw";
+import { IPPROTO_ICMP, RawSocket } from "@opsimathically/nodenetraw";
 
 const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
 
@@ -160,7 +164,7 @@ import {
   RawSocket,
   RawSocketError,
   type ReceivedMessage,
-} from "nodenetraw";
+} from "@opsimathically/nodenetraw";
 
 function handleMessage(message: ReceivedMessage): void {
   console.log(message.source, message.control, message.data);
@@ -206,7 +210,7 @@ import {
   RawSocket,
   RawSocketError,
   RawSocketEventEmitter,
-} from "nodenetraw";
+} from "@opsimathically/nodenetraw";
 
 const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
 await socket.bind("127.0.0.1");
@@ -313,6 +317,28 @@ not support `errorQueue: true`, and an active TPACKET ring cannot be wrapped by
 the message-event adapter. Calling `close()` on either of two lane sources
 closes their shared socket; each source emits its own exactly-once `close`.
 
+### Phase 12–15 ICMPv4 quick reference
+
+The ICMPv4 layer is additive: the raw socket API remains available, and the
+utilities provide bounded construction, parsing, correlation, and orchestration
+when an application does not want to manipulate every wire field itself.
+
+| Task                                                  | Public API                                                                                    | Socket or receive-lane behavior                                                |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Compute or verify an Internet checksum                | `computeInternetChecksum()`, `validateInternetChecksum()`                                     | Pure; no socket or privilege required                                          |
+| Construct, parse, or validate standalone ICMPv4 bytes | `encodeIcmpMessage()`, `parseIcmpMessage()`, `validateIcmpMessage()`                          | Pure; input begins at the ICMP type octet                                      |
+| Parse bytes returned by a Linux IPv4 raw socket       | `parseIcmpReceivedMessage()`                                                                  | Pure; accepts an existing `ReceivedMessage` containing its IPv4 header         |
+| Send or receive one ICMPv4 operation                  | `sendIcmpMessage()`, `receiveIcmpMessage()`                                                   | Uses a caller-owned `IPPROTO_ICMP` socket; receive claims the normal lane once |
+| Correlate Echo and quoted diagnostics                 | `matchesIcmpEchoReply()`, `matchIcmpEchoQuote()`                                              | Pure; requires explicit tuple/token evidence                                   |
+| Interpret diagnostic, timestamp, or mask values       | `classifyIcmpDestinationUnreachable()`, `classifyIcmpTimestamp()`, `inspectIpv4AddressMask()` | Pure; never changes host configuration                                         |
+| Build or classify one traceroute probe                | `createIcmpTracerouteProbe()`, `classifyIcmpTracerouteResponse()`                             | Pure; suitable when the application already owns reception                     |
+| Run a bounded conventional Echo traceroute            | `traceIcmpRoute()`                                                                            | Temporarily owns the socket's normal receive lane and leaves the socket open   |
+
+Pure codecs do not require elevated privileges. Opening and using the raw ICMP
+socket normally requires `CAP_NET_RAW` or root. Every variable byte field
+returned by a parser is an owned bounded copy, so callers may retain results
+after the original input goes out of scope.
+
 ### ICMPv4 Echo utilities
 
 Phase 12 provides non-mutating Internet-checksum helpers and bounded owned Echo
@@ -321,6 +347,52 @@ bytes begin at the ICMP type field and use `parseIcmpMessage()`. Linux IPv4 raw
 receives include an IPv4 header, so use `parseIcmpReceivedMessage()` for an
 existing `ReceivedMessage`, or `receiveIcmpMessage()` for exactly one combined
 receive-and-parse operation.
+
+The standalone codec can be used independently of raw sockets—for example in a
+packet builder, capture reader, or test fixture:
+
+```ts
+import {
+  computeInternetChecksum,
+  encodeIcmpMessage,
+  parseIcmpMessage,
+  validateIcmpMessage,
+  validateInternetChecksum,
+} from "@opsimathically/nodenetraw";
+
+const bytes = encodeIcmpMessage({
+  kind: "echoRequest",
+  identifier: 0x4e52,
+  sequence: 1,
+  data: new TextEncoder().encode("hello"),
+});
+
+console.log(computeInternetChecksum(bytes)); // 0 for a complete valid message
+console.log(validateInternetChecksum(bytes)); // true
+
+const validation = validateIcmpMessage(bytes, {
+  checksum: "require",
+  conformance: "canonical",
+});
+if (!validation.valid) {
+  console.error(validation.error, validation.issues);
+}
+
+const parsed = parseIcmpMessage(bytes);
+if (parsed.ok && parsed.packet.message.kind === "echoRequest") {
+  console.log(parsed.packet.message.identifier, parsed.packet.message.data);
+} else if (!parsed.ok) {
+  // Malformed network input is a structured result rather than a thrown error.
+  console.error(parsed.error.reason, parsed.checksumStatus, parsed.issues);
+}
+```
+
+Construction-time misuse—such as an out-of-range identifier or oversized
+payload—throws `RawSocketError` with `ERR_INVALID_ARGUMENT`. Packet defects
+found while parsing are normally returned through `ok: false`, `error`,
+`checksumStatus`, and `issues`, allowing untrusted traffic to be inspected
+without exception-driven packet handling. `compatible` conformance is the
+receive default; request `canonical` when validating locally generated bytes.
 
 This promise-driven example sends one Echo Request and keeps consuming explicit
 one-shot receives until its strongly correlated reply arrives. Raw sockets may
@@ -334,7 +406,7 @@ import {
   matchesIcmpEchoReply,
   receiveIcmpMessage,
   sendIcmpMessage,
-} from "nodenetraw";
+} from "@opsimathically/nodenetraw";
 
 const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
 const stop = new AbortController();
@@ -388,7 +460,7 @@ import {
   matchesIcmpEchoReply,
   parseIcmpReceivedMessage,
   sendIcmpMessage,
-} from "nodenetraw";
+} from "@opsimathically/nodenetraw";
 
 const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
 const source = new RawSocketEventEmitter(socket);
@@ -421,14 +493,365 @@ await sendIcmpMessage(
 traffic internally. It conflicts predictably with an event source owning that
 lane. Checksum verification defaults to `require`; `report` and `ignore` are
 explicit parser policies. Decodable unknown types/codes remain available as
-owned bytes and validation issues rather than being mislabeled. These utilities
-cover ICMPv4 Echo only in Phase 12; ICMPv6 and the Phase 13–15 message families
-are not silently inferred.
+owned bytes and validation issues rather than being mislabeled.
+
+### ICMPv4 diagnostic errors and quoted packets
+
+Phase 13 adds Destination Unreachable (including Fragmentation Needed), Time
+Exceeded, Parameter Problem, and Redirect. Builders require a valid quoted IPv4
+header with its checksum and the required leading payload bytes. They never
+choose traffic to answer, send automatically, accept a Redirect, or alter host
+routing; those decisions remain application policy.
+
+The same `encodeIcmpMessage()` and `sendIcmpMessage()` APIs used for Echo accept
+the diagnostic message unions. Named constants keep codes readable:
+
+```ts
+import {
+  ICMP_FRAG_NEEDED,
+  IPPROTO_ICMP,
+  RawSocket,
+  sendIcmpMessage,
+} from "@opsimathically/nodenetraw";
+
+async function reportMtu(
+  socket: RawSocket,
+  recipient: string,
+  quotedIpv4Datagram: Uint8Array,
+): Promise<void> {
+  if (socket.protocol !== IPPROTO_ICMP) throw new Error("ICMP socket required");
+
+  await sendIcmpMessage(
+    socket,
+    {
+      kind: "destinationUnreachable",
+      code: ICMP_FRAG_NEEDED,
+      nextHopMtu: 1_500,
+      quote: quotedIpv4Datagram,
+      extensions: [
+        {
+          // Unknown/private object classes are preserved as bounded bytes.
+          classNumber: 250,
+          cType: 1,
+          data: Uint8Array.of(0x00, 0x00, 0x05, 0xdc),
+        },
+      ],
+    },
+    { destination: { family: "ipv4", address: recipient } },
+  );
+}
+```
+
+On receive, parsed diagnostics retain the bounded quoted IPv4 bytes and expose
+checked header/ICMP-prefix evidence. `matchIcmpEchoQuote()` reports `strong`
+when the complete token is available, `weak` for a matching historical short
+quote, or an unmatched result. An event source continues to own the only receive
+loop:
+
+```ts
+import {
+  ICMP_FRAG_NEEDED,
+  IPPROTO_ICMP,
+  RawSocket,
+  RawSocketEventEmitter,
+  matchIcmpEchoQuote,
+  parseIcmpReceivedMessage,
+} from "@opsimathically/nodenetraw";
+
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+const source = new RawSocketEventEmitter(socket);
+
+source.on("message", (received) => {
+  const parsed = parseIcmpReceivedMessage(received);
+  if (!parsed.ok || parsed.packet.message.kind !== "destinationUnreachable") {
+    return;
+  }
+
+  const diagnostic = parsed.packet.message;
+  const correlation = matchIcmpEchoQuote(diagnostic.quote, {
+    expectedDestinationAddress: "198.51.100.9",
+    identifier: 0x4e52,
+    sequence: 1,
+    token: new TextEncoder().encode("request-1"),
+  });
+  if (correlation.matched) {
+    console.log({
+      code: diagnostic.code,
+      fragmentationNeeded: diagnostic.code === ICMP_FRAG_NEEDED,
+      nextHopMtu: diagnostic.nextHopMtu,
+      strength: correlation.strength,
+      extensions: diagnostic.extensions?.objects,
+    });
+  }
+});
+source.on("error", console.error);
+source.start();
+```
+
+RFC 4884 extension construction uses `{ classNumber, cType, data }` and
+preserves unknown object classes as owned bytes. Compliant length framing is the
+default. Set `legacyExtensions: true` only when parsing peers that used the old
+fixed 128-byte boundary; a zero quote-length byte otherwise means no extension.
+The extension checksum and object bounds are reported separately from the outer
+ICMP checksum. ICMP messages remain unauthenticated network input.
+
+### ICMPv4 Router Discovery and legacy informational messages
+
+Phase 14 adds explicit Router Solicitation/Advertisement, Timestamp
+Request/Reply, and Address Mask Request/Reply values to the same codec and
+socket helpers. The library does not schedule solicitations or advertisements,
+select a router, answer requests, read or change a clock, or apply a mask.
+
+Router Discovery builders use standard two-word address entries. Parsed
+advertisements retain larger forward-compatible entries as `extensionWords` and
+preserve ignored trailing bytes. A preference of `-2147483648` is exposed as not
+default-eligible rather than silently discarded:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  sendIcmpMessage,
+} from "@opsimathically/nodenetraw";
+
+const socket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+
+// Multicast Router Discovery receives a per-message TTL of 1 automatically.
+// The caller still chooses the source/interface and any multicast membership.
+await sendIcmpMessage(
+  socket,
+  { kind: "routerSolicitation" },
+  { destination: { family: "ipv4", address: "224.0.0.2" } },
+);
+
+await sendIcmpMessage(
+  socket,
+  {
+    kind: "routerAdvertisement",
+    lifetime: 1_800,
+    addresses: [{ address: "192.0.2.1", preference: 0 }],
+  },
+  { destination: { family: "ipv4", address: "224.0.0.1" } },
+);
+```
+
+The correct all-routers/all-systems multicast destination is enforced, and a
+conflicting TTL is rejected. Limited broadcast remains explicit: set the
+socket's `broadcast` option yourself before sending to `255.255.255.255`. The
+helper never enables it automatically.
+
+Receiving these messages uses the same discriminated parse result as Echo and
+diagnostic errors. Applications can switch on `message.kind` without manually
+reading type numbers:
+
+```ts
+import { receiveIcmpMessage, type RawSocket } from "@opsimathically/nodenetraw";
+
+async function inspectInformationalMessage(socket: RawSocket): Promise<void> {
+  const parsed = await receiveIcmpMessage(socket);
+  if (!parsed.ok) {
+    console.warn(parsed.error.reason, parsed.issues);
+    return;
+  }
+
+  const message = parsed.packet.message;
+  switch (message.kind) {
+    case "routerAdvertisement":
+      console.log(message.lifetime, message.addresses);
+      break;
+    case "timestampRequest":
+    case "timestampReply":
+      console.log(message.originateTimestamp);
+      break;
+    case "addressMaskReply":
+      console.log(message.mask.address, message.mask.prefixLength);
+      break;
+    default:
+      console.log("other ICMP message", message.kind);
+  }
+}
+```
+
+Timestamp values are always preserved as raw unsigned 32-bit numbers and
+classified as `standard`, `nonStandard`, or `invalidStandardRange`. Request
+builders write receive/transmit timestamps as zero; replies require explicit
+values or can copy a parsed request tuple with `createIcmpTimestampReply()`:
+
+```ts
+import {
+  classifyIcmpTimestamp,
+  createIcmpTimestampReply,
+  encodeIcmpMessage,
+  parseIcmpMessage,
+} from "@opsimathically/nodenetraw";
+
+const requestBytes = encodeIcmpMessage({
+  kind: "timestampRequest",
+  identifier: 7,
+  sequence: 1,
+  originateTimestamp: 12_345,
+});
+const parsed = parseIcmpMessage(requestBytes);
+
+if (parsed.ok && parsed.packet.message.kind === "timestampRequest") {
+  const reply = createIcmpTimestampReply(parsed.packet.message, {
+    receiveTimestamp: 12_400,
+    transmitTimestamp: 12_450,
+  });
+  console.log(classifyIcmpTimestamp(reply.transmitTimestamp), reply);
+}
+```
+
+Address Mask types 17 and 18 are deprecated wire formats. Request construction
+always writes a zero mask, while replies require an explicit dotted-decimal
+mask. Parsing and `inspectIpv4AddressMask()` report contiguity and a prefix
+length when one exists; they do not normalize or apply the value:
+
+```ts
+import {
+  encodeIcmpMessage,
+  inspectIpv4AddressMask,
+} from "@opsimathically/nodenetraw";
+
+const legacyReply = encodeIcmpMessage({
+  kind: "addressMaskReply",
+  identifier: 7,
+  sequence: 1,
+  mask: "255.255.255.0",
+});
+console.log(inspectIpv4AddressMask("255.255.255.0")); // prefixLength: 24
+void legacyReply;
+```
+
+Event-driven consumers continue to call `parseIcmpReceivedMessage()` in their
+existing `RawSocketEventEmitter` listener; Phase 14 adds no emitter, timer,
+queue, discovery state, or automatic responder. All received ICMP remains
+unauthenticated input.
+
+### ICMP Echo traceroute
+
+Phase 15 provides both deterministic probe/classification primitives and a
+bounded convenience operation. It implements conventional increasing-TTL Echo
+probing; it does not construct the deprecated ICMP Traceroute type 30.
+
+`traceIcmpRoute()` claims the socket's normal receive lane for the operation and
+therefore expects a dedicated existing IPv4 `IPPROTO_ICMP` socket. It detaches
+on every terminal path and leaves the caller-owned socket open:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  traceIcmpRoute,
+} from "@opsimathically/nodenetraw";
+
+const traceSocket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+const abortController = new AbortController();
+try {
+  const trace = await traceIcmpRoute(
+    traceSocket,
+    { family: "ipv4", address: "198.51.100.9" },
+    {
+      maxHops: 30,
+      probesPerHop: 3,
+      maxInFlight: 3,
+      timeoutMilliseconds: 3_000,
+      overallTimeoutMilliseconds: 300_000,
+      signal: abortController.signal,
+      onProgress: ({ result }) => console.log(result),
+    },
+  );
+  for (const hop of trace.hops) {
+    const probes = hop.probes.map((probe) => {
+      if (probe.kind === "timeout") return "*";
+      const milliseconds = Number(probe.roundTripNanoseconds) / 1_000_000;
+      return `${probe.responderAddress} ${milliseconds.toFixed(2)} ms`;
+    });
+    console.log(hop.hop, ...probes);
+  }
+  console.log("finished:", trace.termination);
+} finally {
+  await traceSocket.close();
+}
+```
+
+Normal completion reports `destination`, `unreachable`, `maxHops`, or
+`overallTimeout`. Individual silence is a compact `timeout` probe result.
+External cancellation rejects with `ERR_ABORTED` after lane and timer cleanup;
+it is not fabricated as a network response. The destination is a literal IPv4
+address and no DNS lookup occurs. Do not attach a `RawSocketEventEmitter` or
+start another normal-lane receive on the trace socket while the operation is
+running; competing consumers fail with `ERR_RECEIVER_ACTIVE`.
+
+Defaults are hops 1–30, three probes per hop, one active probe, a 3-second probe
+timeout, a 5-minute overall timeout, and stop-on-unreachable behavior. A random
+identifier and 16-byte correlation token are generated unless supplied. Set
+explicit values when repeatability matters. `maxInFlight` applies within the
+current hop and cannot exceed `probesPerHop`; the operation does not send every
+hop concurrently.
+
+Event-driven applications that already own the receive lane can use the pure
+builder and classifier instead of the convenience operation:
+
+```ts
+import {
+  IPPROTO_ICMP,
+  RawSocket,
+  RawSocketEventEmitter,
+  classifyIcmpTracerouteResponse,
+  createIcmpTracerouteProbe,
+  parseIcmpReceivedMessage,
+  sendIcmpMessage,
+} from "@opsimathically/nodenetraw";
+
+const eventSocket = await RawSocket.open({ protocol: IPPROTO_ICMP });
+const probe = createIcmpTracerouteProbe({
+  destination: { family: "ipv4", address: "198.51.100.9" },
+  identifier: 0x5152,
+  sequence: 1,
+  token: Uint8Array.of(0x54, 0x52, 0x43, 0x45),
+  ttl: 1,
+  sentAt: process.hrtime.bigint(),
+});
+const events = new RawSocketEventEmitter(eventSocket);
+events.on("message", (message) => {
+  const receivedAt = process.hrtime.bigint();
+  const match = classifyIcmpTracerouteResponse(
+    probe,
+    parseIcmpReceivedMessage(message),
+    receivedAt,
+  );
+  if (match.matched) console.log(match);
+});
+events.on("error", console.error);
+events.start();
+await sendIcmpMessage(
+  eventSocket,
+  {
+    kind: "echoRequest",
+    identifier: probe.identifier,
+    sequence: probe.sequence,
+    data: probe.data,
+  },
+  { destination: probe.destination, ttl: probe.ttl },
+);
+```
+
+The convenience operation bounds hops to 255, probes to 10 per hop, token data
+to 64 bytes, caller payload to 4,096 bytes, and active probes to 10. Returned
+history contains compact response summaries rather than received packets or raw
+quotes. Firewalls, ICMP rate limiting, asymmetric or load-balanced paths, NAT
+rewriting, and silent routers can produce missing or varying hops. ICMP
+responses remain unauthenticated network input and are never applied as routing
+policy.
+
+These protocol utilities cover ICMPv4 through Phase 15. ICMPv6 protocol codecs
+remain a separate design.
 
 IPv6 uses the same message API with explicit scope and flow fields:
 
 ```ts
-import { IPPROTO_ICMPV6, RawSocket } from "nodenetraw";
+import { IPPROTO_ICMPV6, RawSocket } from "@opsimathically/nodenetraw";
 
 const socket6 = await RawSocket.open({
   family: "ipv6",
@@ -450,7 +873,11 @@ errors are reported through ancillary controls.
 Packet sockets use link-layer addresses and interface indices:
 
 ```ts
-import { ETH_P_IP, RawSocket, interfaceIndex } from "nodenetraw";
+import {
+  ETH_P_IP,
+  RawSocket,
+  interfaceIndex,
+} from "@opsimathically/nodenetraw";
 
 const index = interfaceIndex("eth0");
 const packets = await RawSocket.open({
@@ -671,11 +1098,14 @@ event adapter is recorded in the
 post-implementation review is the
 [Phase 11 implementation audit](ai_documentation/22-phase-11-implementation-audit.md).
 The Phase 12 foundation is recorded in the
-[Phase 12 report](ai_documentation/25-phase-12-report.md). The next accepted
-implementation sequence is defined by the
+[Phase 12 report](ai_documentation/25-phase-12-report.md). The completed ICMPv4
+and traceroute sequence is defined by the
 [ICMPv4 and traceroute capability plan](ai_documentation/23-icmp-and-traceroute-plan.md),
 whose readiness findings are closed in the
-[preimplementation review](ai_documentation/24-icmp-plan-review.md).
+[preimplementation review](ai_documentation/24-icmp-plan-review.md). Its final
+implementation evidence is in the
+[Phase 15 report](ai_documentation/28-phase-15-report.md), followed by the
+[Phase 12–15 implementation audit](ai_documentation/29-phase-12-15-implementation-audit.md).
 
 ## License
 

@@ -130,9 +130,11 @@ The first usable IPv4 milestone was completed in Phases 1 through 4. Phases 5
 through 10 completed family-neutral message I/O, IPv6, `AF_PACKET`,
 extensibility/filtering, measured performance paths, and release hardening.
 Phase 11 completed the separately gated event-driven convenience layer over that
-low-level baseline. Phase 12 implements the ICMPv4 checksum/codec foundation and
-Echo utilities. Phases 13 through 15 are accepted plans for ICMPv4 errors,
-router-discovery/legacy messages, and conventional ICMP Echo traceroute.
+low-level baseline. Phases 12 through 14 implement the ICMPv4 checksum/codec
+foundation, Echo utilities, diagnostic errors, quoted-datagram correlation, RFC
+4884 extensions, Router Discovery, Timestamp, and deprecated Address Mask
+formats. Phase 15 implements conventional bounded ICMP Echo traceroute over the
+same socket and event-receive foundation.
 
 ## Definition of project success
 

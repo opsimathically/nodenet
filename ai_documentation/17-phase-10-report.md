@@ -62,8 +62,9 @@ D-025 freezes the distribution model:
 
 - `nodenetraw` contains ESM output, declarations, the generated loader,
   documentation, changelog, license, and machine-readable release policy;
-- `nodenetraw-linux-x64-gnu` and `nodenetraw-linux-arm64-gnu` each contain one
-  native addon plus manifest, license, and readme;
+- `@opsimathically/nodenetraw-linux-x64-gnu` and
+  `@opsimathically/nodenetraw-linux-arm64-gnu` each contain one native addon
+  plus manifest, license, and readme;
 - root optional dependencies use the exact root version and npm platform
   selectors choose the applicable target package;
 - no package has an install script, native download hook, or Node runtime

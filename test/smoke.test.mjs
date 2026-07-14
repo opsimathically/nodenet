@@ -23,7 +23,10 @@ import {
   IPPROTO_UDP,
   IPPROTO_UDPLITE,
   RawSocketEventEmitter,
+  classifyIcmpTracerouteResponse,
+  createIcmpTracerouteProbe,
   nativeSmokeTest,
+  traceIcmpRoute,
 } from "../dist/index.js";
 
 test("calls the native smoke export through ESM", () => {
@@ -38,12 +41,30 @@ test("loads the synchronous ESM public entry point through require", () => {
   assert.equal(requiredPackage.IPPROTO_ICMP, IPPROTO_ICMP);
   assert.equal(requiredPackage.ETH_P_IP, ETH_P_IP);
   assert.equal(requiredPackage.RawSocketEventEmitter, RawSocketEventEmitter);
+  assert.equal(
+    requiredPackage.createIcmpTracerouteProbe,
+    createIcmpTracerouteProbe,
+  );
+  assert.equal(
+    requiredPackage.classifyIcmpTracerouteResponse,
+    classifyIcmpTracerouteResponse,
+  );
+  assert.equal(requiredPackage.traceIcmpRoute, traceIcmpRoute);
+});
+
+test("exports the ICMP traceroute API", () => {
+  assert.equal(typeof createIcmpTracerouteProbe, "function");
+  assert.equal(typeof classifyIcmpTracerouteResponse, "function");
+  assert.equal(typeof traceIcmpRoute, "function");
 });
 
 test("keeps event controller internals outside package exports", async () => {
-  await assert.rejects(import("nodenetraw/internal/event-controller.js"), {
-    code: "ERR_PACKAGE_PATH_NOT_EXPORTED",
-  });
+  await assert.rejects(
+    import("@opsimathically/nodenetraw/internal/event-controller.js"),
+    {
+      code: "ERR_PACKAGE_PATH_NOT_EXPORTED",
+    },
+  );
 });
 
 test("exports common Linux protocol constants", () => {

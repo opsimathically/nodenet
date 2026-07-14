@@ -1,6 +1,6 @@
 {
-  "name": "nodenetraw",
-  "version": "0.1.0-rc.3",
+  "name": "@opsimathically/nodenetraw",
+  "version": "0.1.0-rc.6",
   "description": "Linux raw sockets for Node.js, implemented in Rust through Node-API",
   "license": "MIT",
   "keywords": [
@@ -67,6 +67,7 @@
     "benchmark:namespace": "npm run build:native:release && npm run build:typescript && sh test/run-benchmark-namespace.sh",
     "test:phase9:stress": "npm run build && sh test/run-phase9-stress-namespace.sh",
     "test:phase11:stress": "sh test/run-privileged.sh root event-stress",
+    "test:phase15:stress": "sh test/run-privileged.sh root traceroute-stress",
     "hardening:verify": "node scripts/verify-release.mjs",
     "hardening:stress": "npm run test:phase9:stress",
     "fuzz": "cargo +nightly fuzz run surface --fuzz-dir native/fuzz -- -max_total_time=60",
