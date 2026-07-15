@@ -182,9 +182,10 @@ and correlation portions of the internal protocol toolkit. Phases 19 and 20
 completed the bounded read-only Linux snapshot, kernel route resolution, and
 notification-coherent refresh. Phases 21 and 22 add the deterministic scheduler
 and portable live scanner. Phases 23 and 24 freeze scanner batching and make its
-first release candidate independently releasable. Phase 25 measures the portable
-data plane and selects `no-go` or one justified backend; Phase 26 is conditional
-on a positive decision. These phases do not expand `nodenetraw`'s public scope.
+first release candidate independently releasable. Phase 25 measured the portable
+data plane and D-039 selected `no-go`; Phase 26 is closed unless a new positive
+evidence decision and plan review reopen it. These phases do not expand
+`nodenetraw`'s public scope.
 
 ## Definition of project success
 

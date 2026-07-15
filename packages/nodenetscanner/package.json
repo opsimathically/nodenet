@@ -1,15 +1,31 @@
 {
   "name": "@opsimathically/nodenetscanner",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0-rc.1",
   "description": "A bounded Linux-native network scanner for Node.js",
   "license": "MIT",
+  "homepage": "https://github.com/opsimathically/nodenet#readme",
+  "bugs": "https://github.com/opsimathically/nodenet/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opsimathically/nodenet.git",
+    "directory": "packages/nodenetscanner"
+  },
+  "keywords": [
+    "linux",
+    "network",
+    "raw-socket",
+    "scanner",
+    "napi-rs"
+  ],
   "os": [
     "linux"
   ],
   "cpu": [
     "x64",
     "arm64"
+  ],
+  "libc": [
+    "glibc"
   ],
   "type": "module",
   "engines": {
@@ -29,11 +45,16 @@
   "files": [
     "build/native/binding.cjs",
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "release-policy.json"
   ],
   "scripts": {
+    "prepublishOnly": "node scripts/refuse-direct-publish.mjs",
     "build": "npm run build:native && npm run build:typescript",
     "build:native": "napi build --manifest-path ../../crates/nodenetscanner-native/Cargo.toml --platform --output-dir build/native --js binding.cjs --dts binding.d.ts -- --locked",
+    "build:native:release": "napi build --manifest-path ../../crates/nodenetscanner-native/Cargo.toml --platform --release --strip --use-napi-cross --output-dir build/native --js binding.cjs --dts binding.d.ts -- --locked",
     "build:typescript": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint . --config ../../eslint.config.mjs --max-warnings 0",
@@ -46,7 +67,17 @@
     "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
     "test:types": "tsc -p test/types/tsconfig.json --noEmit",
     "test:namespace": "sh test/run-namespace.sh",
-    "test:phase23": "npm test"
+    "test:phase23": "npm test",
+    "test:phase24": "npm test",
+    "test:phase24:stress": "NODENETSCANNER_STRESS_TESTS=1 node --test test/stress.test.mjs",
+    "test:phase24:namespace": "NODENETSCANNER_PHASE24_TESTS=1 sh test/run-namespace.sh",
+    "benchmark:phase24": "NODENETSCANNER_BENCHMARK=1 sh test/run-namespace.sh",
+    "benchmark:phase25": "NODENETSCANNER_PHASE25_BENCHMARK=1 sh test/run-namespace.sh",
+    "hardening:verify": "node scripts/verify-release.mjs",
+    "release:assemble": "node scripts/assemble-release.mjs",
+    "release:verify-artifact": "node scripts/verify-native-artifact.mjs",
+    "release:consumer-test": "node scripts/test-release-consumer.mjs",
+    "release:reproducibility": "node scripts/verify-reproducible-build.mjs"
   },
   "napi": {
     "binaryName": "nodenetscanner",

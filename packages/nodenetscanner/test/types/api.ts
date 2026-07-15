@@ -1,10 +1,25 @@
 import {
+  RESULT_BATCH_SCHEMA_VERSION,
+  SCANNER_LIMITS,
+  SUPPORTED_SCAN_PROBES,
   createScanner,
   inspectNetworkContext,
   type ScanPlan,
   type ScanResultBatch,
   type ScanSummary,
 } from "../../src/index.js";
+
+RESULT_BATCH_SCHEMA_VERSION satisfies 1;
+SUPPORTED_SCAN_PROBES satisfies readonly [
+  "arp",
+  "ndp",
+  "icmpEchoIpv4",
+  "icmpEchoIpv6",
+  "tcpSyn",
+  "udp",
+];
+SCANNER_LIMITS.batchResults satisfies 4096;
+SCANNER_LIMITS.udpPayloadBytes satisfies 65491;
 
 const plan: ScanPlan = {
   targets: [{ cidr: "127.0.0.1/32" }],

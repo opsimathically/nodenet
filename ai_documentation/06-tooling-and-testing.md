@@ -326,6 +326,12 @@ backend. Phase 25 uses identical preregistered workloads, at least ten steady-
 state repetitions, and a bootstrap 95% confidence interval that must remain
 beyond the accepted threshold.
 
+The implemented local evidence command is `sudo npm run benchmark:phase25`. It
+builds scanner/raw controls and the non-public Rust backend lab as the
+repository owner, then runs a disposable namespace. Set
+`NODENETSCANNER_PHASE25_OUTPUT=/path/evidence.json` to retain the JSON. D-039
+records `no-go`, so this command is diagnostic and does not authorize Phase 26.
+
 Scanner commands are introduced by the phase that owns them and then added to
 the root orchestration. Until implementation starts, documentation must not list
 aspirational scripts as runnable commands.

@@ -756,6 +756,11 @@ Exit gate: the portable scanner is accurate, bounded, documented, reproducible,
 and independently publishable. Phase 24 completion is useful even if Phases 25
 and 26 never proceed.
 
+Status: implementation complete on 2026-07-14. D-038 freezes the release
+boundary and [the Phase 24 report](41-phase-24-report.md) records the gates.
+Publication remains prohibited until native AArch64 execution and the supported
+sudo-only privileged namespace matrix pass on release artifacts.
+
 ## Stage 5 — Optional extreme-performance engine
 
 ### Phase 25 — Evidence and backend decision gate
@@ -808,6 +813,12 @@ Exit outcomes:
 3. `AF_XDP experimental`: implement only with an explicit XDP program and UMEM
    lifecycle contract;
 4. a different backend requires a new decision and plan review.
+
+Completion: D-039 and the [Phase 25 report](42-phase-25-report.md) record
+`no-go`. The measured controls did not produce one identical end-to-end scanner
+candidate, the available host had no isolated physical peer, and AF_XDP had no
+accepted XDP/XSKMAP ownership fixture. Phase 26 is therefore closed unless a new
+decision and plan review explicitly reopen it.
 
 ### Phase 26 — Conditional extreme backend and parity
 

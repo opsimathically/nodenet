@@ -72,7 +72,7 @@ nodenetscanner-native (N-API, session lifecycle, descriptors, I/O)
       v
 portable Linux raw/packet sockets
       |
-      +--> optional selected backend only after the Phase 25 evidence gate
+      +--> no extreme backend selected (D-039); Phase 26 closed
 ```
 
 `nodenet-protocols`, `nodenet-linux-context`, and `nodenetscanner-engine` are

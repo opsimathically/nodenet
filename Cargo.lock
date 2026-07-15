@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "nodenetscanner-native"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "napi",
  "napi-build",

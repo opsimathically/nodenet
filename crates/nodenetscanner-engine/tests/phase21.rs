@@ -1259,6 +1259,38 @@ fn huge_logical_plan_keeps_state_proportional_to_the_active_window() {
     assert_eq!(report.deferred, 0);
 }
 
+#[test]
+fn long_run_total_loss_settles_every_probe_without_unbounded_state() {
+    let plan = arp_range_plan(4_096);
+    let mut scheduler_config = config();
+    scheduler_config.rate_per_second = 1_000_000;
+    scheduler_config.session_deadline = ScanDuration::from_micros(1_000_000);
+    scheduler_config.max_grace_entries = 4_096;
+    let mut engine = scheduler(plan, scheduler_config);
+    let clock = VirtualClock::default();
+    let mut transport = ScriptedTransport::default();
+    let mut resolver = ScriptedResolver::default();
+    let mut sink = BoundedSink::new(4_096);
+    engine.start(&clock).expect("start loss simulation");
+    for step in 0..10_000_u64 {
+        clock.set(step * 101);
+        engine
+            .drive(&clock, &mut transport, &mut resolver, &mut sink)
+            .expect("drive loss simulation");
+        if engine.lifecycle() == SessionLifecycle::Completed {
+            break;
+        }
+    }
+    assert_eq!(engine.lifecycle(), SessionLifecycle::Completed);
+    assert_eq!(transport.emissions.len(), 4_096);
+    assert_eq!(sink.results.len(), 4_096);
+    assert_eq!(sink.reserved, 0);
+    assert!(sink.results.iter().all(|result| {
+        result.outcome == ProbeOutcome::Network(NetworkState::Unknown)
+            && result.terminal_reason == TerminalReason::Timeout
+    }));
+}
+
 fn replay(seed: u64) -> (Vec<ProbeEmission>, Vec<ScanResult>) {
     let targets = TargetSet::normalize(
         &[TargetInput::Range(TargetIntervalInput {

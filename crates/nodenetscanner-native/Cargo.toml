@@ -1,6 +1,6 @@
 [package]
 name = "nodenetscanner-native"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 edition = "2024"
 rust-version = "1.97.0"
 license = "MIT"
@@ -20,6 +20,9 @@ nodenetscanner-engine = { path = "../nodenetscanner-engine" }
 
 [build-dependencies]
 napi-build = "=2.3.2"
+
+[features]
+fuzzing = ["napi/dyn-symbols"]
 
 [lints.rust]
 unsafe_code = "warn"

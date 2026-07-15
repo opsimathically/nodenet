@@ -502,16 +502,6 @@ impl SessionCore {
                 ScannerError::context("capture network context", error.to_string())
             })?;
         }
-        let port_span =
-            usize::from(validated.options.source_port_end - validated.options.source_port_start)
-                + 1;
-        let per_session_ports = port_span / 4;
-        if validated.scheduler.max_outstanding > per_session_ports {
-            return Err(ScannerError::invalid(
-                "validate source port range",
-                "source port range provides fewer collision-free ports than maxOutstanding across four sessions",
-            ));
-        }
         let secret = read_secret()?;
         let sockets = PortableSockets::open()?;
         let seed = if validated.options.seed == 0 {
@@ -1184,6 +1174,52 @@ mod tests {
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Saturated);
         assert_eq!(queue.take(1).unwrap().row_count, 1);
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
+    }
+
+    #[test]
+    fn completion_queue_survives_long_run_saturation_and_drain_cycles() {
+        const CAPACITY: usize = 64;
+        const CYCLES: u64 = 4_096;
+        let mut queue = ResultQueue::new(CAPACITY as u64);
+        let template = ScanResult {
+            probe: LogicalProbe {
+                logical_id: 0,
+                attempt: 1,
+                target: ScanTarget {
+                    address: IpAddress::V4(Ipv4Address::new([127, 0, 0, 1])),
+                    scope: None::<TargetScope>,
+                },
+                family: ProbeFamily::Udp,
+                port: Some(ProbePort::new(7).unwrap()),
+            },
+            outcome: ProbeOutcome::Network(NetworkState::Open),
+            evidence_strength: None,
+            attempt: 1,
+            transmissions: 1,
+            rtt: None,
+            terminal_at: MonotonicTime::from_micros(1),
+            route_generation: 1,
+            terminal_reason: TerminalReason::Timeout,
+        };
+        for cycle in 0..CYCLES {
+            for offset in 0..CAPACITY {
+                assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
+                let mut value = template;
+                value.probe.logical_id = cycle * CAPACITY as u64 + offset as u64;
+                queue.commit_reserved(value).unwrap();
+            }
+            assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Saturated);
+            assert_eq!(queue.take_completed_ids().len(), CAPACITY);
+            assert_eq!(
+                queue.take(CAPACITY).unwrap().row_count,
+                u32::try_from(CAPACITY).expect("test capacity fits u32")
+            );
+        }
+        assert!(queue.values.is_empty());
+        assert!(queue.completed_ids.is_empty());
+        assert_eq!(queue.reserved, 0);
+        assert_eq!(queue.counters.results, CYCLES * CAPACITY as u64);
+        assert_eq!(queue.application_backpressured, CYCLES);
     }
 
     #[test]

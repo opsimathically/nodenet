@@ -778,6 +778,60 @@ ring-event work remains separately undecided.
   sending realm. Phase 24 may harden and document this contract but may not
   silently change its encoding.
 
+### D-038 — Independent portable scanner release boundary
+
+- Status: accepted and implemented
+- Date: 2026-07-14
+- Decision: stabilize `@opsimathically/nodenetscanner` at the unpublished
+  `0.1.0-rc.1` boundary. Schema version 1, the six-probe result matrix,
+  lifecycle/error declarations, read-only context shape, and public admission
+  limits are frozen for this release candidate. Changes that reinterpret these
+  contracts require a later release rather than silent loader or schema drift.
+- Decision: distribute the scanner independently as a loader-only root package
+  plus exact-version x86-64 and AArch64 glibc target packages. No package has an
+  install script or production Node dependency. Assembly verifies ELF machine,
+  the glibc 2.28 ceiling, stripping, clean ESM/`require()` consumption,
+  reproducibility, dependency licenses/advisories, and recorded provenance.
+- Decision: keep publication mechanically separate from implementation. Native
+  AArch64 execution and supported privileged namespace tests on release
+  artifacts remain mandatory even when x86-64 tests and AArch64 cross-compiles
+  pass. Phase 25 may measure alternatives only after these portable gates; it
+  may not weaken the release baseline.
+- Rationale: an independently useful, bounded portable scanner is a safer
+  product boundary than making publication depend on a speculative high-rate
+  backend. Exact target packages avoid install-time compilation while retaining
+  one JavaScript API and one native ownership model.
+- Consequences: the source tree deliberately rejects direct `npm publish`.
+  Releases come only from inspected staging directories. The benchmark harness
+  records hardware, kernel, interface, and configuration metadata, and no
+  Masscan-class throughput claim is made. The sudo-only x86-64
+  namespace/benchmark gates pass locally; the owner still must execute the
+  native AArch64 release workflow before publishing this candidate.
+
+### D-039 — No extreme scanner backend selected
+
+- Status: accepted and implemented
+- Date: 2026-07-14
+- Decision: complete Phase 25 with `no-go`. Keep the portable scanner as the
+  only backend and close Phase 26. A non-public evidence harness may retain the
+  frozen backend-neutral ownership contract, deterministic bootstrap tools,
+  ordinary mmsg and TPACKET_V3 controls, a bounded native-owned TPACKET_V2 TX
+  lab, and non-mutating AF_XDP capability probes, but none becomes product API.
+- Rationale: ten-repetition portable rate sweeps were accurate and lossless,
+  while no alternative completed the identical scheduler/TX/RX/correlation/
+  result workload needed for the 1.5x-throughput or 30%-CPU selection test.
+  PACKET_MMAP microbenchmarks cannot be composed into a valid end-to-end ratio.
+  AF_XDP copy and zero-copy were unavailable without an XDP/XSKMAP fixture, and
+  the host had no isolated physical peer. Missing qualified evidence is not a
+  performance win and cannot justify writable-ring, UMEM, loader, privilege,
+  cleanup, dependency, or artifact-ABI scope.
+- Consequences: `engine` selection is not added; install and kernel baselines do
+  not change; no writable ring or UMEM crosses N-API; and Phase 26 work is
+  prohibited. Reopening requires a new decision and plan review, an isolated
+  declared physical fixture, explicit XDP ownership when relevant, and fresh
+  preregistered same-workload evidence. Phase 24's native AArch64 publication
+  gate remains independently outstanding. See the Phase 25 report.
+
 ## Research references
 
 Compatibility facts were verified on 2026-07-12 against primary project

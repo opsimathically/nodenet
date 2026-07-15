@@ -7,10 +7,10 @@ libraries implemented with TypeScript, Rust, and Node-API.
 
 - [`@opsimathically/nodenetraw`](packages/nodenetraw/README.md) is the active,
   Linux-only raw socket and ICMP/traceroute package.
-- [`@opsimathically/nodenetscanner`](packages/nodenetscanner/README.md) is the
-  private Phase 23 preview of a bounded native scanner. Its TypeScript API
-  drives live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, and UDP scans through a
-  Rust-owned portable Linux data plane.
+- [`@opsimathically/nodenetscanner`](packages/nodenetscanner/README.md) is an
+  unpublished `0.1.0-rc.1` bounded native scanner. Its TypeScript API drives
+  live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, and UDP scans through a Rust-owned
+  portable Linux data plane.
 
 The public packages remain independently versioned. Performance-sensitive Rust
 code can be shared as compile-time workspace crates, while each Node package
@@ -36,7 +36,12 @@ resolution and coherent refresh evidence is in the
 scheduling, timing, classification, and lifecycle evidence is in the
 [Phase 21 report](ai_documentation/38-phase-21-report.md). The initial portable
 scanner runtime and Node API are recorded in the
-[Phase 22 report](ai_documentation/39-phase-22-report.md).
+[Phase 22 report](ai_documentation/39-phase-22-report.md). Compact batching is
+recorded in the [Phase 23 report](ai_documentation/40-phase-23-report.md),
+portable release hardening in the
+[Phase 24 report](ai_documentation/41-phase-24-report.md), and the measured
+extreme-backend `no-go` in the
+[Phase 25 report](ai_documentation/42-phase-25-report.md). Phase 26 is closed.
 
 ## Development
 
@@ -56,6 +61,9 @@ npm run test:phase22
 sudo npm run test:phase22:namespace
 npm run test:phase23
 sudo npm run test:phase23:namespace
+npm run test:phase24
+sudo npm run test:phase24:namespace
+sudo npm run benchmark:phase25
 ```
 
 The Phase 17, 19, and 20 namespace commands use disposable user/network

@@ -79,27 +79,28 @@ policy-snapshot, callback-quiescence, and release-health review is
 The repository is now the private `nodenet` npm/Cargo workspace governed by
 D-030. Existing raw-package source and release tooling live under
 `packages/nodenetraw`, its native crate lives under `crates/nodenetraw-native`,
-and the scanner package remains a private non-publishable preview while its
-internal Rust foundations and native addon live under `crates/`. The structural
-migration did not change the public API or release version. D-031 accepts the
-next evolution. Phase 18 is complete: scanner-relevant TCP, UDP, ICMPv4, ICMPv6,
-NDP, quoted packet, keyed correlation, evidence-strength, and reuse-grace
-primitives now live in the protocol crate. Phases 19–20 complete read-only
-network context; Phase 21 completes the deterministic scheduler and Phase 22
-adds the portable live scanner; Phase 23 adds scanner batching and Phase 24 adds
-release hardening; Phase 25 is an evidence gate and Phase 26 is conditional.
-Phase 16 is complete: `crates/nodenet-protocols` now owns the bounded protocol
-types, strict/explicit quote parser boundary, transactional packet output,
-independent fixtures, fuzz targets, and allocation baselines. Phase 17 is
-complete: the protocol crate now owns bounded Ethernet/VLAN, ARP, IPv4, IPv6
-extension/fragment, upper-layer disposition, checksum, and reusable
-frame-template codecs. The authoritative plan is
-`ai_documentation/31-network-and-scanner-evolution-plan.md`. Its
+and the scanner package is an independently staged but unpublished release
+candidate while its internal Rust foundations and native addon live under
+`crates/`. The structural migration did not change the public API or release
+version. D-031 accepts the next evolution. Phase 18 is complete:
+scanner-relevant TCP, UDP, ICMPv4, ICMPv6, NDP, quoted packet, keyed
+correlation, evidence-strength, and reuse-grace primitives now live in the
+protocol crate. Phases 19–20 complete read-only network context; Phase 21
+completes the deterministic scheduler and Phase 22 adds the portable live
+scanner; Phase 23 adds scanner batching and Phase 24 completes portable release
+hardening at `0.1.0-rc.1`; Phase 25 is complete with D-039 `no-go`, and Phase 26
+is closed unless a new decision reopens it. Phase 16 is complete:
+`crates/nodenet-protocols` now owns the bounded protocol types, strict/explicit
+quote parser boundary, transactional packet output, independent fixtures, fuzz
+targets, and allocation baselines. Phase 17 is complete: the protocol crate now
+owns bounded Ethernet/VLAN, ARP, IPv4, IPv6 extension/fragment, upper-layer
+disposition, checksum, and reusable frame-template codecs. The authoritative
+plan is `ai_documentation/31-network-and-scanner-evolution-plan.md`. Its
 preimplementation audit is closed in
 `ai_documentation/32-network-evolution-plan-review.md`: Phase 16 has no open
 design blocker, and the review corrections are part of the accepted contract.
 Completion evidence is in `ai_documentation/33-phase-16-report.md` through
-`ai_documentation/40-phase-23-report.md`; D-032 records the implemented
+`ai_documentation/42-phase-25-report.md`; D-032 records the implemented
 correlation encoding, D-033 records the route-netlink dependency and read-only
 descriptor boundary, and D-034 records kernel-selected egress plus the bounded
 context owner. D-035 records the deterministic scheduler boundaries. Phase 21 is
@@ -108,9 +109,9 @@ explicit evidence classification, bounded lifecycle draining, and lossless
 result reservation are implemented without syscalls or unsafe code. Phase 22 is
 complete: `crates/nodenetscanner-native` owns one bounded runtime per Node
 environment, read-only context, raw/packet descriptors, packet buffers, timers,
-secrets, and four portable live sessions. The private scanner package exposes
-explicit plans, context inspection, pull batches, lifecycle, summaries, and
-structured errors for live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, and UDP scans.
+secrets, and four portable live sessions. The unpublished scanner candidate
+exposes explicit plans, context inspection, pull batches, lifecycle, summaries,
+and structured errors for live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, and UDP scans.
 Ordinary gates and the live dual-stack namespace/VLAN matrix pass locally.
 Native AArch64 cross-compilation passes; native AArch64 execution remains a
 publication gate. Phase 23 is complete under D-037: scanner results cross N-API
@@ -118,6 +119,14 @@ as versioned sealed columns rather than per-result objects, TypeScript provides
 lazy rows over transferable Node-owned storage, pulls support worker-ordered
 AbortSignal cancellation, and exact coalesced progress reports bounded
 high/low-water backpressure. The optional Node event layer emits batches only.
+Phase 24 is implementation-complete under D-038: the scanner is the unpublished
+`0.1.0-rc.1` candidate with frozen capabilities and limits, independent staged
+x64/AArch64 glibc artifacts, hostile-input/fuzz/sanitizer/stress gates, and a
+fully recorded benchmark harness. Do not publish until native AArch64 execution
+passes; the supported x86-64 privileged namespace/fault matrix and benchmark
+pass locally. The post-Phase-25 audit corrected collision-free ICMP correlation
+lanes, four-way source-port partitioning, admission-time UDP wire-size limits,
+and repository-owner-built/root-executed Phase 19/20 namespace tests.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -208,8 +217,9 @@ The current source of planning truth is
   `nodenet-protocols`, `nodenet-linux-context`, and `nodenetscanner-engine`,
   linked into `nodenetscanner-native`. Network context is read-only and
   generation-tagged. The portable engine must be release-capable before Phase 25
-  may measure and select one optional extreme backend. Phase 26 cannot begin
-  without a positive recorded evidence decision.
+  may measure and select one optional extreme backend. D-039 records Phase 25
+  `no-go`; Phase 26 cannot begin without a new positive recorded evidence
+  decision and plan review.
 - D-036 governs the Phase 22 scanner boundary: one joined environment-owned
   runtime, no descriptor or packet storage across N-API, ordinary
   `AF_PACKET`/raw-IP transports, session-local neighbor learning, structured

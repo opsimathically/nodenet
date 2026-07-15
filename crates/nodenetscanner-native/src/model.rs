@@ -15,6 +15,8 @@ pub(crate) const MAX_BATCH_RESULTS: u32 = 4_096;
 pub(crate) const DEFAULT_BATCH_RESULTS: u32 = 512;
 pub(crate) const DEFAULT_SOURCE_PORT_START: u16 = 49_152;
 pub(crate) const DEFAULT_SOURCE_PORT_END: u16 = 65_535;
+pub(crate) const MAX_UDP_USER_PAYLOAD_BYTES: usize = 65_491;
+const MAX_TEMPLATE_PAYLOAD_BYTES: usize = 1_048_576;
 
 #[napi(object)]
 #[derive(Clone)]
@@ -222,6 +224,29 @@ impl NativeScanPlan {
                 "source port range is reversed",
             ));
         }
+        let source_port_span = usize::from(source_port_end - source_port_start) + 1;
+        let ports_per_session = source_port_span / 4;
+        if scheduler.max_outstanding > ports_per_session {
+            return Err(ScannerError::invalid(
+                "validate source port range",
+                "source port range provides fewer collision-free ports than maxOutstanding across four sessions",
+            ));
+        }
+        let template_payload_bytes = udp_payload_v4
+            .len()
+            .checked_add(udp_payload_v6.len())
+            .ok_or_else(|| {
+                ScannerError::resource(
+                    "validate UDP payload",
+                    "UDP payload accounting overflowed the session template budget",
+                )
+            })?;
+        if template_payload_bytes > MAX_TEMPLATE_PAYLOAD_BYTES {
+            return Err(ScannerError::resource(
+                "validate UDP payload",
+                "UDP payloads exceed the 1 MiB session template budget",
+            ));
+        }
         let vlan = self.vlan.as_ref().map(validate_vlan).transpose()?;
         let seed = self.seed.map_or(Ok(0), |value| {
             value.parse::<u64>().map_err(|_| {
@@ -300,10 +325,10 @@ type ParsedProbe = (ProbeFamily, Vec<ProbePort>, (UdpPayloadFamily, Vec<u8>));
 
 fn parse_probe(probe: NativeScanProbe) -> Result<ParsedProbe, ScannerError> {
     let payload = probe.payload.unwrap_or_default();
-    if payload.len() > 1_048_576 {
-        return Err(ScannerError::resource(
+    if payload.len() > MAX_UDP_USER_PAYLOAD_BYTES {
+        return Err(ScannerError::invalid(
             "validate UDP payload",
-            "UDP payload exceeds the 1 MiB session template budget",
+            "UDP payload plus correlation, UDP, and IPv4 headers exceeds the maximum IP packet length",
         ));
     }
     let ports = expand_ports(probe.ports.as_deref().unwrap_or_default())?;
@@ -444,6 +469,36 @@ pub(crate) fn to_std_address(value: IpAddress) -> IpAddr {
 mod tests {
     use super::*;
 
+    fn udp_plan(payload_bytes: usize) -> NativeScanPlan {
+        NativeScanPlan {
+            targets: vec![NativeScanTarget {
+                cidr: Some("127.0.0.1/32".into()),
+                start: None,
+                end: None,
+            }],
+            exclude: None,
+            probes: vec![NativeScanProbe {
+                kind: "udp".into(),
+                family: None,
+                ports: Some(vec![NativePortSelection { start: 7, end: 7 }]),
+                payload: Some(vec![0; payload_bytes]),
+            }],
+            deadline_ms: 1_000,
+            rate: Some(NativeRateOptions {
+                packets_per_second: Some(1),
+                burst: Some(1),
+                max_outstanding: Some(1),
+            }),
+            timing: None,
+            seed: None,
+            source_address: None,
+            interface: None,
+            vlan: None,
+            source_port_start: None,
+            source_port_end: None,
+        }
+    }
+
     #[test]
     fn compact_plan_validation_rejects_implicit_or_reversed_inputs() {
         let empty = NativeScanPlan {
@@ -462,5 +517,29 @@ mod tests {
         };
         assert!(empty.validate().is_err());
         assert!(expand_ports(&[NativePortSelection { start: 2, end: 1 }]).is_err());
+    }
+
+    #[test]
+    fn udp_payload_limit_accounts_for_every_ipv4_wire_header() {
+        assert!(udp_plan(MAX_UDP_USER_PAYLOAD_BYTES).validate().is_ok());
+        let error = udp_plan(MAX_UDP_USER_PAYLOAD_BYTES + 1)
+            .validate()
+            .err()
+            .expect("oversized UDP payload must fail before session admission");
+        assert_eq!(error.operation, "validate UDP payload");
+    }
+
+    #[test]
+    fn source_port_capacity_is_validated_before_runtime_admission() {
+        let mut plan = udp_plan(0);
+        plan.source_port_start = Some(60_000);
+        plan.source_port_end = Some(60_004);
+        assert!(plan.clone().validate().is_ok());
+        plan.rate.as_mut().unwrap().max_outstanding = Some(2);
+        let error = plan
+            .validate()
+            .err()
+            .expect("five ports cannot provide two ports to each of four sessions");
+        assert_eq!(error.operation, "validate source port range");
     }
 }

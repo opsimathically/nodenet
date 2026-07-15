@@ -671,7 +671,7 @@ gate.
 
 ## Phase 24 — Portable scanner hardening and release candidate
 
-Status: planned; depends on Phase 23
+Status: implementation complete on 2026-07-14; AArch64 publication gate remains
 
 Stabilize API/errors/lifecycle/schema/probe support; complete documentation,
 fuzzing, hostile-value tests, sanitizers, fault injection, Worker and memory/fd
@@ -683,9 +683,18 @@ Exit gate: the portable scanner is independently accurate, bounded, documented,
 reproducible, and publishable on its declared matrix. This is a complete useful
 outcome even if no extreme backend follows.
 
+Completion evidence: [Phase 24 report](41-phase-24-report.md). The package is an
+unpublished `0.1.0-rc.1` candidate with frozen declarations, hostile-input and
+resource stress, engine fuzzing, sanitizer/fault workflows, a metadata-recording
+benchmark harness, and independently staged x64/AArch64 glibc packages. Local
+x86-64 ordinary, cross-compile, ABI, clean-consumer, and reproducibility gates
+pass. The sudo-only Phase 24 namespace/fault matrix and metadata-recording
+benchmark also pass locally. Native AArch64 execution remains mandatory before
+publication.
+
 ## Phase 25 — Extreme-backend evidence gate
 
-Status: planned; depends on Phase 24
+Status: complete (`no-go`); Phase 26 is closed
 
 Profile and prototype portable mmsg, `PACKET_MMAP` TX/RX, and AF_XDP paths on
 fully recorded hardware. Select exactly one next backend only if at least ten
@@ -698,9 +707,14 @@ Exit gate: a decision record selects `no-go`, `PACKET_MMAP`, or experimental
 AF_XDP with explicit kernel/driver/ownership requirements. The portable package
 baseline remains unchanged.
 
+Completion evidence: [Phase 25 report](42-phase-25-report.md). The portable rate
+sweep, ordinary mmsg and TPACKET controls, writable TX-ring lab, and AF_XDP
+capability/ownership review found no qualified end-to-end candidate. D-039
+records `no-go`; no extreme backend was selected.
+
 ## Phase 26 — Conditional extreme backend and parity
 
-Status: conditional; starts only after a positive Phase 25 decision
+Status: closed; Phase 25 recorded `no-go`
 
 Implement the one selected backend behind the same engine/result contract. Keep
 every writable ring and UMEM frame native-owned with checked geometry and

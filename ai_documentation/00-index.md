@@ -85,9 +85,9 @@ foundations to one bounded runtime per Node environment, ordinary Linux
 packet/raw sockets, live ARP/NDP, ICMPv4/v6 Echo, TCP SYN and UDP probes, and a
 pull-based TypeScript session API. Phase 23 freezes versioned compact result
 batches, abortable waits, coalesced progress, and high/low-water backpressure;
-the remaining portable roadmap completes release hardening. Phase 25 is an
-evidence gate; conditional Phase 26 may add exactly one extreme backend only
-when measurements justify it. `nodenetraw` remains policy-free, while
+the remaining portable roadmap completes release hardening. Phase 25 is complete
+with a measured `no-go`; Phase 26 is closed because no extreme backend met the
+selection prerequisites. `nodenetraw` remains policy-free, while
 `nodenetscanner` owns its descriptors and native packet hot path without calling
 the raw package through JavaScript. See D-031, D-032, the
 [Phase 16 report](33-phase-16-report.md),
@@ -96,7 +96,9 @@ the raw package through JavaScript. See D-031, D-032, the
 [Phase 20 report](37-phase-20-report.md), the
 [Phase 21 report](38-phase-21-report.md), and the
 [Phase 22 report](39-phase-22-report.md), the
-[Phase 23 report](40-phase-23-report.md), plus the
+[Phase 23 report](40-phase-23-report.md), the
+[Phase 24 report](41-phase-24-report.md), and the
+[Phase 25 report](42-phase-25-report.md), plus the
 [network and scanner evolution plan](31-network-and-scanner-evolution-plan.md).
 
 The preimplementation review is closed. It corrected protocol-specific evidence
@@ -147,6 +149,9 @@ and the statistical/XDP ownership conditions for an extreme backend. See the
 37. [Phase 20 completion report](37-phase-20-report.md)
 38. [Phase 21 completion report](38-phase-21-report.md)
 39. [Phase 22 completion report](39-phase-22-report.md)
+40. [Phase 23 completion report](40-phase-23-report.md)
+41. [Phase 24 completion report](41-phase-24-report.md)
+42. [Phase 25 completion report](42-phase-25-report.md)
 
 `AGENTS.md` is the compact operational context. These documents contain the
 rationale and phase details. If they disagree, resolve the discrepancy and
@@ -201,7 +206,8 @@ When work starts:
 4. Record the verification commands and results.
 5. Update this page's current state and next action.
 
-Phase 23 is complete. Phase 24 portable scanner release hardening is next.
-Extreme backends remain in their owning later phases, and native AArch64
-execution remains a publication gate for each architecture-specific public
-artifact.
+Phases 16–25 are complete, including the post-completion correlation, admission,
+and privileged-harness corrections recorded in the Phase 24 report. Phase 25
+retained the portable backend with D-039 `no-go`, so Phase 26 is closed unless a
+new evidence decision reopens it. Native AArch64 execution remains the
+outstanding publication gate for the scanner artifact.

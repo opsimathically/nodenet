@@ -1,14 +1,14 @@
 # @opsimathically/nodenetscanner
 
-`@opsimathically/nodenetscanner` is a private Phase 23 preview of a bounded,
-Linux-native network scanner for Node.js 26+. TypeScript provides the public
-control API; Rust owns route inspection, raw and packet sockets, packet bytes,
-correlation secrets, scheduling, timers, result storage, and cleanup.
+`@opsimathically/nodenetscanner` is an unpublished `0.1.0-rc.1` candidate for a
+bounded, Linux-native network scanner for Node.js 26+. TypeScript provides the
+public control API; Rust owns route inspection, raw and packet sockets, packet
+bytes, correlation secrets, scheduling, timers, result storage, and cleanup.
 
-The package is not published yet. It is developed independently from
-`@opsimathically/nodenetraw` and does not call that package or borrow its file
-descriptors. Shared protocol, read-only network-context, and scheduler code is
-linked into the scanner addon at build time.
+The package has not been published by this repository. It is developed
+independently from `@opsimathically/nodenetraw` and does not call that package
+or borrow its file descriptors. Shared protocol, read-only network-context, and
+scheduler code is linked into the scanner addon at build time.
 
 ## Current capabilities
 
@@ -34,14 +34,14 @@ From the monorepo root:
 ```sh
 npm ci
 npm run build --workspace=@opsimathically/nodenetscanner
-npm run test:phase23
+npm run test:phase24
 ```
 
 The ordinary tests do not require raw-socket authority. The live dual-stack,
 veth, and VLAN matrix runs in disposable network namespaces:
 
 ```sh
-sudo npm run test:phase23:namespace
+sudo npm run test:phase24:namespace
 ```
 
 The wrapper builds as the invoking user before entering the namespace, which
@@ -114,6 +114,40 @@ try {
 } finally {
   await scanner.close();
 }
+```
+
+The supported probe matrix is also exported as the frozen
+`SUPPORTED_SCAN_PROBES` tuple:
+
+| Plan probe          | Target family | Result probe   | Typical positive state     |
+| ------------------- | ------------- | -------------- | -------------------------- |
+| `arp`               | IPv4, on-link | `arp`          | `up`                       |
+| `ndp`               | IPv6, on-link | `ndp`          | `up`                       |
+| `icmpEcho` / `ipv4` | IPv4          | `icmpEchoIpv4` | `up`                       |
+| `icmpEcho` / `ipv6` | IPv6          | `icmpEchoIpv6` | `up`                       |
+| `tcpSyn`            | IPv4 or IPv6  | `tcpSyn`       | `open` or `closed`         |
+| `udp`               | IPv4 or IPv6  | `udp`          | `open`, `closed`, or `open | filtered` |
+
+Focused discovery, TCP SYN, UDP, and IPv6 scans differ only in their explicit
+probe and target lists:
+
+```ts
+const discovery = [{ kind: "icmpEcho", family: "ipv4" }] as const;
+const tcp = [{ kind: "tcpSyn", ports: [22, 80, 443] }] as const;
+const udp = [
+  { kind: "udp", ports: [53, 123], payload: new Uint8Array([0]) },
+] as const;
+const ipv6 = [
+  { kind: "icmpEcho", family: "ipv6" },
+  { kind: "tcpSyn", ports: [443] },
+] as const;
+
+const session = await scanner.start({
+  targets: [{ cidr: "2001:db8::/120" }],
+  exclude: [{ cidr: "2001:db8::1/128" }],
+  probes: ipv6,
+  deadlineMs: 15_000,
+});
 ```
 
 ARP accepts IPv4 targets and NDP accepts IPv6 targets only when route context
@@ -196,6 +230,30 @@ application-backpressured work. Result saturation stops new transmissions and
 does not resume until the bounded queue reaches its low-water mark; receive,
 expiry, cancel, close, and result draining continue.
 
+```ts
+const timer = setInterval(async () => {
+  const progress = await session.progress();
+  console.log(progress.sent, progress.matched, progress.timedOut);
+}, 250);
+const stop = new AbortController();
+process.once("SIGINT", () => stop.abort());
+try {
+  while (!stop.signal.aborted) {
+    const batch = await session.nextBatch({
+      maxResults: 1024,
+      signal: stop.signal,
+    });
+    if (batch === null) break;
+    for (const row of batch) console.log(row.materialize());
+  }
+} catch (error) {
+  if (!(error instanceof Error && error.name === "AbortError")) throw error;
+  await session.cancel("operator cancellation");
+} finally {
+  clearInterval(timer);
+}
+```
+
 `pause()` stops new transmission after its promise resolves; receive processing,
 timeouts, cancellation, and result draining continue. `resume()` permits
 transmission again. `cancel()` stops admission and resolves with the terminal
@@ -249,25 +307,83 @@ protocol-specific evidence strength and distinguish `open`, `closed`,
 protocol permits that conclusion. UDP silence is `open|filtered`; discovery
 silence is `unknown`.
 
+Ethernet and explicit single-tag 802.1Q paths use `AF_PACKET`; Linux loopback
+and locally routed paths use raw IP where an Ethernet header would be false. The
+scanner binds every descriptor and context watcher to the network namespace in
+which the session starts and never moves it later. Unsupported link kinds or
+ambiguous routes fail explicitly. An `AF_PACKET` result reports traffic observed
+on that wire boundary—it does not prove that the host firewall would admit the
+same packet to an application or that a full connection could complete.
+
 The default TCP/UDP source range is 49152–65535. Choose a range that does not
 conflict with local applications or the host ephemeral allocator. The host TCP
 stack may send a reset after receiving a SYN-ACK for a raw SYN probe; the
 library deliberately does not install firewall rules to suppress it. Source port
-reuse is separated across outstanding work and late-response grace state, but
-applications remain responsible for coordinating other host users of an explicit
-range.
+reuse is separated across outstanding work and late-response grace state. The
+range is divided into four non-overlapping session partitions; any remainder is
+left unused. A custom range must therefore provide at least four times the
+requested `maxOutstanding` capacity. Applications remain responsible for
+coordinating other host users of an explicit range.
+
+UDP user payloads are limited to `SCANNER_LIMITS.udpPayloadBytes` (65,491
+bytes). The remaining IPv4 packet capacity is reserved for the private
+correlation token and UDP/IP headers. Invalid payloads and insufficient source
+port ranges are rejected during `scanner.start()` before raw sockets or session
+resources are admitted.
 
 Packet parsing rejects truncation, ignores locally looped `PACKET_OUTGOING`
 frames, interprets stripped VLAN tags through packet auxiliary metadata, and
 reports lifetime kernel-drop accounting in the terminal summary.
 
+Checksum, segmentation, receive aggregation, and VLAN offloads can make a host
+capture differ from physical wire bytes. The scanner constructs valid complete
+probe packets and understands Linux VLAN auxiliary metadata, but operators
+should record interface offload configuration with captures and benchmarks. ICMP
+and ICMPv6 responders commonly rate-limit replies; silence or a lower match
+count is therefore not proof that a target is down.
+
+## Privileges and route inspection
+
+Run the application as root, or grant the Node executable/process the exact
+`CAP_NET_RAW` authority appropriate for the deployment. Capabilities are tied to
+executables, namespaces, and deployment policy; the library never invokes
+`sudo`, changes credentials, or grants itself authority. `createScanner()` and
+`inspectNetworkContext()` are capability-free; `scanner.start()` is the first
+raw-socket boundary.
+
+```ts
+const context = await inspectNetworkContext();
+for (const route of context.routes) {
+  console.log(
+    route.family,
+    route.destination,
+    route.prefixLength,
+    route.gateway,
+    route.interfaceIndex,
+  );
+}
+```
+
+Use the disposable namespace test to validate authority without scanning the
+external network: `sudo npm run test:phase24:namespace` from the monorepo root.
+
 ## Support status
 
-This Phase 23 package remains `private: true` at version `0.0.0`. Linux x86-64
-development and tests are the current local baseline. AArch64 is an intended
-future artifact target but native execution remains untested and is a release
-gate. The compact columnar batch format is now frozen; Phase 24 owns API
-stabilization and release hardening.
+This Phase 24 package is an unpublished `0.1.0-rc.1` release candidate. Linux
+x86-64 development, ordinary tests, and disposable privileged namespace tests
+are the local baseline. AArch64 glibc packages are configured and
+cross-compilable, but native AArch64 execution remains untested by the project
+owner and is a mandatory publication gate. The root package is loader-only;
+exact-version x64/AArch64 target packages contain the stripped addon, with no
+install scripts and no production Node dependencies.
+
+Phase 25 retained this portable engine as the only backend. Controlled
+`PACKET_MMAP` and AF_XDP prototypes did not produce a qualified, identical
+end-to-end scanner improvement, so the accepted decision is `no-go` and Phase 26
+is closed. No extreme-backend selector, XDP loader, writable ring, or UMEM
+surface is part of this package. Maintainers can reproduce the internal evidence
+gate with `sudo npm run benchmark:phase25` from the monorepo root; this is a
+diagnostic benchmark, not an end-user throughput promise.
 
 The authoritative design is the
 [Phase 16–26 network and scanner evolution plan](../../ai_documentation/31-network-and-scanner-evolution-plan.md).

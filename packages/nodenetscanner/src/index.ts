@@ -265,8 +265,32 @@ export class ScannerError extends Error {
   }
 }
 
-const RESULT_BATCH_SCHEMA_VERSION = 1 as const;
-const MAX_BATCH_RESULTS = 4_096;
+/** Frozen result-batch wire schema accepted by this release line. */
+export const RESULT_BATCH_SCHEMA_VERSION = 1 as const;
+
+/** Probe kinds implemented by the portable scanner engine. */
+export const SUPPORTED_SCAN_PROBES = Object.freeze([
+  "arp",
+  "ndp",
+  "icmpEchoIpv4",
+  "icmpEchoIpv6",
+  "tcpSyn",
+  "udp",
+] as const);
+
+/** Public admission bounds; callers can validate work before allocating it. */
+export const SCANNER_LIMITS = Object.freeze({
+  scannersPerEnvironment: 4,
+  sessionsPerEnvironment: 4,
+  pendingOperationsPerEnvironment: 64,
+  controlItems: 65_536,
+  controlBytes: 4 * 1_024 * 1_024,
+  udpPayloadBytes: 65_491,
+  batchResults: 4_096,
+  defaultBatchResults: 512,
+} as const);
+
+const MAX_BATCH_RESULTS = SCANNER_LIMITS.batchResults;
 const MAX_BATCH_METADATA_BYTES = 4 * 1_024 * 1_024;
 const MISSING_U64 = 0xffff_ffff_ffff_ffffn;
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -1375,54 +1399,86 @@ export async function createScanner(): Promise<Scanner> {
 }
 
 function nativePlan(plan: ScanPlan): NativePlan {
-  validateControlPlan(plan);
-  return {
-    targets: plan.targets.map(nativeTarget),
-    ...(plan.exclude === undefined
-      ? {}
-      : { exclude: plan.exclude.map(nativeTarget) }),
-    probes: plan.probes.map(nativeProbe),
-    deadlineMs: plan.deadlineMs,
-    ...(plan.rate === undefined ? {} : { rate: plan.rate }),
-    ...(plan.timing === undefined ? {} : { timing: plan.timing }),
-    ...(plan.seed === undefined ? {} : { seed: plan.seed.toString() }),
-    ...(plan.sourceAddress === undefined
-      ? {}
-      : { sourceAddress: plan.sourceAddress }),
-    ...(plan.interface === undefined ? {} : { interface: plan.interface }),
-    ...(plan.vlan === undefined ? {} : { vlan: plan.vlan }),
-    ...(plan.sourcePortRange === undefined
-      ? {}
-      : {
-          sourcePortStart: plan.sourcePortRange.start,
-          sourcePortEnd: plan.sourcePortRange.end,
-        }),
-  };
+  try {
+    if (!isRecord(plan)) throw invalidPlanData("scan plan must be an object");
+    const targetsValue = plan.targets;
+    const excludeValue = plan.exclude;
+    const probesValue = plan.probes;
+    const deadlineMs = plan.deadlineMs;
+    const rateValue = plan.rate;
+    const timingValue = plan.timing;
+    const seed = plan.seed;
+    const sourceAddress = plan.sourceAddress;
+    const interfaceName = plan.interface;
+    const vlanValue = plan.vlan;
+    const sourcePortValue = plan.sourcePortRange;
+    if (typeof deadlineMs !== "number" || !Number.isFinite(deadlineMs))
+      throw invalidPlanData("deadlineMs must be a finite number");
+    if (seed !== undefined && typeof seed !== "bigint")
+      throw invalidPlanData("seed must be a bigint");
+    if (sourceAddress !== undefined && typeof sourceAddress !== "string")
+      throw invalidPlanData("sourceAddress must be a string");
+    if (interfaceName !== undefined && typeof interfaceName !== "string")
+      throw invalidPlanData("interface must be a string");
+    const targets = snapshotArray(targetsValue, "targets", snapshotTarget);
+    const exclude =
+      excludeValue === undefined
+        ? undefined
+        : snapshotArray(excludeValue, "exclude", snapshotTarget);
+    const probes = snapshotArray(probesValue, "probes", snapshotProbe);
+    const rate = snapshotRate(rateValue);
+    const timing = snapshotTiming(timingValue);
+    const vlan = snapshotVlan(vlanValue);
+    const sourcePortRange = snapshotSourcePortRange(sourcePortValue);
+    const snapshot: NativePlan = {
+      targets,
+      ...(exclude === undefined ? {} : { exclude }),
+      probes,
+      deadlineMs,
+      ...(rate === undefined ? {} : { rate }),
+      ...(timing === undefined ? {} : { timing }),
+      ...(seed === undefined ? {} : { seed: seed.toString() }),
+      ...(sourceAddress === undefined ? {} : { sourceAddress }),
+      ...(interfaceName === undefined ? {} : { interface: interfaceName }),
+      ...(vlan === undefined ? {} : { vlan }),
+      ...(sourcePortRange === undefined
+        ? {}
+        : {
+            sourcePortStart: sourcePortRange.start,
+            sourcePortEnd: sourcePortRange.end,
+          }),
+    };
+    validateControlPlan(snapshot);
+    return snapshot;
+  } catch (error) {
+    if (error instanceof ScannerError) throw error;
+    throw invalidPlanData("scan plan property access failed");
+  }
 }
 
-function validateControlPlan(plan: ScanPlan): void {
+function validateControlPlan(plan: NativePlan): void {
   let items =
     plan.targets.length + (plan.exclude?.length ?? 0) + plan.probes.length;
-  if (items > 65_536) throw controlItemsError();
+  if (items > SCANNER_LIMITS.controlItems) throw controlItemsError();
   let bytes = 0;
   for (const targets of [plan.targets, plan.exclude ?? []]) {
     for (const target of targets) {
-      if ("cidr" in target) bytes += Buffer.byteLength(target.cidr);
-      else
+      if (target.cidr !== undefined) bytes += Buffer.byteLength(target.cidr);
+      else if (target.start !== undefined && target.end !== undefined)
         bytes +=
           Buffer.byteLength(target.start) + Buffer.byteLength(target.end);
     }
   }
   for (const probe of plan.probes) {
     if (probe.kind === "tcpSyn" || probe.kind === "udp") {
-      items += probe.ports.length;
-      if (items > 65_536) throw controlItemsError();
-      if (probe.kind === "udp") bytes += probe.payload?.byteLength ?? 0;
+      items += probe.ports?.length ?? 0;
+      if (items > SCANNER_LIMITS.controlItems) throw controlItemsError();
+      if (probe.kind === "udp") bytes += probe.payload?.length ?? 0;
     }
   }
   // Account for fixed object/field framing in addition to variable payloads.
   bytes += items * 32;
-  if (bytes > 4 * 1_024 * 1_024) {
+  if (bytes > SCANNER_LIMITS.controlBytes) {
     throw new ScannerError(
       "resourceLimit",
       "ERR_CONTROL_BYTES",
@@ -1443,27 +1499,174 @@ function controlItemsError(): ScannerError {
   );
 }
 
-function nativeTarget(target: ScanTarget): NativeTarget {
-  return "cidr" in target
-    ? { cidr: target.cidr }
-    : { start: target.start, end: target.end };
+function snapshotTarget(target: unknown): NativeTarget {
+  if (!isRecord(target))
+    throw invalidPlanData("every target must be an object");
+  const cidr = target.cidr;
+  const start = target.start;
+  const end = target.end;
+  if (typeof cidr === "string" && start === undefined && end === undefined)
+    return { cidr };
+  if (
+    cidr === undefined &&
+    typeof start === "string" &&
+    typeof end === "string"
+  )
+    return { start, end };
+  throw invalidPlanData("a target must be exactly one CIDR or address range");
 }
 
-function nativeProbe(probe: ScanProbe): NativeProbe {
-  if (probe.kind === "arp" || probe.kind === "ndp") return { kind: probe.kind };
-  if (probe.kind === "icmpEcho")
-    return { kind: probe.kind, family: probe.family };
+function snapshotProbe(probe: unknown): NativeProbe {
+  if (!isRecord(probe)) throw invalidPlanData("every probe must be an object");
+  const kind = probe.kind;
+  if (kind === "arp" || kind === "ndp") return { kind };
+  if (kind === "icmpEcho") {
+    const family = probe.family;
+    if (family !== "ipv4" && family !== "ipv6")
+      throw invalidPlanData("an ICMP Echo probe requires ipv4 or ipv6");
+    return { kind, family };
+  }
+  if (kind !== "tcpSyn" && kind !== "udp")
+    throw invalidPlanData("probe kind is unsupported");
+  const ports = probe.ports;
+  const payload = kind === "udp" ? probe.payload : undefined;
+  if (payload !== undefined && !(payload instanceof Uint8Array))
+    throw invalidPlanData("UDP payload must be a Uint8Array");
+  if (
+    payload !== undefined &&
+    payload.byteLength >= SCANNER_LIMITS.controlBytes
+  )
+    throw new ScannerError(
+      "resourceLimit",
+      "ERR_CONTROL_BYTES",
+      "validate scan plan",
+      undefined,
+      "one scanner control command may contain at most 4 MiB",
+    );
+  if (
+    payload !== undefined &&
+    payload.byteLength > SCANNER_LIMITS.udpPayloadBytes
+  )
+    throw invalidPlanData(
+      "UDP payload plus correlation, UDP, and IPv4 headers exceeds the maximum IP packet length",
+    );
   return {
-    kind: probe.kind,
-    ports: probe.ports.map((port) =>
+    kind,
+    ports: snapshotArray(ports, "probe ports", (port) =>
       typeof port === "number"
         ? { start: port, end: port }
-        : { start: port.start, end: port.end },
+        : snapshotPortRange(port),
     ),
-    ...(probe.kind === "udp" && probe.payload !== undefined
-      ? { payload: Array.from(probe.payload) }
-      : {}),
+    ...(payload === undefined
+      ? {}
+      : { payload: Array.from(Uint8Array.from(payload)) }),
   };
+}
+
+function snapshotPortRange(value: unknown): { start: number; end: number } {
+  if (!isRecord(value)) throw invalidPlanData("port range must be an object");
+  const start = value.start;
+  const end = value.end;
+  if (typeof start !== "number" || typeof end !== "number")
+    throw invalidPlanData("port range endpoints must be numbers");
+  return { start, end };
+}
+
+function snapshotRate(value: unknown): ScanRateOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidPlanData("rate must be an object");
+  return optionalNumbers(value, [
+    "packetsPerSecond",
+    "burst",
+    "maxOutstanding",
+  ]);
+}
+
+function snapshotTiming(value: unknown): ScanTimingOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidPlanData("timing must be an object");
+  const fixed = value.fixed;
+  if (fixed !== undefined && typeof fixed !== "boolean")
+    throw invalidPlanData("timing.fixed must be boolean");
+  return {
+    ...optionalNumbers(value, [
+      "timeoutMs",
+      "minimumTimeoutMs",
+      "maximumTimeoutMs",
+      "retries",
+    ]),
+    ...(fixed === undefined ? {} : { fixed }),
+  };
+}
+
+function snapshotVlan(value: unknown): ScanVlanOptions | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidPlanData("vlan must be an object");
+  const identifier = value.identifier;
+  const priority = value.priority;
+  const dropEligible = value.dropEligible;
+  if (typeof identifier !== "number")
+    throw invalidPlanData("vlan.identifier must be a number");
+  if (priority !== undefined && typeof priority !== "number")
+    throw invalidPlanData("vlan.priority must be a number");
+  if (dropEligible !== undefined && typeof dropEligible !== "boolean")
+    throw invalidPlanData("vlan.dropEligible must be boolean");
+  return {
+    identifier,
+    ...(priority === undefined ? {} : { priority }),
+    ...(dropEligible === undefined ? {} : { dropEligible }),
+  };
+}
+
+function snapshotSourcePortRange(
+  value: unknown,
+): { start: number; end: number } | undefined {
+  if (value === undefined) return undefined;
+  return snapshotPortRange(value);
+}
+
+function optionalNumbers(
+  value: Record<PropertyKey, unknown>,
+  names: readonly string[],
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const name of names) {
+    const item = value[name];
+    if (item !== undefined) {
+      if (typeof item !== "number" || !Number.isFinite(item))
+        throw invalidPlanData(`${name} must be a finite number`);
+      result[name] = item;
+    }
+  }
+  return result;
+}
+
+function snapshotArray<T>(
+  value: unknown,
+  name: string,
+  convert: (item: unknown) => T,
+): T[] {
+  if (!Array.isArray(value)) throw invalidPlanData(`${name} must be an array`);
+  const length = value.length;
+  if (length > SCANNER_LIMITS.controlItems) throw controlItemsError();
+  const result = new Array<T>(length);
+  for (let index = 0; index < length; index += 1)
+    result[index] = convert(value[index]);
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function invalidPlanData(message: string): ScannerError {
+  return new ScannerError(
+    "invalidPlan",
+    "ERR_INVALID_SCAN_PLAN",
+    "validate scan plan",
+    undefined,
+    message,
+  );
 }
 
 function publicSummary(value: NativeSummary): ScanSummary {

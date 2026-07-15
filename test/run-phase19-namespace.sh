@@ -31,32 +31,17 @@ if [ "${NODENET_CONTEXT_IN_NAMESPACE:-0}" = "1" ]; then
   ip link add ctx-dummy type dummy
   ip address add 10.20.0.1/24 dev ctx-dummy
   ip link set ctx-dummy up
-  if [ -n "${NODENET_CONTEXT_OWNER:-}" ]; then
-    runner=$(command -v runuser || true)
-    if [ -z "$runner" ]; then
-      echo "runuser is required to test as repository owner $NODENET_CONTEXT_OWNER" >&2
-      exit 1
-    fi
-    exec "$runner" -u "$NODENET_CONTEXT_OWNER" -- env \
-      HOME="$NODENET_CONTEXT_OWNER_HOME" \
-      USER="$NODENET_CONTEXT_OWNER" \
-      LOGNAME="$NODENET_CONTEXT_OWNER" \
-      CARGO_HOME="$NODENET_CONTEXT_OWNER_HOME/.cargo" \
-      RUSTUP_HOME="$NODENET_CONTEXT_OWNER_HOME/.rustup" \
-      PATH="$NODENET_CONTEXT_OWNER_HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
-      NODENET_CONTEXT_ORACLE_TESTS=1 \
-      "$NODENET_CONTEXT_CARGO" test -p nodenet-linux-context \
-      namespace_snapshot_matches_ip_json_oracle --locked -- --nocapture --test-threads=1
+  if [ -n "${NODENET_CONTEXT_TEST_BINARY:-}" ]; then
+    exec env NODENET_CONTEXT_ORACLE_TESTS=1 \
+      "$NODENET_CONTEXT_TEST_BINARY" \
+      namespace_snapshot_matches_ip_json_oracle --nocapture --test-threads=1
   fi
   exec env NODENET_CONTEXT_ORACLE_TESTS=1 \
     "$NODENET_CONTEXT_CARGO" test -p nodenet-linux-context \
     namespace_snapshot_matches_ip_json_oracle --locked -- --nocapture --test-threads=1
 fi
 
-cargo=${CARGO:-$(command -v cargo)}
 if [ "$(id -u)" -eq 0 ]; then
-  owner=
-  owner_home=
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     owner=$SUDO_USER
     owner_home=$(getent passwd "$owner" | cut -d: -f6)
@@ -65,15 +50,49 @@ if [ "$(id -u)" -eq 0 ]; then
       echo "could not find the repository owner's Rust toolchain for $owner" >&2
       exit 1
     fi
+    runner=$(command -v runuser || true)
+    if [ -z "$runner" ]; then
+      echo "runuser is required to build the test as repository owner $owner" >&2
+      exit 1
+    fi
+    test_binary=$(
+      "$runner" -u "$owner" -- env \
+        HOME="$owner_home" \
+        USER="$owner" \
+        LOGNAME="$owner" \
+        CARGO_HOME="$owner_home/.cargo" \
+        RUSTUP_HOME="$owner_home/.rustup" \
+        PATH="$owner_home/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+        "$cargo" test -p nodenet-linux-context --test live_snapshot \
+        --locked --no-run --message-format=json |
+        sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' |
+        tail -n 1
+    )
+    if [ -z "$test_binary" ] || [ ! -x "$test_binary" ]; then
+      echo "could not locate the repository-owner-built context test binary" >&2
+      exit 1
+    fi
+    exec unshare --net env \
+      NODENET_CONTEXT_IN_NAMESPACE=1 \
+      NODENET_CONTEXT_TEST_BINARY="$test_binary" \
+      sh "$0"
+  fi
+  cargo=${CARGO:-$(command -v cargo || true)}
+  if [ -z "$cargo" ] || [ ! -x "$cargo" ]; then
+    echo "could not find cargo for the root context test" >&2
+    exit 1
   fi
   exec unshare --net env \
     NODENET_CONTEXT_IN_NAMESPACE=1 \
     NODENET_CONTEXT_CARGO="$cargo" \
-    NODENET_CONTEXT_OWNER="$owner" \
-    NODENET_CONTEXT_OWNER_HOME="$owner_home" \
     sh "$0"
 fi
 
+cargo=${CARGO:-$(command -v cargo || true)}
+if [ -z "$cargo" ] || [ ! -x "$cargo" ]; then
+  echo "could not find cargo for the unprivileged context test" >&2
+  exit 1
+fi
 exec unshare --user --map-root-user --net env \
   NODENET_CONTEXT_IN_NAMESPACE=1 \
   NODENET_CONTEXT_CARGO="$cargo" \

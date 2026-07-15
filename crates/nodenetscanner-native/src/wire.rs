@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Instant;
 
@@ -25,6 +25,8 @@ use crate::model::{SessionOptions, VlanOverride, to_protocol_address};
 use crate::socket::{PacketMessage, PortableSockets, RawFamily, RawMessage};
 
 const PACKET_OUTGOING: u8 = 4;
+const SESSION_COUNT: u64 = 4;
+const ICMP_LANE_MASK: u32 = 0x3fff_ffff;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RouteBinding {
@@ -72,6 +74,9 @@ pub(crate) struct WireState {
     probes: HashMap<u64, ProbeWire>,
     learned_neighbors: HashMap<(u32, IpAddr), [u8; 6]>,
     terminal_deadlines: HashMap<u64, Instant>,
+    icmp_lanes_by_probe: HashMap<u64, u32>,
+    occupied_icmp_lanes: HashSet<u32>,
+    next_icmp_lane: u32,
     progress: WireProgress,
 }
 
@@ -85,6 +90,9 @@ impl WireState {
             probes: HashMap::new(),
             learned_neighbors: HashMap::new(),
             terminal_deadlines: HashMap::new(),
+            icmp_lanes_by_probe: HashMap::new(),
+            occupied_icmp_lanes: HashSet::new(),
+            next_icmp_lane: 0,
             progress: WireProgress::default(),
         }
     }
@@ -114,6 +122,9 @@ impl WireState {
             self.terminal_deadlines.remove(&probe_id);
             self.routes.remove(&probe_id);
             self.probes.remove(&probe_id);
+            if let Some(lane) = self.icmp_lanes_by_probe.remove(&probe_id) {
+                self.occupied_icmp_lanes.remove(&lane);
+            }
         }
     }
 
@@ -145,11 +156,18 @@ impl WireState {
             .get(&emission.probe_id)
             .cloned()
             .ok_or_else(|| ScannerError::internal("emit probe", "route binding is missing"))?;
-        let identity = self.identity(emission.probe_id, emission.probe, &route)?;
+        let (identity, icmp_identifier, icmp_sequence) =
+            self.identity(emission.probe_id, emission.probe, &route)?;
         let token = self.secret.derive(identity);
         let packet = match emission.purpose {
             EmissionPurpose::NeighborSetup(family) => Self::build_discovery(family, &route)?,
-            EmissionPurpose::Probe => self.build_probe(emission.probe, &route, token)?,
+            EmissionPurpose::Probe => self.build_probe(
+                emission.probe,
+                &route,
+                token,
+                icmp_identifier,
+                icmp_sequence,
+            )?,
             EmissionPurpose::TcpResetCleanup => {
                 return Ok(());
             }
@@ -646,11 +664,11 @@ impl WireState {
     }
 
     fn identity(
-        &self,
+        &mut self,
         probe_id: u64,
         probe: LogicalProbe,
         route: &RouteBinding,
-    ) -> Result<ProbeIdentity, ScannerError> {
+    ) -> Result<(ProbeIdentity, u16, u16), ScannerError> {
         let protocol = match probe.family {
             ProbeFamily::Arp => 0,
             ProbeFamily::Ndp | ProbeFamily::Icmpv6Echo => 58,
@@ -659,31 +677,98 @@ impl WireState {
             ProbeFamily::Udp => 17,
         };
         let source_port = if probe.family.uses_ports() {
-            self.source_port(probe_id)
+            self.source_port(probe_id)?
         } else {
             0
         };
         let destination_port = probe.port.map_or(0, nodenet_protocols::ProbePort::get);
-        let mixed = probe_id ^ (u64::from(self.session_slot) << 56);
-        ProbeIdentity::new(
+        let (icmp_identifier, icmp_sequence) = if matches!(
+            probe.family,
+            ProbeFamily::Icmpv4Echo | ProbeFamily::Icmpv6Echo
+        ) {
+            self.icmp_correlation_fields(probe_id)?
+        } else {
+            (0, 0)
+        };
+        let identity = ProbeIdentity::new(
             IpProtocol::new(protocol),
             probe.attempt,
             to_protocol_address(route.source),
             to_protocol_address(route.destination),
             Port::new(source_port),
             Port::new(destination_port),
-            u16::try_from(mixed >> 16).unwrap_or_default(),
-            u16::try_from(mixed & 0xffff).unwrap_or_default(),
+            icmp_identifier,
+            icmp_sequence,
             probe_id,
         )
-        .map_err(|error| ScannerError::invalid("create correlation identity", error.to_string()))
+        .map_err(|error| ScannerError::invalid("create correlation identity", error.to_string()))?;
+        Ok((identity, icmp_identifier, icmp_sequence))
     }
 
-    fn source_port(&self, probe_id: u64) -> u16 {
-        let span = u64::from(self.options.source_port_end - self.options.source_port_start) + 1;
-        let slot = u64::from(self.session_slot);
-        let offset = (probe_id.saturating_mul(4).saturating_add(slot)) % span;
-        self.options.source_port_start + u16::try_from(offset).unwrap_or_default()
+    fn source_port(&self, probe_id: u64) -> Result<u16, ScannerError> {
+        let span = self
+            .options
+            .source_port_end
+            .checked_sub(self.options.source_port_start)
+            .map(|value| u64::from(value) + 1)
+            .ok_or_else(|| {
+                ScannerError::internal("allocate source port", "source-port range is reversed")
+            })?;
+        let ports_per_session = span / SESSION_COUNT;
+        if self.session_slot >= 4 || ports_per_session == 0 {
+            return Err(ScannerError::internal(
+                "allocate source port",
+                "scanner session slot or source-port partition is invalid",
+            ));
+        }
+        let slot_start = u64::from(self.session_slot) * ports_per_session;
+        let offset = slot_start + (probe_id % ports_per_session);
+        let offset = u16::try_from(offset).map_err(|_| {
+            ScannerError::internal("allocate source port", "source-port offset overflowed")
+        })?;
+        self.options
+            .source_port_start
+            .checked_add(offset)
+            .ok_or_else(|| ScannerError::internal("allocate source port", "source port overflowed"))
+    }
+
+    fn icmp_correlation_fields(&mut self, probe_id: u64) -> Result<(u16, u16), ScannerError> {
+        if self.session_slot >= 4 {
+            return Err(ScannerError::internal(
+                "allocate ICMP identifier",
+                "scanner session slot is outside the four-session correlation space",
+            ));
+        }
+        let lane = if let Some(lane) = self.icmp_lanes_by_probe.get(&probe_id) {
+            *lane
+        } else {
+            let search_limit = self.occupied_icmp_lanes.len().saturating_add(1);
+            let mut selected = None;
+            for _ in 0..search_limit {
+                let candidate = self.next_icmp_lane & ICMP_LANE_MASK;
+                self.next_icmp_lane = candidate.wrapping_add(1) & ICMP_LANE_MASK;
+                if self.occupied_icmp_lanes.insert(candidate) {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            let lane = selected.ok_or_else(|| {
+                ScannerError::resource(
+                    "allocate ICMP identifier",
+                    "the session ICMP correlation space is exhausted",
+                )
+            })?;
+            self.icmp_lanes_by_probe.insert(probe_id, lane);
+            lane
+        };
+        let session_bits = u16::from(self.session_slot) << 14;
+        let lane_high = u16::try_from(lane >> 16).map_err(|_| {
+            ScannerError::internal("allocate ICMP identifier", "ICMP lane high bits overflowed")
+        })?;
+        let sequence = u16::try_from(lane & 0xffff).map_err(|_| {
+            ScannerError::internal("allocate ICMP identifier", "ICMP lane low bits overflowed")
+        })?;
+        Ok((session_bits | lane_high, sequence))
     }
 
     fn build_discovery(family: ProbeFamily, route: &RouteBinding) -> Result<Vec<u8>, ScannerError> {
@@ -716,37 +801,32 @@ impl WireState {
         probe: LogicalProbe,
         route: &RouteBinding,
         token: CorrelationToken,
+        icmp_identifier: u16,
+        icmp_sequence: u16,
     ) -> Result<Vec<u8>, ScannerError> {
         if matches!(probe.family, ProbeFamily::Arp | ProbeFamily::Ndp) {
             return Self::build_discovery(probe.family, route);
         }
-        let identity = self.identity(probe.logical_id, probe, route)?;
         let payload_token = token.payload_token();
         let transport = match probe.family {
             ProbeFamily::Icmpv4Echo => Icmpv4Message::EchoRequest {
-                identifier: u16::try_from(
-                    (probe.logical_id ^ (u64::from(self.session_slot) << 56)) >> 16,
-                )
-                .unwrap_or_default(),
-                sequence: u16::try_from(probe.logical_id & 0xffff).unwrap_or_default(),
+                identifier: icmp_identifier,
+                sequence: icmp_sequence,
                 payload: &payload_token,
             }
             .build()?,
             ProbeFamily::Icmpv6Echo => Icmpv6Packet {
                 checksum_context: transport_context(route.source, route.destination)?,
                 message: Icmpv6Message::EchoRequest {
-                    identifier: u16::try_from(
-                        (probe.logical_id ^ (u64::from(self.session_slot) << 56)) >> 16,
-                    )
-                    .unwrap_or_default(),
-                    sequence: u16::try_from(probe.logical_id & 0xffff).unwrap_or_default(),
+                    identifier: icmp_identifier,
+                    sequence: icmp_sequence,
                     payload: &payload_token,
                 },
             }
             .build()?,
             ProbeFamily::TcpSyn => TcpSegment {
                 checksum_context: transport_context(route.source, route.destination)?,
-                source_port: Port::new(self.source_port(probe.logical_id)),
+                source_port: Port::new(self.source_port(probe.logical_id)?),
                 destination_port: Port::new(
                     probe
                         .port
@@ -775,7 +855,7 @@ impl WireState {
                 UdpDatagram {
                     checksum_context: transport_context(route.source, route.destination)?,
                     checksum_mode: UdpChecksumMode::Compute,
-                    source_port: Port::new(self.source_port(probe.logical_id)),
+                    source_port: Port::new(self.source_port(probe.logical_id)?),
                     destination_port: Port::new(
                         probe
                             .port
@@ -790,7 +870,13 @@ impl WireState {
             }
             ProbeFamily::Arp | ProbeFamily::Ndp => unreachable!("discovery handled above"),
         };
-        let protocol = identity.protocol();
+        let protocol = match probe.family {
+            ProbeFamily::Icmpv4Echo => IpProtocol::new(1),
+            ProbeFamily::Icmpv6Echo => IpProtocol::new(58),
+            ProbeFamily::TcpSyn => IpProtocol::new(6),
+            ProbeFamily::Udp => IpProtocol::new(17),
+            ProbeFamily::Arp | ProbeFamily::Ndp => unreachable!("discovery handled above"),
+        };
         build_ip_packet(
             route.source,
             route.destination,
@@ -1004,6 +1090,20 @@ fn observed(
 mod tests {
     use super::*;
 
+    fn session_options(source_port_start: u16, source_port_end: u16) -> SessionOptions {
+        SessionOptions {
+            udp_payload_v4: Vec::new(),
+            udp_payload_v6: Vec::new(),
+            source_address: None,
+            interface: None,
+            vlan: None,
+            source_port_start,
+            source_port_end,
+            seed: 0,
+            late_grace: std::time::Duration::ZERO,
+        }
+    }
+
     #[test]
     fn solicited_node_packet_is_checksum_valid_and_strictly_parseable() {
         let packet = build_neighbor_solicitation(
@@ -1052,5 +1152,44 @@ mod tests {
         let completed = complete_offloaded_checksum(&segment, context, 6, true).unwrap();
         assert!(parse_tcp_segment(&completed, context).is_ok());
         assert_eq!(segment[16..18], 1_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn icmp_lanes_are_stable_and_disjoint_across_four_sessions() {
+        let mut seen = HashSet::new();
+        for slot in 0..4 {
+            let mut wire = WireState::new([u8::MAX; 32], slot, session_options(49_152, 65_535));
+            for probe_id in [0, 1, u64::MAX] {
+                let fields = wire.icmp_correlation_fields(probe_id).unwrap();
+                assert_eq!(wire.icmp_correlation_fields(probe_id).unwrap(), fields);
+                assert!(seen.insert(fields));
+                assert_eq!(fields.0 >> 14, u16::from(slot));
+            }
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    #[test]
+    fn expired_icmp_lanes_return_to_the_bounded_allocator() {
+        let mut wire = WireState::new([7; 32], 0, session_options(49_152, 65_535));
+        wire.icmp_correlation_fields(42).unwrap();
+        assert_eq!(wire.icmp_lanes_by_probe.len(), 1);
+        wire.mark_terminal([42]);
+        assert!(wire.icmp_lanes_by_probe.is_empty());
+        assert!(wire.occupied_icmp_lanes.is_empty());
+    }
+
+    #[test]
+    fn odd_source_port_ranges_are_partitioned_without_session_overlap() {
+        let mut ports = HashSet::new();
+        for slot in 0..4 {
+            let wire = WireState::new([0; 32], slot, session_options(60_000, 60_004));
+            for probe_id in 0..16 {
+                let port = wire.source_port(probe_id).unwrap();
+                assert_eq!(port, 60_000 + u16::from(slot));
+                ports.insert(port);
+            }
+        }
+        assert_eq!(ports, HashSet::from([60_000, 60_001, 60_002, 60_003]));
     }
 }

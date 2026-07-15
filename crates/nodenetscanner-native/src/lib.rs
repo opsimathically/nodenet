@@ -7,6 +7,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("nodenetscanner-native supports Linux only");
 
+mod backend;
 mod binding;
 mod error;
 mod model;
