@@ -832,6 +832,384 @@ ring-event work remains separately undecided.
   preregistered same-workload evidence. Phase 24's native AArch64 publication
   gate remains independently outstanding. See the Phase 25 report.
 
+### D-040 — Independently authored protocol-aware UDP evolution
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: implement service-aware UDP probing in Phases 27–33 as an extension
+  of the portable scanner. One logical `(target, UDP port)` result may execute a
+  bounded programme of physical protocol subprobes. Every physical setup,
+  variant, and retry consumes the rate budget and owns finite correlation/grace
+  state; the engine aggregates direct UDP, ICMP, and silence through a
+  deterministic evidence lattice. Protocol mode uses specification-valid
+  transaction fields or tuple/source-port ownership rather than an unconditional
+  private payload prefix. Exact custom bytes and explicit legacy token-prefix
+  behavior remain available separately.
+- Decision: create a project-owned, statically linked, versioned catalogue with
+  stable probe IDs, profiles, port sets, builders/parsers, correlation
+  strategies, resource bounds, network-impact classification, and primary-
+  source provenance. Builders, typed parsers, and any finite response-signature
+  DSL live in `nodenet-protocols`; selection/aggregation live in
+  `nodenetscanner-engine`; descriptors, entropy, source ports, packet bytes, and
+  live correlation remain native-owned. Schema version 2 adds bounded UDP
+  service evidence and physical/logical accounting without reinterpreting
+  schema 1.
+- Decision: the closed readiness review makes `maxOutstanding` a physical
+  subprobe/correlation ceiling, requires separate logical and wire IDs, reserves
+  result rows and variable metadata bytes before transmission, preserves full
+  ICMP family/type/code/origin detail through state policy, and freezes schema 2
+  as additive columns plus a deterministic length-prefixed metadata record.
+- Decision: Nmap commit `10dfd2ff1cef6c1925232db45352149b659979b4` is a frozen
+  behavioral architecture baseline only. The MIT project will not copy,
+  translate, generate from, vendor, parse, load, link, execute as a helper, or
+  redistribute Nmap source or `nmap-service-probes`. Every implementation entry
+  is authored from a primary specification, registry, permissively licensed
+  documentation, or a permissioned project-owned capture. Direct reuse requires
+  a separate compatible license or written permission.
+- Decision: protocol-aware safe mode becomes the default for a payload-less UDP
+  probe only after the safe pack passes Phase 29. Broadcast/multicast,
+  amplification-prone, materially stateful, authentication-attempt,
+  sensitive-read, and conflicting fixed-source behavior requires explicit risk
+  consent independent of comprehensive/legacy breadth. Repository
+  provenance/capability data remains primary-source-derived; reference mapping
+  remains an owner-controlled non-distributed audit. Only Phase 33 may make a
+  factual parity claim.
+- Rationale: a generic token-prefixed datagram cannot form valid application-
+  protocol requests and therefore overproduces `open|filtered` results. Native
+  protocol programmes improve response elicitation without per-packet N-API
+  crossings, while independent provenance preserves the project's license and
+  distribution model. Logical aggregation retains bounded user-facing results
+  even when several physical requests are necessary.
+- Consequences: Phase 26 remains closed; this decision does not authorize an
+  extreme backend. The Phase 27 preimplementation audit is closed in the UDP
+  plan review. The material default/schema change targets an unpublished
+  `0.2.0-rc.1` scanner candidate. Full Nmap service/version fingerprint parity
+  remains a separate possible future scope. See `43-udp-probe-parity-plan.md`.
+
+### D-041 — Phase 27 UDP compatibility and schema foundation
+
+- Status: accepted on 2026-07-14
+- Decision: Phase 27 keeps omitted UDP policy and the deprecated top-level
+  `payload` spelling on the existing 16-byte correlation-token prefix path.
+  Explicit `custom/tuple` sends caller bytes exactly, `custom/prefixToken`
+  selects compatibility deliberately, and `empty` sends a zero-length payload. A
+  plan still admits exactly one UDP definition. Native state now owns a
+  per-family vector programme even though Phase 27 admission deliberately limits
+  it to one request; Phase 28 owns live multi-variant scheduling.
+- Decision: protocol policy normalizes to profile `safe`, intensity `7`,
+  strategy `exhaustive`, fallback `unmapped`, and a canonical unique risk set
+  when fields are omitted. The discriminants are frozen, but a Phase 27 start
+  rejects protocol mode as unsupported and capability metadata reports
+  `protocolModeAvailable: false`. This prevents a partially bounded live path
+  and does not switch the omitted default before the Phase 29 safe pack.
+- Decision: catalogue source is project-owned Rust data validated in stable ID
+  order. Its first empty infrastructure catalogue is version `1.0.0`, SHA-256
+  `39a4b724558d17b4f159a954a7acf1c68fd1c2ae5b215c2d306f8a05bac1647f`. The
+  checker rejects unregistered builders/parsers, duplicate or unordered
+  identifiers/ports, missing provenance, unsafe profile/risk/source-port
+  combinations, unbounded responses, and oversized templates. No Nmap source,
+  data, runtime, or build dependency was added.
+- Decision: schema 2 is an additive retained-batch input contract while native
+  sessions continue emitting schema 1. Schema 1 rejects schema-2-only columns;
+  schema 2 requires all frozen UDP columns and validates numeric vocabularies,
+  monotonic offsets, 1 KiB length-prefixed service records, UTF-8, stable extra
+  field IDs, and transfer/detachment behavior. Native schema-2 emission remains
+  a Phase 29 gate.
+- Consequences: Phase 27 is complete. The production catalogue intentionally
+  contains zero protocol variants, makes no parity claim, and does not authorize
+  the Phase 29 safe pack. See `45-phase-27-report.md`.
+
+### D-042 — Phase 28 physical UDP programme scheduling and settlement
+
+- Status: accepted on 2026-07-14
+- Decision: a UDP programme remains one logical target/port result and reserves
+  one result row plus its maximum possible winning metadata before emission.
+  Programmes execute lazily with unique physical wire IDs, no more than four
+  active variants per endpoint, `maxOutstanding` charged to physical work, and
+  every setup/probe/retry frame charged to the common token bucket. Aggregate
+  UDP transmissions are checked `u32`; per-variant retry ordinals remain `u8`.
+- Decision: active and grace physical probes retain collision-free session-local
+  source-port lanes. Native routes remain owned by logical IDs while packet,
+  token, and quote correlation use physical IDs. A lane cannot return until its
+  finite engine grace expires; compatibility single-request scans retain their
+  prior result timing and schema-1 output.
+- Decision: direct UDP outranks target-originated port-unreachable, which
+  outranks other recognized filtered ICMP evidence, which outranks silence.
+  IPv4/IPv6 family, type, code, target origin, and quote strength survive
+  receive normalization. Ties select the lowest stable catalogue ID/request
+  index; contradictions saturate a bounded counter; unknown or insufficient
+  evidence cannot change state. A logical result waits until every emitted
+  variant that could alter it has left finite grace.
+- Decision: native result admission enforces 16 MiB reserved metadata per
+  session and 64 MiB across the Node environment. Phase 28 consumes no service
+  metadata and native sessions continue emitting schema 1. Protocol mode may
+  traverse the scheduler with exact empty fallback, but capability remains false
+  while the production catalogue is empty; safe payloads, service parsing,
+  schema-2 emission, and the omitted-policy default remain Phase 29.
+- Consequences: Phase 28 is complete without importing Nmap data or adding
+  protocol payload breadth. See `46-phase-28-report.md`.
+
+### D-043 — Safe UDP pack, PCP addition, and protocol-session schema 2
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: Catalogue `1.1.0` supplies nine safe, unicast, ephemeral-source
+  probes: DNS root A with EDNS padding and a 512-byte ceiling, NTP client,
+  SNMPv3 engine discovery, rpcbind v2 NULL, STUN Binding, CoAP Empty CON,
+  ASF/RMCP presence, framed memcached `version`, and PCP ANNOUNCE. PCP ANNOUNCE
+  is the Phase 29 addition because it requests no mapping and has a small
+  bounded response. Omitted UDP policy selects safe exhaustive protocol mode
+  with an unmapped empty fallback. Explicit empty/custom behavior remains.
+  Protocol-mode sessions emit frozen batch schema 2; compatibility sessions
+  remain schema 1, and both decode paths are retained.
+- Rationale: Protocol-valid, transaction-correlated requests materially improve
+  common UDP discovery without importing Nmap data or granting risk consent.
+  Port eligibility is evaluated lazily so a protocol request is never sent to
+  unrelated selected ports. Variable metadata remains Rust-owned, validated,
+  capped at 1 KiB per result, and covered by session/environment reservations.
+- Consequences: Direct tuple-correlated UDP still establishes `open` even when
+  its body is malformed, but service family/confidence requires strict parser
+  success. Phase 29 satisfies the accepted safe-core parity gate only; extended,
+  comprehensive, adaptive, and final Nmap-behavior parity remain Phases 30–33.
+
+### D-044 — Extended UDP standards pack and independent risk admission
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: catalogue `1.2.0` adds comprehensive-profile NetBIOS node status,
+  NFS v3 NULL, SIP OPTIONS, SSDP unicast M-SEARCH, L2TP SCCRQ, SNMPv1 public
+  `sysDescr.0`, and memcached statistics. Profile breadth is evaluated before,
+  and independently from, the canonical `allowRisks` set. NFS NULL has no
+  additional risk flag; every other new entry requires its declared sensitive-
+  read, high-amplification, stateful-handshake, or authentication-attempt
+  consent. Supplying consent to `safe` never adds an extended probe.
+- Decision: catalogue descriptors now freeze response and typed-parser byte
+  ceilings, a conservative maximum amplification ratio, and a nonzero maximum
+  state lifetime exactly when a probe is materially stateful. Native receive
+  processing caps typed service parsing at 4 MiB per session and 256 KiB per
+  target per runtime tick while retaining the existing 128-datagram work cap.
+  Oversized or budget-exhausted direct datagrams may still prove UDP `open` by
+  tuple, but cannot produce service identity.
+- Decision: protocol-mode multicast or limited-broadcast targets require both
+  explicit `multicastOrBroadcast` consent and an explicit interface; the scanner
+  never expands targets. Fixed-source entries remain rejected until an
+  operator-controlled host/namespace ownership contract exists. Stateful entries
+  reject a configured maximum timeout above their declared lifetime.
+- Decision: mDNS/DNS-SD is deferred because one multicast query can produce
+  several unicast responders and cannot honestly fit the frozen target-address
+  correlation/one-result model. TFTP is deferred until the alternate-port
+  first-response pinning path has independent live proof. DHCP is deferred until
+  fixed-source/broadcast ownership exists. IKE, DTLS, and QUIC are deferred
+  pending exact-pinned cryptographic/dependency review; OpenVPN lacks an
+  accepted independently stable discovery wire specification; RADIUS cannot be
+  probed safely without shared-secret or authentication semantics.
+- Rationale: seven one-datagram standards exchanges materially broaden useful
+  UDP discovery while keeping the Phase 29 safe default byte-for-byte and
+  preventing a broad profile name from acting as network-impact authorization.
+  Deferral is safer and more interoperable than sending approximate handshake
+  bytes or weakening response attribution.
+- Consequences: Phase 30 is complete and Phase 31 may expand comprehensive and
+  legacy breadth from catalogue `1.2.0`. Only Phase 33 may make the final frozen
+  Nmap-behavior parity claim. See `48-phase-30-report.md`.
+
+### D-045 — Comprehensive/legacy catalogue and executable capability ledger
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: catalogue `1.3.0` preserves IDs 1–16 and adds 17 independently
+  specified comprehensive/legacy variants across game, directory, device,
+  industrial/building, peer-to-peer, remote-control, routing, and historical
+  services. The safe profile remains exactly IDs 1–9. Every impact-bearing
+  request remains gated by its exact amplification, stateful, authentication, or
+  sensitive-read consent independently from profile selection.
+- Decision: destination eligibility now supports checked inclusive port ranges
+  without materializing every port. Repeated stable probe IDs are legal only on
+  disjoint eligibility ranges; overlapping eligibility fails plan construction.
+  This permits protocol-owner conventional ranges while retaining deterministic
+  catalogue order and one matching variant per endpoint.
+- Decision: simple response identification may use the project-owned finite
+  byte-signature engine. A signature has at most 32 exact, prefix, masked-byte,
+  or capped ASCII-extraction clauses and at most 65,527 bytes of declared work.
+  It has no regex, recursion, backtracking, substitution, callback, or partial-
+  result behavior. Structured and transaction-bearing protocols retain typed
+  parsers.
+- Decision: the shippable 46-entry project capability ledger covers all 33
+  catalogue IDs exactly once and records 13 explicit blockers. Validation fails
+  on duplicate project IDs, unknown, duplicate, or uncovered probes, empty
+  evidence, and implemented blocked entries. The ledger contains no external
+  comparison mappings. mDNS/DNS-SD, TFTP, DHCP, IKE, DTLS, QUIC, OpenVPN,
+  RADIUS, CLDAP, SQL Browser, Ubiquiti discovery, pcAnywhere, and WireGuard
+  handshake behavior remain blocked for the recorded ownership, specification,
+  authentication, or protocol-model reasons.
+- Rationale: broad service discovery is useful only when every emitted request
+  has independent provenance, bounded parsing, explicit impact, and an honest
+  unsupported disposition. Static signatures cover finite simple banners without
+  introducing a regex dependency or an unbounded packet-path engine.
+- Consequences: Phase 31 is complete, but makes no Nmap parity claim. Phase 32
+  may implement evidence-driven adaptive selection; only Phase 33 may report an
+  aggregate comparison after the separate owner-controlled audit. See
+  `49-phase-31-report.md`.
+
+### D-046 — Evidence-bounded adaptive UDP and public schema-2 views
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: `exhaustive` remains the compatibility default. Opt-in `adaptive`
+  schedules at most one physical variant per logical UDP endpoint, preserving
+  immutable catalogue order: mapped likely request, eligible alternatives, then
+  the selected exact-empty fallback. Direct UDP and target-originated port-
+  unreachable evidence stop unsent adaptive variants. Correlations already
+  emitted remain alive through bounded late grace.
+- Decision: a soft service-family hint can only skip incompatible adaptive
+  follow-ups. It never enters the network-state lattice, service result, or
+  product metadata. Missing ICMP remains silence. Correlated ICMP followed by
+  silence may add a bounded per-host cooldown, recorded in diagnostics, without
+  strengthening the result.
+- Decision: terminal summaries freeze the normalized UDP mode, profile,
+  intensity, strategy, fallback, exact risk-consent set, custom correlation, and
+  catalogue version/hash. `logicalProbes` is logical work and `progress.sent` is
+  physical frames. Lazy schema-2 rows expose stable response-kind, service-
+  confidence, catalogue-probe, variant-count, family, and bounded decoded
+  product/version/field views; schema-1 decoding is unchanged.
+- Decision: catalogue versions follow semantic versioning. Removing or
+  reinterpreting an existing ID requires a major version; additive reviewed
+  variants are minor; compatible fixes are patch. The SHA-256 identity remains
+  authoritative. The optional declarative custom signature API is not admitted:
+  exact native custom payloads already remain available, while exposing the
+  signature DSL would add public attack surface without Phase 32 evidence.
+- Rationale: sequential evidence boundaries are what let adaptive mode reduce
+  traffic honestly. Parser guesses, silence, or discarded late correlations
+  would trade correctness for speed and violate the scanner's evidence model.
+- Consequences: Phase 32 is complete. Exhaustive and explicit empty/custom
+  behavior remain compatible; Phase 33 owns the final external parity and
+  release audit. See `50-phase-32-report.md`.
+
+### D-047 — Narrow UDP elicitation parity claim and `0.2.0-rc.1`
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: advance the unpublished scanner, native addon, and target manifests
+  together to `0.2.0-rc.1`. Protocol mode emits result schema 2 while the
+  decoder continues accepting schemas 1 and 2. Catalogue `1.3.0`, its hash, 33
+  implemented variants, nine safe variants, default safe/exhaustive policy, and
+  13 blocked capability entries are part of the release policy.
+- Decision: the only external comparison statement accepted for this candidate
+  is that, on the owner-controlled IPv4/IPv6 responder matrix, independently
+  authored requests matched or exceeded frozen Nmap commit
+  `10dfd2ff1cef6c1925232db45352149b659979b4` in protocol-class response
+  elicitation and definitive UDP port-state evidence. Do not call the package
+  Nmap-compatible or claim full probe-database, service/version, product, OS, or
+  fingerprint parity.
+- Decision: external comparison mechanics and detailed output remain
+  non-distributed. Shippable catalogue/ledger validators require HTTPS primary
+  provenance and reject any external-comparison marker. Only aggregate counts
+  and project-owned evidence may appear in the completion report.
+- Rationale: the accepted responder result is useful and reproducible, but the
+  13 explicit blockers and deliberately smaller typed service-evidence model
+  make a broad compatibility claim false. Version `0.2.0-rc.1` honestly marks
+  the protocol-aware default behavior and schema-2 feature boundary.
+- Consequences: Phase 33 implementation and every available x86-64 release gate
+  are complete. Native AArch64 execution remains mandatory before AArch64 or
+  package-wide publication. See `51-phase-33-report.md`.
+
+### D-048 — Phases 27–33 parser-hardening audit
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: retain catalogue `1.3.0`, result schema 2, the public UDP policy,
+  stable probe IDs, and scanner `0.2.0-rc.1`, while correcting receive-side
+  structural validation for SNMPv3, RPC/NFS, BitTorrent DHT, NTP control, SLP,
+  XDMCP, BACnet, EtherNet/IP, and KNXnet/IP. A typed service identity now
+  requires the complete supported message structure and exact message end.
+- Rationale: the request catalogue and public contracts were correct, but
+  marker-based or skeletal parsing could accept malformed datagrams, and the NTP
+  control parser required an incomplete fragment. Tightening response validation
+  is a compatible release-candidate bug fix; changing catalogue IDs or schema
+  would misrepresent an unchanged transmit and result contract.
+- Consequences: all locally available ordinary, privileged, stress, fuzz,
+  sanitizer, x86-64 artifact/consumer/reproducibility, and AArch64 cross-check
+  gates pass again. Native AArch64 execution remains the only publication gate.
+  See `52-phase-27-33-implementation-audit.md`.
+
+### D-049 — Separate bounded discovery architecture and advanced UDP evolution
+
+- Status: accepted; readiness conditions closed by D-050
+- Date: 2026-07-14
+- Decision: implement Phases 34–44 as the next scanner evolution. Link-scoped
+  one-query/many-responder protocols use a separate finite discovery plan,
+  session, summary, and discovery result schema rather than a magic target or a
+  reinterpretation of the existing scan schema. Discovery shares the native
+  environment runtime, immutable network context, pull-batch style, and
+  lifecycle conventions, but owns independent bounded correlation, aggregation,
+  and result state.
+- Decision: add evidence-derived endpoints only through a registered bounded
+  parent/child graph that revalidates the original target allowlist and
+  exclusions, defaults to same-address/different-port edges, rate-charges and
+  reserves every child, suppresses cycles, and records provenance. Add alternate
+  response ports only through registered protocol state machines that pin the
+  first structurally valid same-target/interface response; do not expose a
+  general loose-port matcher.
+- Decision: sequence mDNS/DNS-SD, WS-Discovery/LLMNR, adaptive rpcbind, TFTP,
+  NAT-PMP/SQL Browser/configured Kerberos, QUIC Version Negotiation, reviewed
+  IKE/DTLS, DHCP topology discovery, and optional specialized GTP/MQTT-SN/
+  industrial packs behind their prerequisite architecture. Each candidate may
+  remain blocked or record no-go rather than approximate a malformed request.
+- Decision: retain the current `UdpProbeRisk` vocabulary and independent native
+  risk enforcement. Interface and family scope are explicit; omitted options do
+  not authorize all interfaces, multicast/broadcast, fixed-source behavior,
+  sensitive reads, authentication attempts, amplification, or stateful
+  handshakes. Built-ins remain non-mutating and never complete authentication,
+  create a lease/mapping/tunnel, transfer a file, or use a real operator
+  identity by default.
+- Decision: existing scan result schemas 1 and 2 and catalogue `1.3.0` retain
+  their meaning. Discovery batches begin with a separate schema 1. Any scan
+  parent/child columns require an additive schema 3 with retained schema-1/2
+  decoding. Only the final integrated Phase 44 may prepare unpublished
+  `0.3.0-rc.1`, after native x86-64 and AArch64 execution and all release gates.
+- Rationale: the highest-value remaining UDP discovery protocols have fan-out,
+  dynamic-port, alternate-endpoint, or handshake semantics that cannot be
+  represented honestly by one terminal `(target, port)` result. Separate,
+  bounded execution models improve real discovery while preserving correlation,
+  resource accounting, compatibility, and conservative evidence claims.
+- Consequences: D-050 and `54-advanced-udp-discovery-plan-review.md` close the
+  preimplementation conditions. Phase 26 remains closed, the Phase 33 Nmap
+  comparison wording is not broadened, and `nodenetraw` remains a low-level
+  policy-free package.
+
+### D-050 — Phase 34 discovery-foundation readiness
+
+- Status: accepted
+- Date: 2026-07-14
+- Decision: approve Phase 34 as the next implementation phase after correcting
+  the Phase 34–44 plan to match the existing already-running session lifecycle,
+  reserve the configured fan-out result pool before the first query, share the
+  existing four-session and 64 MiB environment ceilings, and define a separate
+  discovery registry/schema with deterministic byte identity and conflict
+  behavior. Freeze explicit link and targeted discovery scopes so dynamic-input
+  multi-entity operations do not overload scan schema 2.
+- Decision: make discovery transport operation-driven and lazy. Ordinary
+  UDP-only discovery opens no raw/packet descriptor and requires no
+  `CAP_NET_RAW`; every privileged descriptor or fixed-source requirement is
+  declared and admitted independently. Multicast receive owns exact Linux group,
+  port-coexistence, packet-info, hop-limit, namespace, demultiplexing, and
+  cleanup contracts.
+- Decision: treat advertised endpoints as untrusted metadata unless Phase 37's
+  separately bounded same-target derivation graph authorizes child work. Freeze
+  explicit mDNS legacy/full-browse modes, safe streaming XML dependency gates,
+  TFTP positive-response cleanup/no-retry behavior, unauthenticated QUIC
+  evidence, and minimum-identity DHCP correlation/coexistence gates.
+- Rationale: the original direction was sound, but implementation would have
+  been ambiguous at exactly the boundaries where fan-out can multiply memory,
+  descriptor privilege, result identity, remote protocol state, and caller
+  authority. The corrected contracts are compatible with the implemented scanner
+  and make those costs finite and observable before network work.
+- Consequences: Phase 34 may begin and emits no live discovery protocol. It must
+  first freeze the exact types, numeric vocabularies, defaults, constants,
+  registry version, transport traits, and lifecycle/reservation matrices. Phase
+  35 remains blocked until the Phase 34 report proves its synthetic engine and
+  isolated native transport exit gates. See
+  `54-advanced-udp-discovery-plan-review.md`.
+
 ## Research references
 
 Compatibility facts were verified on 2026-07-12 against primary project
@@ -889,3 +1267,25 @@ documentation:
 - Consequences: ...
 - Supersedes/Superseded by: ... (when applicable)
 ```
+
+# D-051: Ship bounded ordinary-UDP discovery operations and record unsupported families as no-go
+
+- Date: 2026-07-14
+- Status: accepted
+- Decision: add registry `1.0.0` and discovery schema 1 with legacy-unicast
+  mDNS/DNS-SD, WS-Discovery, explicit-name LLMNR, NAT-PMP external-address, SQL
+  Browser, rpcbind GETADDR evidence, TFTP sentinel discovery, and QUIC Version
+  Negotiation. Use ordinary nonblocking UDP and shared scan/discovery
+  session/metadata admission. Retain fixed-port mDNS browse, Kerberos, IKE,
+  DTLS, host-namespace DHCP, and specialized Phase 43 candidates as explicit
+  no-go outcomes. Do not advance the release version while rpcbind child
+  execution, the new namespace matrix, or native AArch64 execution remains.
+- Rationale: these eight operations have independently owned bounded codecs and
+  useful non-mutating evidence. The no-go families did not close their
+  coexistence, identity, cryptographic dependency, or authoritative fixture
+  gates, and malformed approximations would weaken the project.
+- Consequences: `DISCOVERY_CAPABILITIES` exposes exact implemented operations,
+  ceilings, risks, registry identity, and no-go families. Rpcbind child work is
+  a single typed same-target NFSv3 NULL exchange, can be disabled per operation,
+  and carries parent/derivation identity in discovery schema 1. Phase 44's
+  external release gates remain open as recorded in report 55.

@@ -247,6 +247,22 @@ npm run benchmark:protocols
 npm run test:phase17:namespace
 ```
 
+Phase 27 adds `npm run udp:catalogue:check`. It validates the compiled,
+project-owned UDP descriptor catalogue and fails when its canonical content no
+longer matches the frozen version/hash. Protocol request-plan unit and
+allocation tests remain part of `cargo test -p nodenet-protocols --locked`;
+TypeScript UDP policy and schema-1/schema-2 hostile-boundary tests remain part
+of the ordinary scanner package suite.
+
+Phase 28 adds `crates/nodenetscanner-engine/tests/phase28.rs`. Its virtual-clock
+matrix covers zero, one, four, sixteen, and sixty-four variants, the four-wire
+per-endpoint ceiling, checked aggregate transmission counts, deterministic
+contradictory evidence, the IPv4/IPv6 UDP ICMP state matrix, finite late grace,
+and row/metadata reservation cleanup. Native unit tests additionally cover
+collision-free source-port lane allocation/reuse and the 16 MiB session/64 MiB
+environment metadata reservation boundary. These remain part of `rust:test`. Run
+the focused matrix with `npm run test:phase28`.
+
 The two protocol fuzz targets are `parse` and `serialize` in an independently
 locked cargo-fuzz workspace. `test/fixtures/protocol` is the shared independent
 wire-oracle directory. Allocation tests use a development-only instrumented
@@ -335,6 +351,89 @@ records `no-go`, so this command is diagnostic and does not authorize Phase 26.
 Scanner commands are introduced by the phase that owns them and then added to
 the root orchestration. Until implementation starts, documentation must not list
 aspirational scripts as runnable commands.
+
+### UDP protocol-probe verification
+
+Phases 27–30 add and exercise the project-owned catalogue, safe/extended codecs,
+risk matrix, schema 2, and live responder matrix without making the local Nmap
+checkout a build, test, or runtime dependency. Phases 31–33 extend these same
+gates. Catalogue checks require stable generated output, unique IDs, valid
+port/range/profile/source constraints, complete primary-source provenance,
+bounded templates, known builders/parsers, and a reproducible catalogue hash.
+Clean-clone and release tests run with no Nmap installation or source tree
+present.
+
+Every UDP builder receives independent specification-derived golden bytes and
+dynamic transaction-field properties. Every parser receives valid, wrong-
+transaction, wrong-endpoint, truncated, malformed-length/count, arbitrary-byte,
+and mutation cases plus allocation ceilings and fuzz coverage. Typed protocol
+responders in disposable dual-stack namespaces provide independent open-service
+oracles; closed, prohibited, unreachable, silent, delayed, duplicated,
+contradictory, and ICMP-rate-limited paths exercise the evidence lattice.
+
+The syscall-free engine uses virtual time to cover several variants per logical
+endpoint, retry products, decisive early stopping, source-port/grace exhaustion,
+fairness, result reservation, backpressure, cancellation, context invalidation,
+and teardown. Captured project-owned evidence replays deterministically. Live
+capture proves protocol requests are byte exact and that exact custom mode has
+no prefix while legacy prefix mode remains explicit.
+
+Reservation tests cover both rows and the 16 MiB per-session/64 MiB environment
+service-metadata budgets; batch sealing may shorten a pull to keep all variable
+columns within 4 MiB. `maxOutstanding` tests count physical variants. The ICMP
+matrix retains family/type/code/target-origin detail through policy, including
+intermediate port-unreachable and IPv6 Parameter Problem. Profile snapshots are
+crossed with independent risk-consent sets so catalogue breadth can never grant
+amplification, state, fixed-source, multicast/broadcast, authentication, or
+sensitive-read permission.
+
+Phase 31 maintains and validates the independently sourced project
+capability/provenance ledger, exact catalogue coverage, finite signature work
+bounds, canonical per-family fixtures, checked ranges, and profile/risk
+snapshots. Phase 32 preregisters an adaptive-versus-exhaustive comparison on the
+independent responder matrix. Phase 33 records only the manual aggregate
+comparison with the frozen Nmap reference; no distributed script executes Nmap
+or parses its data/output. The accepted release claim distinguishes UDP
+payload/state elicitation from full service/version fingerprinting. Exact local
+commands and results are recorded in `51-phase-33-report.md`.
+
+Implementation phases introduce canonical command names only when the owned
+tests exist. The eventual gates must integrate with ordinary CI, protocol and
+engine fuzzing, sanitizers, privileged namespace tests, repeated lifecycle/RSS/
+fd stress, clean consumers, artifact ABI/glibc inspection, reproducibility, and
+native AArch64 execution.
+
+### Advanced discovery verification
+
+Phase 34 begins with syscall-free virtual one-query/many-responder tests for
+aggregation, duplicates, partial entities, quiet windows, exact deadlines,
+link/target scopes, session-pool and per-query row/metadata reservation,
+datagram/query/deadline saturation, backpressure, deterministic replay, and
+pause/cancel/close/Worker races. Discovery schema 1 receives the same sealed
+buffer, hostile offset/length/discriminant, transfer, and lazy-view tests as
+scan schemas without reinterpreting schemas 1/2. Synthetic native transport
+tests also prove that ordinary UDP-only discovery opens no raw/packet descriptor
+or requires `CAP_NET_RAW`, while mixed-descriptor setup failure rolls back
+before transmission.
+
+Phases 35–36 add disposable multi-responder IPv4/IPv6 interface topologies and
+capture exact multicast groups, ports, source/interface selection, hop limits,
+query expansion, retries, response windows, and rate accounting. DNS compression
+and XML event parsing receive structural mutation, depth/work/size, allocation,
+fuzz, sanitizer, entity/DTD/external-resource, and response-flood coverage.
+
+Phases 37–38 use virtual graph/race models and live dynamic-port responders to
+prove target containment, graph bounds, cycle suppression, parent/child
+reservation, first-valid alternate-port pinning, spoofed/competing responses,
+late grace, and exactly-once cleanup. Phases 39–43 require independent canonical
+responders and protocol-specific byte/CPU/state/amplification/risk matrices; a
+candidate can no-go without weakening the gate.
+
+Phase 44 repeats ordinary and privileged end-to-end topologies, hostile input,
+fuzzing, sanitizers, fault injection, slow consumers, Worker/fd/RSS stress,
+dependencies/advisories, clean consumers, ELF/GLIBC, reproducibility, and native
+x86-64/AArch64 execution. Planned command names are not documented as runnable
+until their owning phase implements them.
 
 ## CI shape
 

@@ -8,9 +8,9 @@ libraries implemented with TypeScript, Rust, and Node-API.
 - [`@opsimathically/nodenetraw`](packages/nodenetraw/README.md) is the active,
   Linux-only raw socket and ICMP/traceroute package.
 - [`@opsimathically/nodenetscanner`](packages/nodenetscanner/README.md) is an
-  unpublished `0.1.0-rc.1` bounded native scanner. Its TypeScript API drives
-  live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, and UDP scans through a Rust-owned
-  portable Linux data plane.
+  unpublished `0.2.0-rc.1` bounded native scanner. Its TypeScript API drives
+  live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, protocol-aware UDP scans, and bounded
+  link/target UDP discovery through a Rust-owned portable Linux data plane.
 
 The public packages remain independently versioned. Performance-sensitive Rust
 code can be shared as compile-time workspace crates, while each Node package
@@ -42,6 +42,20 @@ portable release hardening in the
 [Phase 24 report](ai_documentation/41-phase-24-report.md), and the measured
 extreme-backend `no-go` in the
 [Phase 25 report](ai_documentation/42-phase-25-report.md). Phase 26 is closed.
+The independently authored UDP catalogue and adaptive service-aware evolution
+through Phase 33 are recorded in the
+[UDP plan](ai_documentation/43-udp-probe-parity-plan.md) and
+[Phase 33 report](ai_documentation/51-phase-33-report.md). All available x86-64
+release gates pass; native AArch64 execution remains mandatory before
+publication. The later adversarial parser and lifecycle review is recorded in
+the
+[Phases 27–33 implementation audit](ai_documentation/52-phase-27-33-implementation-audit.md).
+The advanced one-to-many UDP discovery architecture and its protocol-specific
+admission/no-go decisions are tracked in the
+[Phases 34–44 plan](ai_documentation/53-advanced-udp-discovery-evolution-plan.md).
+The implementation, no-go dispositions, and remaining external release gates are
+recorded in the
+[Phases 34–44 implementation report](ai_documentation/55-phase-34-44-implementation-report.md).
 
 ## Development
 

@@ -70,6 +70,63 @@ test("malformed or oversized column schemas fail closed", () => {
   );
 });
 
+test("schema 2 columns and bounded service metadata decode and transfer", () => {
+  const batch = new ScanResultBatch(schema2Fixture());
+  assert.equal(batch.schemaVersion, 2);
+  assert.deepEqual(Array.from(batch.columns.terminalUdpProbeIds), [7, 0, 0, 0]);
+  assert.equal(batch.columns.serviceMetadataBytes.length, 9);
+  assert.equal(batch.results[0].evidence, "transaction64");
+  assert.equal(batch.results[0].udpTerminalProbeId, 7);
+  assert.equal(batch.results[0].udpVariantsAttempted, 2);
+  assert.equal(batch.results[0].udpResponseKind, "directUdp");
+  assert.equal(batch.results[0].udpServiceFamily, 1);
+  assert.equal(batch.results[0].udpServiceConfidence, "transactionCorrelated");
+  assert.deepEqual(batch.results[0].udpService, {
+    product: "dns",
+    fields: [],
+  });
+
+  const columns = globalThis.structuredClone(batch.columns, {
+    transfer: batch.transferList(),
+  });
+  assert.equal(batch.detached, true);
+  const received = new ScanResultBatch({
+    schemaVersion: 2,
+    rowCount: 2,
+    byteOrder: "little-endian",
+    ...columns,
+  });
+  assert.equal(received.schemaVersion, 2);
+  assert.equal(received.results[0].target, "192.0.2.1");
+});
+
+test("schema versions reject cross-version, hostile code, offset, and metadata drift", () => {
+  assert.throws(
+    () =>
+      new ScanResultBatch({
+        ...fixture(),
+        terminalUdpProbeIds: u16([0, 0]),
+      }),
+    (error) =>
+      error instanceof ScannerError && error.code === "ERR_INVALID_BATCH",
+  );
+  const badResponse = schema2Fixture();
+  badResponse.udpResponseKinds[0] = 8;
+  assert.throws(() => new ScanResultBatch(badResponse), invalidBatch);
+
+  const badMetadata = schema2Fixture();
+  badMetadata.serviceMetadataBytes[0] = 2;
+  assert.throws(() => new ScanResultBatch(badMetadata), invalidBatch);
+
+  const badServiceOffsets = schema2Fixture();
+  badServiceOffsets.serviceMetadataOffsets = u32([0, 10, 9]);
+  assert.throws(() => new ScanResultBatch(badServiceOffsets), invalidBatch);
+
+  const missingColumn = schema2Fixture();
+  delete missingColumn.udpVariantsAttempted;
+  assert.throws(() => new ScanResultBatch(missingColumn), invalidBatch);
+});
+
 test("AbortSignal cancels only a pending pull and delivery wins an earlier native race", async () => {
   let settle;
   const handle = mockHandle({
@@ -250,6 +307,39 @@ function fixture() {
     metadataBytes,
     metadataOffsets: u32([0, reasons[0].length, metadataBytes.length]),
   };
+}
+
+function schema2Fixture() {
+  const base = fixture();
+  const serviceMetadataBytes = Uint8Array.from([
+    1,
+    3,
+    0,
+    ...new globalThis.TextEncoder().encode("dns"),
+    0,
+    0,
+    0,
+  ]);
+  return {
+    ...base,
+    schemaVersion: 2,
+    terminalUdpProbeIds: u16([7, 0]),
+    udpVariantsAttempted: u16([2, 0]),
+    udpResponseKinds: Uint8Array.from([1, 0]),
+    udpServiceFamilies: u16([1, 0]),
+    udpServiceConfidences: Uint8Array.from([3, 0]),
+    serviceMetadataBytes,
+    serviceMetadataOffsets: u32([
+      0,
+      serviceMetadataBytes.length,
+      serviceMetadataBytes.length,
+    ]),
+    evidence: Uint8Array.from([7, 3]),
+  };
+}
+
+function invalidBatch(error) {
+  return error instanceof ScannerError && error.code === "ERR_INVALID_BATCH";
 }
 
 function u16(values) {

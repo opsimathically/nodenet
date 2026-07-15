@@ -1,6 +1,6 @@
 {
   "name": "@opsimathically/nodenetscanner",
-  "version": "0.1.0-rc.1",
+  "version": "0.2.0-rc.1",
   "description": "A bounded Linux-native network scanner for Node.js",
   "license": "MIT",
   "homepage": "https://github.com/opsimathically/nodenet#readme",

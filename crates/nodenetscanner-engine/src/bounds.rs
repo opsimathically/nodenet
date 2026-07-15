@@ -15,3 +15,9 @@ pub const MAX_SESSION_DURATION: Duration = Duration::from_hours(720);
 pub const MAX_LATE_GRACE_ENTRIES: usize = 262_144;
 pub const MAX_TRANSITIONS_PER_DRIVE: usize = 4_096;
 pub const MAX_DEFERRED_CANDIDATES: usize = 262_144;
+/// Maximum physical UDP variants represented by one logical endpoint.
+pub const MAX_UDP_PROBE_VARIANTS: usize = 64;
+/// Maximum simultaneously active physical variants for one UDP endpoint.
+pub const MAX_CONCURRENT_UDP_VARIANTS: usize = 4;
+/// Maximum service metadata reservation declared by one physical variant.
+pub const MAX_UDP_VARIANT_METADATA_BYTES: usize = 1_024;

@@ -25,12 +25,16 @@ const COMMAND_QUEUE_CAPACITY: usize = 128;
 const COMMAND_BUDGET: usize = 64;
 const TICK_NANOSECONDS: i64 = 2_000_000;
 const BATCH_COALESCE_DELAY: Duration = Duration::from_millis(2);
+const MAX_ENVIRONMENT_METADATA_BYTES: usize = 64 * 1024 * 1024;
 
 type Reply<T> = SyncSender<Result<T, ScannerError>>;
 
 pub(crate) enum Command {
     RegisterScanner {
         scanner_id: u32,
+        reply: Reply<()>,
+    },
+    ReserveExternalDiscovery {
         reply: Reply<()>,
     },
     Start {
@@ -101,6 +105,8 @@ pub(crate) struct RuntimeHandle {
     pending_operations: AtomicUsize,
     next_scanner_id: AtomicU32,
     views: Arc<Mutex<HashMap<u32, Arc<SessionView>>>>,
+    external_sessions: Arc<AtomicUsize>,
+    metadata_bytes: Arc<AtomicUsize>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -122,9 +128,13 @@ impl RuntimeHandle {
         let (sender, receiver) = sync_channel(COMMAND_QUEUE_CAPACITY);
         let accepting = Arc::new(AtomicBool::new(true));
         let views = Arc::new(Mutex::new(HashMap::new()));
+        let external_sessions = Arc::new(AtomicUsize::new(0));
+        let metadata_bytes = Arc::new(AtomicUsize::new(0));
         let worker_accepting = Arc::clone(&accepting);
         let worker_wake = Arc::clone(&wake);
         let worker_views = Arc::clone(&views);
+        let worker_external_sessions = Arc::clone(&external_sessions);
+        let worker_metadata_bytes = Arc::clone(&metadata_bytes);
         let thread = thread::Builder::new()
             .name("nodenetscanner-runtime".into())
             .spawn(move || {
@@ -134,6 +144,8 @@ impl RuntimeHandle {
                     receiver,
                     worker_accepting,
                     worker_views,
+                    worker_external_sessions,
+                    worker_metadata_bytes,
                 );
             })
             .map_err(|error| {
@@ -149,6 +161,8 @@ impl RuntimeHandle {
             pending_operations: AtomicUsize::new(0),
             next_scanner_id: AtomicU32::new(1),
             views,
+            external_sessions,
+            metadata_bytes,
             thread: Mutex::new(Some(thread)),
         }))
     }
@@ -217,6 +231,33 @@ impl RuntimeHandle {
             .map_err(|_| ScannerError::environment_closed("cancel result pull"))?
     }
 
+    pub(crate) fn admit_external_discovery(
+        &self,
+        maximum_metadata_bytes: usize,
+    ) -> Result<ExternalSessionPermit, ScannerError> {
+        self.request(|reply| Command::ReserveExternalDiscovery { reply })?;
+        if self
+            .metadata_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(maximum_metadata_bytes)
+                    .filter(|next| *next <= MAX_ENVIRONMENT_METADATA_BYTES)
+            })
+            .is_err()
+        {
+            self.external_sessions.fetch_sub(1, Ordering::AcqRel);
+            return Err(ScannerError::resource(
+                "start discovery session",
+                "discovery metadata reservation exceeds the 64 MiB environment limit",
+            ));
+        }
+        Ok(ExternalSessionPermit {
+            count: Arc::clone(&self.external_sessions),
+            metadata_bytes: Arc::clone(&self.metadata_bytes),
+            reserved_metadata_bytes: maximum_metadata_bytes,
+        })
+    }
+
     pub(crate) fn state(&self, session_id: u32) -> Result<String, ScannerError> {
         let views = lock(&self.views);
         let view = views
@@ -254,6 +295,20 @@ impl RuntimeHandle {
                 )
             })?;
         Ok(OperationPermit { runtime: self })
+    }
+}
+
+pub(crate) struct ExternalSessionPermit {
+    count: Arc<AtomicUsize>,
+    metadata_bytes: Arc<AtomicUsize>,
+    reserved_metadata_bytes: usize,
+}
+
+impl Drop for ExternalSessionPermit {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.metadata_bytes
+            .fetch_sub(self.reserved_metadata_bytes, Ordering::AcqRel);
     }
 }
 
@@ -385,10 +440,16 @@ struct WorkerState {
     free_slots: VecDeque<u8>,
     next_session_id: u32,
     views: Arc<Mutex<HashMap<u32, Arc<SessionView>>>>,
+    metadata_bytes: Arc<AtomicUsize>,
+    external_sessions: Arc<AtomicUsize>,
 }
 
 impl WorkerState {
-    fn new(views: Arc<Mutex<HashMap<u32, Arc<SessionView>>>>) -> Self {
+    fn new(
+        views: Arc<Mutex<HashMap<u32, Arc<SessionView>>>>,
+        external_sessions: Arc<AtomicUsize>,
+        metadata_bytes: Arc<AtomicUsize>,
+    ) -> Self {
         let context = RouteContext::new().and_then(|mut value| {
             let snapshot = value.snapshot()?;
             Ok((value, snapshot))
@@ -413,6 +474,8 @@ impl WorkerState {
             free_slots: VecDeque::from([0, 1, 2, 3]),
             next_session_id: 1,
             views,
+            metadata_bytes,
+            external_sessions,
         }
     }
 
@@ -435,6 +498,26 @@ impl WorkerState {
                     Ok(())
                 };
                 complete(reply, result);
+            }
+            Command::ReserveExternalDiscovery { reply } => {
+                let active = self
+                    .sessions
+                    .values()
+                    .filter(|session| !terminal(session.core.lifecycle()))
+                    .count();
+                let external = self.external_sessions.load(Ordering::Acquire);
+                if active.saturating_add(external) >= MAX_SESSIONS {
+                    complete(
+                        reply,
+                        Err(ScannerError::resource(
+                            "start discovery session",
+                            "at most four scan and discovery sessions may run in one Node environment",
+                        )),
+                    );
+                } else {
+                    self.external_sessions.fetch_add(1, Ordering::AcqRel);
+                    complete(reply, Ok(()));
+                }
             }
             Command::Start {
                 scanner_id,
@@ -600,12 +683,12 @@ impl WorkerState {
             .values()
             .filter(|session| !terminal(session.core.lifecycle()))
             .count();
-        if active >= MAX_SESSIONS {
+        if active.saturating_add(self.external_sessions.load(Ordering::Acquire)) >= MAX_SESSIONS {
             complete(
                 reply,
                 Err(ScannerError::resource(
                     "start session",
-                    "at most four scan sessions may run in one Node environment",
+                    "at most four scan and discovery sessions may run in one Node environment",
                 )),
             );
             return;
@@ -643,7 +726,14 @@ impl WorkerState {
             );
             return;
         };
-        match SessionCore::new(id, scanner_id, slot, plan, context) {
+        match SessionCore::new(
+            id,
+            scanner_id,
+            slot,
+            plan,
+            context,
+            Arc::clone(&self.metadata_bytes),
+        ) {
             Ok(core) => {
                 let view = Arc::new(SessionView::new(scanner_id));
                 view.state
@@ -768,8 +858,10 @@ fn run_worker(
     receiver: Receiver<Command>,
     accepting: Arc<AtomicBool>,
     views: Arc<Mutex<HashMap<u32, Arc<SessionView>>>>,
+    external_sessions: Arc<AtomicUsize>,
+    metadata_bytes: Arc<AtomicUsize>,
 ) {
-    let mut state = WorkerState::new(views);
+    let mut state = WorkerState::new(views, external_sessions, metadata_bytes);
     let mut events = Vec::with_capacity(8);
     let timeout = Timespec {
         tv_sec: 0,

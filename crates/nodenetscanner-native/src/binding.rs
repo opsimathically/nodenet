@@ -1,12 +1,26 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use napi::bindgen_prelude::{AsyncTask, Env};
-use napi::{Result, Task};
+use napi::bindgen_prelude::{AsyncTask, Env, Function};
+use napi::threadsafe_function::{
+    ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
+};
+use napi::{Result, Status, Task};
 use napi_derive::napi;
 use nodenet_linux_context::{NetworkSnapshot, RouteContext};
+use nodenet_protocols::{
+    DISCOVERY_OPERATION_REGISTRY, DISCOVERY_OPERATION_REGISTRY_VERSION, UDP_PROBE_CATALOGUE,
+    UDP_PROBE_CATALOGUE_VERSION, discovery_operation_registry_sha256_hex,
+    udp_probe_catalogue_sha256_hex,
+};
 
+use crate::discovery_session::{
+    DiscoveryControl, NativeDiscoveryProgress, NativeDiscoveryRun, run_discovery,
+};
 use crate::error::ScannerError;
-use crate::model::{DEFAULT_BATCH_RESULTS, MAX_BATCH_RESULTS, NativeScanPlan};
+use crate::model::{DEFAULT_BATCH_RESULTS, MAX_BATCH_RESULTS, NativeDiscoveryPlan, NativeScanPlan};
 use crate::runtime::{Command, RuntimeHandle};
 use crate::session::{NativePullResult, NativeScanProgress, NativeScanSummary, PullResult};
 
@@ -57,10 +71,105 @@ pub struct NativeNetworkContextSnapshot {
     pub neighbor_count: u32,
 }
 
+#[napi(object)]
+pub struct NativeUdpProbeCatalogueCapabilities {
+    pub version: String,
+    pub sha256: String,
+    pub variants: u32,
+}
+
+#[napi(object)]
+pub struct NativeDiscoveryOperationCapability {
+    pub id: u32,
+    pub name: String,
+    pub scope: String,
+    pub families: Vec<String>,
+    pub destination_port: u32,
+    pub required_risks: Vec<String>,
+    pub maximum_request_bytes: u32,
+    pub maximum_response_bytes: u32,
+    pub maximum_entities_per_query: u32,
+    pub maximum_metadata_bytes_per_query: u32,
+    pub response_window_ms: u32,
+    pub supports_follow_up: bool,
+    pub receive_modes: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeDiscoveryCapabilities {
+    pub registry_version: String,
+    pub registry_sha256: String,
+    pub schema_version: u32,
+    pub max_sessions: u32,
+    pub max_results: u32,
+    pub max_metadata_bytes: u32,
+    pub max_sockets: u32,
+    pub max_physical_queries: u32,
+    pub operations: Vec<NativeDiscoveryOperationCapability>,
+    pub no_go: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NativeDiscoveryFailure {
+    pub kind: String,
+    pub code: String,
+    pub operation: String,
+    pub errno: Option<i32>,
+    pub message: String,
+}
+
+impl From<ScannerError> for NativeDiscoveryFailure {
+    fn from(error: ScannerError) -> Self {
+        Self {
+            kind: error.kind.into(),
+            code: error.code.into(),
+            operation: error.operation.into(),
+            errno: error.errno,
+            message: error.message,
+        }
+    }
+}
+
+struct DiscoveryCompletion(std::result::Result<NativeDiscoveryRun, ScannerError>);
+
+#[napi(object)]
+pub struct NativeDiscoveryCompletion {
+    pub run: Option<NativeDiscoveryRun>,
+    pub error: Option<NativeDiscoveryFailure>,
+}
+
+impl From<DiscoveryCompletion> for NativeDiscoveryCompletion {
+    fn from(completion: DiscoveryCompletion) -> Self {
+        match completion.0 {
+            Ok(run) => Self {
+                run: Some(run),
+                error: None,
+            },
+            Err(error) => Self {
+                run: None,
+                error: Some(error.into()),
+            },
+        }
+    }
+}
+
+const DISCOVERY_COMPLETION_QUEUE_CAPACITY: usize = 1;
+type DiscoveryCompletionFunction = ThreadsafeFunction<
+    DiscoveryCompletion,
+    (),
+    NativeDiscoveryCompletion,
+    Status,
+    false,
+    false,
+    DISCOVERY_COMPLETION_QUEUE_CAPACITY,
+>;
+
 #[napi]
 pub struct NativeScanner {
     runtime: Arc<RuntimeHandle>,
     id: u32,
+    next_discovery_id: AtomicU32,
+    discoveries: Arc<Mutex<HashMap<u32, Arc<DiscoveryControl>>>>,
 }
 
 #[napi]
@@ -80,6 +189,111 @@ impl NativeScanner {
             scanner_id: self.id,
             plan: Some(plan),
         })
+    }
+
+    #[napi]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi-rs owns the JavaScript callback while constructing its threadsafe function"
+    )]
+    pub fn discover(
+        &self,
+        plan: NativeDiscoveryPlan,
+        discovery_id: u32,
+        callback: Function<'_, NativeDiscoveryCompletion, ()>,
+    ) -> Result<()> {
+        let plan = plan.validate().map_err(ScannerError::into_napi)?;
+        if discovery_id == 0 {
+            return Err(ScannerError::invalid(
+                "start discovery session",
+                "discovery identifier must be nonzero",
+            )
+            .into_napi());
+        }
+        let expected = self.next_discovery_id.fetch_add(1, Ordering::AcqRel);
+        if expected != discovery_id || expected == 0 {
+            return Err(ScannerError::resource(
+                "start discovery session",
+                "discovery identifiers must increase and may not be reused",
+            )
+            .into_napi());
+        }
+        let completion: DiscoveryCompletionFunction = callback
+            .build_threadsafe_function::<DiscoveryCompletion>()
+            .callee_handled::<false>()
+            .max_queue_size::<DISCOVERY_COMPLETION_QUEUE_CAPACITY>()
+            .build_callback(|context: ThreadsafeCallContext<DiscoveryCompletion>| {
+                Ok(NativeDiscoveryCompletion::from(context.value))
+            })?;
+        let permit = self
+            .runtime
+            .admit_external_discovery(plan.limits.max_metadata_bytes)
+            .map_err(ScannerError::into_napi)?;
+        let control = Arc::new(DiscoveryControl::new());
+        lock(&self.discoveries).insert(discovery_id, Arc::clone(&control));
+        let discoveries = Arc::clone(&self.discoveries);
+        let thread_control = Arc::clone(&control);
+        let spawn = thread::Builder::new()
+            .name(format!("nodenetscanner-discovery-{discovery_id}"))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_discovery(plan, &thread_control)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(ScannerError::internal(
+                        "run discovery session",
+                        "native discovery worker panicked",
+                    ))
+                });
+                lock(&discoveries).remove(&discovery_id);
+                let status = completion.call(
+                    DiscoveryCompletion(result),
+                    ThreadsafeFunctionCallMode::Blocking,
+                );
+                debug_assert!(matches!(status, Status::Ok | Status::Closing));
+                drop(permit);
+            });
+        if let Err(error) = spawn {
+            lock(&self.discoveries).remove(&discovery_id);
+            return Err(ScannerError::internal(
+                "start discovery session",
+                format!("failed to spawn discovery worker: {error}"),
+            )
+            .into_napi());
+        }
+        Ok(())
+    }
+
+    #[napi]
+    pub fn pause_discovery(&self, discovery_id: u32) -> Result<()> {
+        discovery_control(&self.discoveries, discovery_id)?
+            .pause()
+            .map_err(ScannerError::into_napi)
+    }
+
+    #[napi]
+    pub fn resume_discovery(&self, discovery_id: u32) -> Result<()> {
+        discovery_control(&self.discoveries, discovery_id)?
+            .resume()
+            .map_err(ScannerError::into_napi)
+    }
+
+    #[napi]
+    pub fn cancel_discovery(&self, discovery_id: u32) -> Result<()> {
+        discovery_control(&self.discoveries, discovery_id)?.cancel();
+        Ok(())
+    }
+
+    #[napi]
+    pub fn discovery_state(&self, discovery_id: u32) -> Result<String> {
+        Ok(discovery_control(&self.discoveries, discovery_id)?
+            .state_name()
+            .into())
+    }
+
+    #[napi]
+    pub fn discovery_progress(&self, discovery_id: u32) -> Result<NativeDiscoveryProgress> {
+        Ok(discovery_control(&self.discoveries, discovery_id)?.progress())
     }
 
     #[napi]
@@ -171,6 +385,9 @@ impl NativeScanner {
 
     #[napi]
     pub fn close(&self) -> AsyncTask<CloseScannerTask> {
+        for control in lock(&self.discoveries).values() {
+            control.cancel();
+        }
         AsyncTask::new(CloseScannerTask {
             runtime: Arc::clone(&self.runtime),
             scanner_id: self.id,
@@ -180,6 +397,9 @@ impl NativeScanner {
 
 impl Drop for NativeScanner {
     fn drop(&mut self) {
+        for control in lock(&self.discoveries).values() {
+            control.cancel();
+        }
         self.runtime.close_scanner_background(self.id);
     }
 }
@@ -190,12 +410,143 @@ pub fn create_native_scanner(env: Env) -> Result<NativeScanner> {
     let id = runtime
         .allocate_scanner_id()
         .map_err(ScannerError::into_napi)?;
-    Ok(NativeScanner { runtime, id })
+    Ok(NativeScanner {
+        runtime,
+        id,
+        next_discovery_id: AtomicU32::new(1),
+        discoveries: Arc::new(Mutex::new(HashMap::new())),
+    })
 }
 
 #[napi]
 pub fn inspect_network_context() -> AsyncTask<InspectTask> {
     AsyncTask::new(InspectTask)
+}
+
+#[napi]
+pub fn udp_probe_catalogue_capabilities() -> NativeUdpProbeCatalogueCapabilities {
+    NativeUdpProbeCatalogueCapabilities {
+        version: UDP_PROBE_CATALOGUE_VERSION.into(),
+        sha256: udp_probe_catalogue_sha256_hex(UDP_PROBE_CATALOGUE),
+        variants: u32::try_from(UDP_PROBE_CATALOGUE.len()).unwrap_or(u32::MAX),
+    }
+}
+
+#[napi]
+pub fn discovery_capabilities() -> NativeDiscoveryCapabilities {
+    NativeDiscoveryCapabilities {
+        registry_version: DISCOVERY_OPERATION_REGISTRY_VERSION.into(),
+        registry_sha256: discovery_operation_registry_sha256_hex(DISCOVERY_OPERATION_REGISTRY),
+        schema_version: 1,
+        max_sessions: 4,
+        max_results: 8_192,
+        max_metadata_bytes: 16 * 1_024 * 1_024,
+        max_sockets: 256,
+        max_physical_queries: 1_024,
+        operations: DISCOVERY_OPERATION_REGISTRY
+            .iter()
+            .map(|operation| NativeDiscoveryOperationCapability {
+                id: u32::from(operation.id.get()),
+                name: operation.name.into(),
+                scope: format!("{:?}", operation.scope),
+                families: match operation.families {
+                    nodenet_protocols::UdpAddressFamilies::Ipv4 => vec!["ipv4".into()],
+                    nodenet_protocols::UdpAddressFamilies::Ipv6 => vec!["ipv6".into()],
+                    nodenet_protocols::UdpAddressFamilies::Both => {
+                        vec!["ipv4".into(), "ipv6".into()]
+                    }
+                },
+                destination_port: u32::from(operation.destination_port),
+                required_risks: risk_names(operation.required_risks),
+                maximum_request_bytes: u32::try_from(operation.maximum_request_bytes)
+                    .unwrap_or(u32::MAX),
+                maximum_response_bytes: u32::try_from(operation.maximum_response_bytes)
+                    .unwrap_or(u32::MAX),
+                maximum_entities_per_query: u32::from(operation.maximum_entities_per_query),
+                maximum_metadata_bytes_per_query: operation.maximum_metadata_bytes_per_query,
+                response_window_ms: operation.response_window_ms,
+                supports_follow_up: operation.id.get() == 7,
+                receive_modes: if operation.id.get() == 1 {
+                    vec!["legacyUnicast".into()]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect(),
+        no_go: vec![
+            "mdns-full-port-5353-browse".into(),
+            "kerberos".into(),
+            "ikev1".into(),
+            "ikev2".into(),
+            "dtls".into(),
+            "dhcpv4-inform-host-namespace".into(),
+            "dhcpv6-information-request-host-namespace".into(),
+            "gtp".into(),
+            "mqtt-sn".into(),
+            "beckhoff-ads".into(),
+            "omron-fins".into(),
+            "teamspeak-discovery".into(),
+            "mumble-discovery".into(),
+            "quake-family-discovery".into(),
+            "cldap".into(),
+            "openvpn".into(),
+            "radius".into(),
+            "ubiquiti-discovery".into(),
+            "pcanywhere".into(),
+            "wireguard".into(),
+        ],
+    }
+}
+
+fn risk_names(risks: nodenet_protocols::UdpProbeRiskSet) -> Vec<String> {
+    [
+        (
+            nodenet_protocols::UdpProbeRisk::HighAmplification,
+            "highAmplification",
+        ),
+        (
+            nodenet_protocols::UdpProbeRisk::StatefulHandshake,
+            "statefulHandshake",
+        ),
+        (
+            nodenet_protocols::UdpProbeRisk::FixedSourcePort,
+            "fixedSourcePort",
+        ),
+        (
+            nodenet_protocols::UdpProbeRisk::MulticastOrBroadcast,
+            "multicastOrBroadcast",
+        ),
+        (
+            nodenet_protocols::UdpProbeRisk::AuthenticationAttempt,
+            "authenticationAttempt",
+        ),
+        (
+            nodenet_protocols::UdpProbeRisk::SensitiveRead,
+            "sensitiveRead",
+        ),
+    ]
+    .into_iter()
+    .filter(|(risk, _)| risks.contains(*risk))
+    .map(|(_, name)| name.into())
+    .collect()
+}
+
+fn discovery_control(
+    discoveries: &Mutex<HashMap<u32, Arc<DiscoveryControl>>>,
+    discovery_id: u32,
+) -> Result<Arc<DiscoveryControl>> {
+    lock(discoveries)
+        .get(&discovery_id)
+        .cloned()
+        .ok_or_else(|| {
+            ScannerError::lifecycle("control discovery", "unknown discovery session").into_napi()
+        })
+}
+
+fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub struct InspectTask;

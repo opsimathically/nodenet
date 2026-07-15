@@ -6,9 +6,10 @@ use nodenet_protocols::{
     ETHER_TYPE_IPV4, EthernetFrame, EthernetHeader, Icmpv4Message, Icmpv6Message, Icmpv6Packet,
     IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Packet, MacAddress, NdpContext,
     NdpMessage, NdpPacket, PacketKind, PacketPlan, PacketStart, ParseMode, Port, TcpFlags,
-    TcpSegment, TransportChecksumContext, UdpChecksumMode, UdpDatagram, VlanStack, inspect_packet,
-    parse_icmpv4_message, parse_icmpv6_message, parse_ndp_message, parse_network_frame,
-    parse_tcp_segment, parse_udp_datagram,
+    TcpSegment, TransportChecksumContext, UdpChecksumMode, UdpDatagram, UdpRequestPatch,
+    UdpRequestPatchField, UdpRequestPatchKind, UdpRequestPatchValue, UdpRequestPlan, VlanStack,
+    inspect_packet, parse_icmpv4_message, parse_icmpv6_message, parse_ndp_message,
+    parse_network_frame, parse_tcp_segment, parse_udp_datagram,
 };
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -179,4 +180,26 @@ fn allocation_contracts_are_exact() {
     assert_eq!(stats.allocations, 1);
     assert_eq!(stats.reallocations, 0);
     assert_eq!(stats.bytes_allocated, frame.len());
+
+    let request_plan = UdpRequestPlan::new(
+        &[0_u8; 8],
+        &[UdpRequestPatchField::new(
+            2,
+            UdpRequestPatchKind::U32BigEndian,
+        )],
+    )
+    .unwrap();
+    let mut request_output = [0_u8; 8];
+    let request_region = Region::new(GLOBAL);
+    let request = request_plan.instantiate_into(
+        &mut request_output,
+        &[UdpRequestPatch {
+            field_index: 0,
+            value: UdpRequestPatchValue::U32(0x0102_0304),
+        }],
+    );
+    let request_stats = request_region.change();
+    assert!(request.is_ok());
+    assert_eq!(request_stats.allocations, 0);
+    assert_eq!(request_stats.reallocations, 0);
 }

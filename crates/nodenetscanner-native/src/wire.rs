@@ -10,23 +10,29 @@ use nodenet_protocols::{
     Ipv4Address, Ipv4Packet, Ipv6Packet, MacAddress, NdpContext, NdpMessage, NdpOption, NdpPacket,
     ParseMode, ParsedArpPacket, ParsedIcmpv4Message, ParsedIcmpv6Message, ParsedNdpMessage,
     ParsedNdpOption, Port, ProbeIdentity, ResponseTuple, SessionSecret, TcpFlags, TcpSegment,
-    TransportChecksumContext, UdpChecksumMode, UdpDatagram, UpperLayerState, VlanStack, VlanTag,
-    VlanTagProtocol, classify_echo_reply, classify_quoted_response, classify_tcp_reply,
-    classify_udp_reply, compute_transport_checksum, parse_arp_packet, parse_ethernet_frame,
-    parse_icmpv4_message, parse_icmpv6_message, parse_ipv4_packet, parse_ipv6_packet,
-    parse_ndp_message, parse_tcp_segment, parse_udp_datagram,
+    TransportChecksumContext, UdpChecksumMode, UdpDatagram, UdpProbeBuildContext, UpperLayerState,
+    VlanStack, VlanTag, VlanTagProtocol, build_udp_catalogue_request, classify_echo_reply,
+    classify_quoted_response, classify_tcp_reply, classify_udp_reply, compute_transport_checksum,
+    parse_arp_packet, parse_ethernet_frame, parse_icmpv4_message, parse_icmpv6_message,
+    parse_ipv4_packet, parse_ipv6_packet, parse_ndp_message, parse_tcp_segment,
+    parse_udp_catalogue_response, parse_udp_datagram,
 };
 use nodenetscanner_engine::{
-    EmissionPurpose, EvidenceEvent, EvidenceKind, LogicalProbe, ProbeEmission, ProbeFamily,
+    EmissionPurpose, EvidenceEvent, EvidenceKind, IcmpEvidence, LogicalProbe, ProbeEmission,
+    ProbeFamily, UdpProbeVariant, UdpServiceConfidence, UdpServiceEvidence,
 };
 
 use crate::error::ScannerError;
-use crate::model::{SessionOptions, VlanOverride, to_protocol_address};
+use crate::model::{
+    SessionOptions, UdpProgramRequest, UdpRequestCorrelation, VlanOverride, to_protocol_address,
+};
 use crate::socket::{PacketMessage, PortableSockets, RawFamily, RawMessage};
 
 const PACKET_OUTGOING: u8 = 4;
 const SESSION_COUNT: u64 = 4;
 const ICMP_LANE_MASK: u32 = 0x3fff_ffff;
+const MAX_SERVICE_PARSER_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+const MAX_SERVICE_PARSER_BYTES_PER_TARGET_PER_TICK: usize = 256 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RouteBinding {
@@ -47,6 +53,7 @@ struct ProbeWire {
     token: CorrelationToken,
     route: RouteBindingKey,
     purpose: EmissionPurpose,
+    udp_variant: Option<UdpProbeVariant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -54,7 +61,7 @@ struct RouteBindingKey {
     probe_id: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ObservedEvidence {
     pub event: EvidenceEvent,
 }
@@ -77,6 +84,11 @@ pub(crate) struct WireState {
     icmp_lanes_by_probe: HashMap<u64, u32>,
     occupied_icmp_lanes: HashSet<u32>,
     next_icmp_lane: u32,
+    source_lanes_by_probe: HashMap<u64, u64>,
+    occupied_source_lanes: HashSet<u64>,
+    next_source_lane: u64,
+    service_parser_bytes: usize,
+    service_parser_bytes_by_target: HashMap<IpAddress, usize>,
     progress: WireProgress,
 }
 
@@ -93,6 +105,11 @@ impl WireState {
             icmp_lanes_by_probe: HashMap::new(),
             occupied_icmp_lanes: HashSet::new(),
             next_icmp_lane: 0,
+            source_lanes_by_probe: HashMap::new(),
+            occupied_source_lanes: HashSet::new(),
+            next_source_lane: 0,
+            service_parser_bytes: 0,
+            service_parser_bytes_by_target: HashMap::new(),
             progress: WireProgress::default(),
         }
     }
@@ -101,12 +118,59 @@ impl WireState {
         self.progress
     }
 
-    pub(crate) fn mark_terminal(&mut self, probe_ids: impl IntoIterator<Item = u64>) {
+    pub(crate) fn begin_receive_tick(&mut self) {
+        self.service_parser_bytes = 0;
+        self.service_parser_bytes_by_target.clear();
+    }
+
+    fn charge_service_parser(&mut self, target: IpAddress, bytes: usize) -> bool {
+        let target_bytes = self
+            .service_parser_bytes_by_target
+            .get(&target)
+            .copied()
+            .unwrap_or(0);
+        let Some(session_total) = self.service_parser_bytes.checked_add(bytes) else {
+            return false;
+        };
+        let Some(target_total) = target_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if session_total > MAX_SERVICE_PARSER_BYTES_PER_TICK
+            || target_total > MAX_SERVICE_PARSER_BYTES_PER_TARGET_PER_TICK
+        {
+            return false;
+        }
+        self.service_parser_bytes = session_total;
+        self.service_parser_bytes_by_target
+            .insert(target, target_total);
+        true
+    }
+
+    pub(crate) fn mark_terminal(&mut self, logical_ids: impl IntoIterator<Item = u64>) {
         let deadline = Instant::now()
             .checked_add(self.options.late_grace)
             .unwrap_or_else(Instant::now);
-        for probe_id in probe_ids {
-            self.terminal_deadlines.insert(probe_id, deadline);
+        for logical_id in logical_ids {
+            let matches: Vec<u64> = self
+                .probes
+                .iter()
+                .filter_map(|(wire_id, probe)| {
+                    (probe.probe.logical_id == logical_id).then_some(*wire_id)
+                })
+                .collect();
+            if matches.is_empty() {
+                self.terminal_deadlines.insert(logical_id, Instant::now());
+            } else {
+                let settled_programme = matches.iter().any(|wire_id| *wire_id != logical_id);
+                let probe_deadline = if settled_programme {
+                    Instant::now()
+                } else {
+                    deadline
+                };
+                for wire_id in matches {
+                    self.terminal_deadlines.insert(wire_id, probe_deadline);
+                }
+            }
         }
         self.prune_terminal();
     }
@@ -120,11 +184,35 @@ impl WireState {
             .collect();
         for probe_id in expired {
             self.terminal_deadlines.remove(&probe_id);
-            self.routes.remove(&probe_id);
+            let logical_id = self
+                .probes
+                .get(&probe_id)
+                .map_or(probe_id, |probe| probe.probe.logical_id);
             self.probes.remove(&probe_id);
             if let Some(lane) = self.icmp_lanes_by_probe.remove(&probe_id) {
                 self.occupied_icmp_lanes.remove(&lane);
             }
+            if let Some(lane) = self.source_lanes_by_probe.remove(&probe_id) {
+                self.occupied_source_lanes.remove(&lane);
+            }
+            if !self
+                .probes
+                .values()
+                .any(|probe| probe.probe.logical_id == logical_id)
+            {
+                self.routes.remove(&logical_id);
+            }
+        }
+    }
+
+    pub(crate) fn retire_physical(&mut self, probe_id: u64) {
+        self.terminal_deadlines.remove(&probe_id);
+        self.probes.remove(&probe_id);
+        if let Some(lane) = self.icmp_lanes_by_probe.remove(&probe_id) {
+            self.occupied_icmp_lanes.remove(&lane);
+        }
+        if let Some(lane) = self.source_lanes_by_probe.remove(&probe_id) {
+            self.occupied_source_lanes.remove(&lane);
         }
     }
 
@@ -138,12 +226,28 @@ impl WireState {
         self.routes.insert(probe_id, route);
     }
 
-    pub(crate) fn has_route(&self, probe_id: u64) -> bool {
-        self.routes.contains_key(&probe_id)
-    }
-
-    pub(crate) fn generation(&self, probe_id: u64) -> Option<u64> {
-        self.routes.get(&probe_id).map(|route| route.generation)
+    pub(crate) fn route_resolution(
+        &self,
+        probe_id: u64,
+        family: ProbeFamily,
+    ) -> Option<(u64, Option<ProbeFamily>)> {
+        let route = self.routes.get(&probe_id)?;
+        let neighbor_setup = if route.destination_mac.is_none()
+            && matches!(
+                route.kind,
+                RoutePlanKind::EthernetOnLink | RoutePlanKind::EthernetGateway
+            )
+            && !matches!(family, ProbeFamily::Arp | ProbeFamily::Ndp)
+        {
+            Some(if route.next_hop.is_ipv4() {
+                ProbeFamily::Arp
+            } else {
+                ProbeFamily::Ndp
+            })
+        } else {
+            None
+        };
+        Some((route.generation, neighbor_setup))
     }
 
     pub(crate) fn emit(
@@ -153,7 +257,7 @@ impl WireState {
     ) -> Result<(), ScannerError> {
         let route = self
             .routes
-            .get(&emission.probe_id)
+            .get(&emission.probe.logical_id)
             .cloned()
             .ok_or_else(|| ScannerError::internal("emit probe", "route binding is missing"))?;
         let (identity, icmp_identifier, icmp_sequence) =
@@ -162,7 +266,9 @@ impl WireState {
         let packet = match emission.purpose {
             EmissionPurpose::NeighborSetup(family) => Self::build_discovery(family, &route)?,
             EmissionPurpose::Probe => self.build_probe(
+                emission.probe_id,
                 emission.probe,
+                emission.udp_variant,
                 &route,
                 token,
                 icmp_identifier,
@@ -223,9 +329,10 @@ impl WireState {
                 identity,
                 token,
                 route: RouteBindingKey {
-                    probe_id: emission.probe_id,
+                    probe_id: emission.probe.logical_id,
                 },
                 purpose: emission.purpose,
+                udp_variant: emission.udp_variant,
             },
         );
         Ok(())
@@ -392,7 +499,74 @@ impl WireState {
                 };
                 for (probe_id, probe) in candidates {
                     if let Ok(evidence) = classify_udp_reply(probe.identity, tuple) {
-                        output.push(observed(probe_id, evidence.kind, evidence.strength, None));
+                        let service_context = probe.udp_variant.and_then(|variant| {
+                            let route = self.routes.get(&probe.route.probe_id)?;
+                            let request = self
+                                .options
+                                .udp_program
+                                .request_at(route.destination, variant.request_index)?;
+                            Some((
+                                request.catalogue_probe?,
+                                request.maximum_response_bytes,
+                                request.maximum_parser_bytes,
+                                route.source,
+                                route.destination,
+                            ))
+                        });
+                        let service = service_context.and_then(
+                            |(
+                                catalogue_probe,
+                                maximum_response,
+                                maximum_parser,
+                                route_source,
+                                route_destination,
+                            )| {
+                                if datagram.payload.len() > maximum_response
+                                    || datagram.payload.len() > maximum_parser
+                                    || !self.charge_service_parser(source, datagram.payload.len())
+                                {
+                                    return None;
+                                }
+                                let context = UdpProbeBuildContext {
+                                    source: to_protocol_address(route_source),
+                                    destination: to_protocol_address(route_destination),
+                                    source_port: datagram.destination_port.get(),
+                                    destination_port: datagram.source_port.get(),
+                                };
+                                let request_bytes = build_udp_catalogue_request(
+                                    catalogue_probe,
+                                    probe.token.payload_token(),
+                                    context,
+                                )
+                                .ok()?;
+                                let matched = parse_udp_catalogue_response(
+                                    catalogue_probe,
+                                    &request_bytes,
+                                    datagram.payload,
+                                )
+                                .ok()?;
+                                Some(UdpServiceEvidence {
+                                    family: matched.service_family,
+                                    confidence: match matched.confidence {
+                                        3 => UdpServiceConfidence::TransactionCorrelated,
+                                        2 => UdpServiceConfidence::Parsed,
+                                        _ => UdpServiceConfidence::Signature,
+                                    },
+                                    metadata: matched.metadata,
+                                })
+                            },
+                        );
+                        let strength = if service.as_ref().is_some_and(|value| {
+                            value.confidence == UdpServiceConfidence::TransactionCorrelated
+                        }) {
+                            protocol_strength(probe.udp_variant.and_then(|v| {
+                                v.catalogue_probe_id
+                                    .map(nodenetscanner_engine::ProbeVariantId::get)
+                            }))
+                        } else {
+                            evidence.strength
+                        };
+                        output.push(observed_service(probe_id, evidence.kind, strength, service));
                         break;
                     }
                 }
@@ -436,30 +610,56 @@ impl WireState {
                                 && let Ok(evidence) =
                                     classify_quoted_response(probe.identity, *quote, probe.token)
                             {
-                                output.push(observed(
+                                output.push(observed_icmp(
                                     probe_id,
                                     evidence.kind,
                                     evidence.strength,
-                                    Some(code),
+                                    4,
+                                    3,
+                                    code,
+                                    source == probe.identity.destination(),
                                 ));
                                 break;
                             }
                         }
                         ParsedIcmpv4Message::TimeExceeded {
-                            ref quoted_packet, ..
-                        }
-                        | ParsedIcmpv4Message::ParameterProblem {
-                            ref quoted_packet, ..
+                            code,
+                            ref quoted_packet,
+                            ..
                         } => {
                             if let Ok(quote) = quoted_packet
                                 && let Ok(evidence) =
                                     classify_quoted_response(probe.identity, *quote, probe.token)
                             {
-                                output.push(observed(
+                                output.push(observed_icmp(
                                     probe_id,
                                     evidence.kind,
                                     evidence.strength,
-                                    Some(255),
+                                    4,
+                                    11,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv4Message::ParameterProblem {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    4,
+                                    12,
+                                    code,
+                                    source == probe.identity.destination(),
                                 ));
                                 break;
                             }
@@ -513,33 +713,75 @@ impl WireState {
                                 && let Ok(evidence) =
                                     classify_quoted_response(probe.identity, *quote, probe.token)
                             {
-                                output.push(observed(
+                                output.push(observed_icmp(
                                     probe_id,
                                     evidence.kind,
                                     evidence.strength,
-                                    Some(code),
+                                    6,
+                                    1,
+                                    code,
+                                    source == probe.identity.destination(),
                                 ));
                                 break;
                             }
                         }
                         ParsedIcmpv6Message::PacketTooBig {
                             ref quoted_packet, ..
-                        }
-                        | ParsedIcmpv6Message::TimeExceeded {
-                            ref quoted_packet, ..
-                        }
-                        | ParsedIcmpv6Message::ParameterProblem {
-                            ref quoted_packet, ..
                         } => {
                             if let Ok(quote) = quoted_packet
                                 && let Ok(evidence) =
                                     classify_quoted_response(probe.identity, *quote, probe.token)
                             {
-                                output.push(observed(
+                                output.push(observed_icmp(
                                     probe_id,
                                     evidence.kind,
                                     evidence.strength,
-                                    Some(255),
+                                    6,
+                                    2,
+                                    0,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::TimeExceeded {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    3,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::ParameterProblem {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    4,
+                                    code,
+                                    source == probe.identity.destination(),
                                 ));
                                 break;
                             }
@@ -705,7 +947,7 @@ impl WireState {
         Ok((identity, icmp_identifier, icmp_sequence))
     }
 
-    fn source_port(&self, probe_id: u64) -> Result<u16, ScannerError> {
+    fn source_port(&mut self, probe_id: u64) -> Result<u16, ScannerError> {
         let span = self
             .options
             .source_port_end
@@ -721,8 +963,30 @@ impl WireState {
                 "scanner session slot or source-port partition is invalid",
             ));
         }
+        let lane = if let Some(lane) = self.source_lanes_by_probe.get(&probe_id) {
+            *lane
+        } else {
+            let search_limit = self.occupied_source_lanes.len().saturating_add(1);
+            let mut selected = None;
+            for _ in 0..search_limit {
+                let candidate = self.next_source_lane % ports_per_session;
+                self.next_source_lane = candidate.saturating_add(1) % ports_per_session;
+                if self.occupied_source_lanes.insert(candidate) {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            let lane = selected.ok_or_else(|| {
+                ScannerError::resource(
+                    "allocate source port",
+                    "the session source-port correlation space is exhausted",
+                )
+            })?;
+            self.source_lanes_by_probe.insert(probe_id, lane);
+            lane
+        };
         let slot_start = u64::from(self.session_slot) * ports_per_session;
-        let offset = slot_start + (probe_id % ports_per_session);
+        let offset = slot_start + lane;
         let offset = u16::try_from(offset).map_err(|_| {
             ScannerError::internal("allocate source port", "source-port offset overflowed")
         })?;
@@ -796,9 +1060,16 @@ impl WireState {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "physical identity, programme selection, route, and ICMP fields are independently audited inputs"
+    )]
     fn build_probe(
-        &self,
+        &mut self,
+        wire_id: u64,
         probe: LogicalProbe,
+        udp_variant: Option<UdpProbeVariant>,
         route: &RouteBinding,
         token: CorrelationToken,
         icmp_identifier: u16,
@@ -807,6 +1078,11 @@ impl WireState {
         if matches!(probe.family, ProbeFamily::Arp | ProbeFamily::Ndp) {
             return Self::build_discovery(probe.family, route);
         }
+        let source_port = if probe.family.uses_ports() {
+            self.source_port(wire_id)?
+        } else {
+            0
+        };
         let payload_token = token.payload_token();
         let transport = match probe.family {
             ProbeFamily::Icmpv4Echo => Icmpv4Message::EchoRequest {
@@ -826,7 +1102,7 @@ impl WireState {
             .build()?,
             ProbeFamily::TcpSyn => TcpSegment {
                 checksum_context: transport_context(route.source, route.destination)?,
-                source_port: Port::new(self.source_port(probe.logical_id)?),
+                source_port: Port::new(source_port),
                 destination_port: Port::new(
                     probe
                         .port
@@ -845,17 +1121,45 @@ impl WireState {
             }
             .build()?,
             ProbeFamily::Udp => {
-                let user = match route.destination {
-                    IpAddr::V4(_) => &self.options.udp_payload_v4,
-                    IpAddr::V6(_) => &self.options.udp_payload_v6,
+                let request = self
+                    .options
+                    .udp_program
+                    .request_at(
+                        route.destination,
+                        udp_variant.map_or(0, |variant| variant.request_index),
+                    )
+                    .ok_or_else(|| {
+                        ScannerError::internal(
+                            "build UDP",
+                            "UDP request programme is missing for the destination family",
+                        )
+                    })?;
+                let payload = if let Some(catalogue_probe) = request.catalogue_probe {
+                    build_udp_catalogue_request(
+                        catalogue_probe,
+                        payload_token,
+                        UdpProbeBuildContext {
+                            source: to_protocol_address(route.source),
+                            destination: to_protocol_address(route.destination),
+                            source_port,
+                            destination_port: probe
+                                .port
+                                .ok_or_else(|| {
+                                    ScannerError::internal("build UDP", "destination port missing")
+                                })?
+                                .get(),
+                        },
+                    )
+                    .map_err(|error| {
+                        ScannerError::internal("build UDP protocol request", format!("{error:?}"))
+                    })?
+                } else {
+                    compose_udp_request_payload(request, &payload_token)
                 };
-                let mut payload = Vec::with_capacity(16 + user.len());
-                payload.extend_from_slice(&payload_token);
-                payload.extend_from_slice(user);
                 UdpDatagram {
                     checksum_context: transport_context(route.source, route.destination)?,
                     checksum_mode: UdpChecksumMode::Compute,
-                    source_port: Port::new(self.source_port(probe.logical_id)?),
+                    source_port: Port::new(source_port),
                     destination_port: Port::new(
                         probe
                             .port
@@ -881,10 +1185,24 @@ impl WireState {
             route.source,
             route.destination,
             protocol,
-            probe.logical_id,
+            wire_id,
             &transport,
         )
     }
+}
+
+fn compose_udp_request_payload(request: &UdpProgramRequest, token: &[u8; 16]) -> Vec<u8> {
+    let prefix_length = if request.correlation == UdpRequestCorrelation::PrefixToken {
+        token.len()
+    } else {
+        0
+    };
+    let mut payload = Vec::with_capacity(prefix_length + request.payload.len());
+    if request.correlation == UdpRequestCorrelation::PrefixToken {
+        payload.extend_from_slice(token);
+    }
+    payload.extend_from_slice(&request.payload);
+    payload
 }
 
 fn complete_offloaded_checksum(
@@ -1082,7 +1400,63 @@ fn observed(
             probe_id,
             kind,
             strength,
+            icmp: None,
+            udp_service: None,
         },
+    }
+}
+
+fn observed_icmp(
+    probe_id: u64,
+    kind: CorrelationEvidenceKind,
+    strength: EvidenceStrength,
+    family: u8,
+    message_type: u8,
+    code: u8,
+    emitter_is_target: bool,
+) -> ObservedEvidence {
+    let kind = match (family, message_type, code) {
+        (4, 3, 3) | (6, 1, 4) => EvidenceKind::IcmpPortUnreachable,
+        (4, 3, 0 | 1 | 2 | 5 | 6 | 7 | 9 | 10 | 13) | (6, 1, 0..=7) => {
+            EvidenceKind::ExplicitUnreachable
+        }
+        _ if kind == CorrelationEvidenceKind::IcmpErrorQuote => EvidenceKind::IcmpOtherError,
+        _ => EvidenceKind::IcmpOtherError,
+    };
+    ObservedEvidence {
+        event: EvidenceEvent {
+            probe_id,
+            kind,
+            strength,
+            icmp: Some(IcmpEvidence {
+                family,
+                message_type,
+                code,
+                emitter_is_target,
+                quote_strength: strength,
+            }),
+            udp_service: None,
+        },
+    }
+}
+
+fn observed_service(
+    probe_id: u64,
+    kind: CorrelationEvidenceKind,
+    strength: EvidenceStrength,
+    udp_service: Option<UdpServiceEvidence>,
+) -> ObservedEvidence {
+    let mut value = observed(probe_id, kind, strength, None);
+    value.event.udp_service = udp_service;
+    value
+}
+
+fn protocol_strength(probe_id: Option<u16>) -> EvidenceStrength {
+    match probe_id {
+        Some(1 | 6 | 7 | 8 | 10 | 14 | 16) => EvidenceStrength::ProtocolTransaction16,
+        Some(3 | 4 | 11 | 15) => EvidenceStrength::ProtocolTransaction32,
+        Some(2 | 5 | 12) => EvidenceStrength::ProtocolTransaction64,
+        _ => EvidenceStrength::TupleCorrelatedUnauthenticated,
     }
 }
 
@@ -1092,8 +1466,7 @@ mod tests {
 
     fn session_options(source_port_start: u16, source_port_end: u16) -> SessionOptions {
         SessionOptions {
-            udp_payload_v4: Vec::new(),
-            udp_payload_v6: Vec::new(),
+            udp_program: crate::model::UdpProbeProgram::default(),
             source_address: None,
             interface: None,
             vlan: None,
@@ -1101,7 +1474,61 @@ mod tests {
             source_port_end,
             seed: 0,
             late_grace: std::time::Duration::ZERO,
+            result_schema_version: 1,
         }
+    }
+
+    #[test]
+    fn exact_custom_udp_payload_is_not_prefixed_or_mutated() {
+        let request = UdpProgramRequest {
+            catalogue_probe_id: None,
+            payload: vec![0, 1, 2, 0xff],
+            correlation: UdpRequestCorrelation::Tuple,
+            catalogue_probe: None,
+            maximum_response_bytes: 0,
+            maximum_parser_bytes: 0,
+            maximum_state_lifetime_ms: 0,
+            service_family: None,
+            eligibility: nodenetscanner_engine::UdpVariantEligibility::AnyPort,
+        };
+        assert_eq!(
+            compose_udp_request_payload(&request, &[0xaa; 16]),
+            request.payload
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_udp_payload_retains_the_token_prefix() {
+        let request = UdpProgramRequest {
+            catalogue_probe_id: None,
+            payload: vec![1, 2, 3],
+            correlation: UdpRequestCorrelation::PrefixToken,
+            catalogue_probe: None,
+            maximum_response_bytes: 0,
+            maximum_parser_bytes: 0,
+            maximum_state_lifetime_ms: 0,
+            service_family: None,
+            eligibility: nodenetscanner_engine::UdpVariantEligibility::AnyPort,
+        };
+        let payload = compose_udp_request_payload(&request, &[0xaa; 16]);
+        assert_eq!(&payload[..16], &[0xaa; 16]);
+        assert_eq!(&payload[16..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn service_parser_work_is_bounded_per_target_and_session_each_tick() {
+        let mut wire = WireState::new([7; 32], 0, session_options(49_152, 65_535));
+        let first = IpAddress::V4(Ipv4Address::new([192, 0, 2, 1]));
+        assert!(wire.charge_service_parser(first, 256 * 1024));
+        assert!(!wire.charge_service_parser(first, 1));
+        for suffix in 2..=16 {
+            let target = IpAddress::V4(Ipv4Address::new([192, 0, 2, suffix]));
+            assert!(wire.charge_service_parser(target, 256 * 1024));
+        }
+        let final_target = IpAddress::V4(Ipv4Address::new([192, 0, 2, 17]));
+        assert!(!wire.charge_service_parser(final_target, 1));
+        wire.begin_receive_tick();
+        assert!(wire.charge_service_parser(first, 1));
     }
 
     #[test]
@@ -1183,13 +1610,84 @@ mod tests {
     fn odd_source_port_ranges_are_partitioned_without_session_overlap() {
         let mut ports = HashSet::new();
         for slot in 0..4 {
-            let wire = WireState::new([0; 32], slot, session_options(60_000, 60_004));
-            for probe_id in 0..16 {
-                let port = wire.source_port(probe_id).unwrap();
-                assert_eq!(port, 60_000 + u16::from(slot));
-                ports.insert(port);
-            }
+            let mut wire = WireState::new([0; 32], slot, session_options(60_000, 60_004));
+            let port = wire.source_port(0).unwrap();
+            assert_eq!(wire.source_port(0).unwrap(), port);
+            assert!(wire.source_port(1).is_err());
+            assert_eq!(port, 60_000 + u16::from(slot));
+            ports.insert(port);
         }
         assert_eq!(ports, HashSet::from([60_000, 60_001, 60_002, 60_003]));
+    }
+
+    #[test]
+    fn source_port_lanes_do_not_collide_and_return_after_terminal_grace() {
+        let mut wire = WireState::new([0; 32], 0, session_options(60_000, 60_007));
+        let first = wire.source_port(7).unwrap();
+        let second = wire.source_port(15).unwrap();
+        assert_ne!(
+            first, second,
+            "wire IDs with the same modulo need distinct lanes"
+        );
+        assert!(wire.source_port(23).is_err());
+        wire.mark_terminal([7]);
+        assert_eq!(wire.source_port(23).unwrap(), first);
+    }
+
+    #[test]
+    fn physical_retirement_releases_lane_but_preserves_logical_route() {
+        let mut wire = WireState::new([0; 32], 0, session_options(60_000, 60_007));
+        wire.insert_route(
+            1,
+            RouteBinding {
+                generation: 1,
+                kind: RoutePlanKind::Local,
+                interface_index: 1,
+                source: "127.0.0.1".parse().unwrap(),
+                destination: "127.0.0.1".parse().unwrap(),
+                next_hop: "127.0.0.1".parse().unwrap(),
+                source_mac: None,
+                destination_mac: None,
+            },
+        );
+        wire.source_port(100).unwrap();
+        wire.retire_physical(100);
+        assert!(wire.source_lanes_by_probe.is_empty());
+        assert!(wire.routes.contains_key(&1));
+        wire.mark_terminal([1]);
+        assert!(!wire.routes.contains_key(&1));
+    }
+
+    #[test]
+    fn cached_unresolved_routes_keep_neighbor_setup_until_session_learning() {
+        let mut wire = WireState::new([0; 32], 0, session_options(49_152, 65_535));
+        let probe_id = 42;
+        wire.insert_route(
+            probe_id,
+            RouteBinding {
+                generation: 7,
+                kind: RoutePlanKind::EthernetOnLink,
+                interface_index: 3,
+                source: "192.0.2.1".parse().unwrap(),
+                destination: "192.0.2.2".parse().unwrap(),
+                next_hop: "192.0.2.2".parse().unwrap(),
+                source_mac: Some([0, 1, 2, 3, 4, 5]),
+                destination_mac: None,
+            },
+        );
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::TcpSyn),
+            Some((7, Some(ProbeFamily::Arp)))
+        );
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::Arp),
+            Some((7, None))
+        );
+
+        wire.learn_neighbor(3, "192.0.2.2".parse().unwrap(), [6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::TcpSyn),
+            Some((7, None))
+        );
     }
 }

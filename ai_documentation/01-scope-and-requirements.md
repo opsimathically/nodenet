@@ -6,11 +6,11 @@ The `nodenet` workspace develops independently scoped Linux-native Node.js
 networking packages. `nodenetraw` provides applications with a memory-safe,
 resource-safe bridge to raw packet networking. TypeScript defines its public
 API; Rust owns descriptors, buffers, asynchronous state, and the Linux syscall
-boundary through Node-API. `nodenetscanner` is reserved for the accepted future
-scanner-specific control/results API and Rust data plane. Its public API has not
-started, while the shared syscall-free `nodenet-protocols` codec/correlation
-foundation and the read-only `nodenet-linux-context` snapshot, resolution, and
-coherent-refresh crate are complete through Phase 20.
+boundary through Node-API. `nodenetscanner` provides the implemented
+scanner-specific control/results API and Rust data plane. Its shared syscall-
+free protocol/scheduler foundations, read-only Linux context, portable live
+runtime, bounded batches, and release-candidate hardening are complete through
+Phase 25.
 
 The target is practical full capability, not a permanently narrow convenience
 wrapper. The library should eventually expose enough typed and bounded
@@ -66,6 +66,14 @@ The separate scanner baseline must cover:
 6. independent hardening and release gates for the scanner package;
 7. an optional higher-performance backend only after the portable package is
    release-capable and measurements satisfy the accepted improvement threshold.
+8. independently authored, port-associated UDP protocol requests, bounded
+   multi-variant scheduling, specification-valid correlation, typed service
+   evidence, and exact empty/custom fallbacks without ingesting Nmap code or
+   data.
+9. a separately bounded finite discovery session with explicit link and target
+   scopes for one-to-many responders or entities, followed by registered same-
+   target derived endpoints, alternate-response-port protocols, and reviewed
+   stateful UDP discovery without changing the raw package's policy-free scope.
 
 The first portable scanner supports Ethernet II with up to two VLAN tags and
 local/loopback IP routes. Other hardware types, tunnels, point-to-point links,
@@ -79,7 +87,10 @@ policy.
 The detailed capability matrix and sequencing live in
 [the full-capability plan](11-full-capability-plan.md) for `nodenetraw` and the
 [network and scanner evolution plan](31-network-and-scanner-evolution-plan.md)
-for `nodenetscanner` and its internal Rust crates.
+plus the [UDP protocol-probe parity plan](43-udp-probe-parity-plan.md) for
+`nodenetscanner` and its internal Rust crates. The accepted next discovery
+direction is in the
+[advanced UDP discovery evolution plan](53-advanced-udp-discovery-evolution-plan.md).
 
 ## Functional requirements
 
@@ -187,6 +198,22 @@ data plane and D-039 selected `no-go`; Phase 26 is closed unless a new positive
 evidence decision and plan review reopen it. These phases do not expand
 `nodenetraw`'s public scope.
 
+Phases 27 through 31 implement the protocol-aware UDP foundations, bounded
+multi-subprobe aggregation, unchanged nine-probe safe core, extended standards
+pack, comprehensive/legacy catalogue, finite signature engine, checked port
+ranges, and executable capability ledger with independent native risk
+enforcement. Phases 32 and 33 retain adaptive service-aware policy and the final
+parity/hardening audit. The work remains inside `nodenetscanner`; it does not
+add upper-layer policy to `nodenetraw` or reopen the rejected extreme backend.
+
+Phases 34 through 44 plan a separate finite discovery session, mDNS/DNS-SD,
+WS-Discovery/LLMNR, bounded derived and alternate endpoints, high-yield targeted
+protocols, reviewed QUIC/IKE/DTLS handshakes, DHCP topology discovery, optional
+specialized packs, and an integrated release audit. D-050 closes the discovery
+foundation readiness review, so Phase 34 is implementation-ready. Later protocol
+phases remain dependent on preceding exit gates; no planned protocol is
+implementation-approved merely because it appears in the roadmap.
+
 ## Definition of project success
 
 The raw package is successful when its capability baseline is implemented for
@@ -195,4 +222,7 @@ its portable baseline produces accurate, bounded results through a stable batch
 API; unsupported combinations fail predictably; resource, memory, cancellation,
 and teardown invariants hold under stress; and its artifacts are reproducible
 and documented. An extreme backend is an optimization, not a condition of
-scanner success. Breadth without those properties is not completion.
+scanner success. Breadth without those properties is not completion. UDP parity
+is successful only when the independently sourced coverage ledger and responder
+matrix have no unreported gap for the claimed scope; a generic payload, copied
+third-party database, or unverified protocol list is not completion.

@@ -72,3 +72,39 @@ test(
     await scanner.close();
   },
 );
+
+test(
+  "mixed subnet scans preserve neighbor setup across prefix deferral",
+  { skip: !enabled, timeout: 30_000 },
+  async () => {
+    const scanner = await createScanner();
+    const session = await scanner.start({
+      targets: [{ cidr: "192.0.2.0/24" }],
+      exclude: [{ cidr: "192.0.2.1/32" }],
+      probes: [
+        { kind: "arp" },
+        { kind: "icmpEcho", family: "ipv4" },
+        { kind: "tcpSyn", ports: [{ start: 20, end: 24 }] },
+      ],
+      deadlineMs: 10_000,
+      interface: "scan0",
+      sourceAddress: "192.0.2.1",
+      timing: { timeoutMs: 200, retries: 0 },
+      rate: { packetsPerSecond: 20_000, burst: 256, maxOutstanding: 2_048 },
+    });
+    const summary = await session.summary();
+    assert.equal(summary.state, "completed");
+    assert.equal(summary.logicalProbes, 1_785n);
+    assert.equal(summary.results, summary.logicalProbes);
+    assert.equal(summary.error, undefined);
+    let drained = 0;
+    while (true) {
+      const batch = await session.nextBatch({ maxResults: 4_096 });
+      if (batch === null) break;
+      drained += batch.length;
+    }
+    assert.equal(BigInt(drained), summary.results);
+    await session.close();
+    await scanner.close();
+  },
+);

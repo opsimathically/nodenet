@@ -173,6 +173,51 @@ impl TargetSet {
         self.ipv4_count + self.ipv6_count
     }
 
+    /// Reports whether one fully scoped endpoint belongs to this normalized set.
+    #[must_use]
+    pub fn contains(&self, endpoint: TargetEndpoint) -> bool {
+        let (family, numeric) = address_numeric(endpoint.address);
+        let group = GroupKey {
+            family,
+            scope: endpoint.scope,
+        };
+        self.intervals.iter().any(|interval| {
+            interval.raw.group == group
+                && interval.raw.start <= numeric
+                && numeric <= interval.raw.end
+        })
+    }
+
+    /// Reports whether the compact set intersects IPv4 multicast, the limited
+    /// broadcast address, or IPv6 multicast without expanding target ranges.
+    #[must_use]
+    pub fn contains_multicast_or_limited_broadcast(&self) -> bool {
+        self.intervals
+            .iter()
+            .any(|interval| match interval.raw.group.family {
+                4 => {
+                    ranges_intersect(
+                        interval.raw.start,
+                        interval.raw.end,
+                        0xe000_0000,
+                        0xefff_ffff,
+                    ) || ranges_intersect(
+                        interval.raw.start,
+                        interval.raw.end,
+                        0xffff_ffff,
+                        0xffff_ffff,
+                    )
+                }
+                6 => ranges_intersect(
+                    interval.raw.start,
+                    interval.raw.end,
+                    0xff00_0000_0000_0000_0000_0000_0000_0000,
+                    u128::MAX,
+                ),
+                _ => false,
+            })
+    }
+
     /// Lazily resolves one family-relative address index.
     #[must_use]
     pub fn target_at_family(&self, family: u8, index: u64) -> Option<ScanTarget> {
@@ -195,6 +240,10 @@ impl TargetSet {
             scope: interval.raw.group.scope,
         })
     }
+}
+
+const fn ranges_intersect(start: u128, end: u128, other_start: u128, other_end: u128) -> bool {
+    start <= other_end && other_start <= end
 }
 
 fn merge_inputs(inputs: &[TargetInput]) -> Result<Vec<RawInterval>, TargetError> {

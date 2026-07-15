@@ -343,7 +343,7 @@ fn validate_deadline(deadline: Duration) -> Result<(), SnapshotError> {
 
 fn reserve_pending(pending: &AtomicUsize) -> Result<(), SnapshotError> {
     pending
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             (value < MAX_PENDING_ROUTE_QUERIES).then_some(value + 1)
         })
         .map(|_| ())

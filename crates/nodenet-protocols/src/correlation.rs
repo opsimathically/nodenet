@@ -220,6 +220,14 @@ pub enum EvidenceStrength {
     StrongTcpSequence32,
     /// The exact 128-bit HMAC-derived payload token was returned or quoted.
     StrongPayload128,
+    /// A protocol-defined transaction field up to 16 bits matched.
+    ProtocolTransaction16,
+    /// A protocol-defined transaction field up to 32 bits matched.
+    ProtocolTransaction32,
+    /// A protocol-defined transaction field at least 64 bits matched.
+    ProtocolTransaction64,
+    /// A specification-validated alternate endpoint handshake matched.
+    AlternateEndpointHandshake,
 }
 
 /// Protocol meaning of a successfully correlated response.

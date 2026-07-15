@@ -730,6 +730,261 @@ The exact Phase 16–26 deliverables, bounds, APIs, dependency gates, test
 topologies, research basis, and stop conditions are authoritative in the
 [network and scanner evolution plan](31-network-and-scanner-evolution-plan.md).
 
+## Phase 27 — UDP probe foundation and provenance contract
+
+Status: complete; implemented 2026-07-14
+
+Define the independently authored UDP catalogue, stable probe IDs, profiles,
+risk/provenance fields, profile-independent risk consent, exact and dynamically
+patched request plans, explicit custom exact versus legacy prefix-token
+behavior, catalogue generator/checker, fallback/strategy rules, and the exact
+schema-2 decoder/layout. Remove the native one-payload-per-family limitation
+without adding protocol breadth or any Nmap build/runtime dependency.
+
+Exit gate: exact custom bytes capture unchanged, catalogue/provenance validation
+is deterministic and bounded, independent per-probe programmes survive native
+admission, and the API/resource/license contract is frozen.
+
+## Phase 28 — Multi-probe UDP scheduling and aggregation
+
+Status: complete; implemented 2026-07-14
+
+Represent one logical target/port as a bounded lazy sequence of physical UDP
+subprobes. Rate-charge every variant/retry, reserve one terminal result plus
+finite correlation state, preserve fairness and source-port/grace isolation, and
+aggregate direct/ICMP/silence evidence through an arrival-order-independent
+lattice. Physical work owns `maxOutstanding`; row and metadata-byte reservation
+occur before transmission.
+
+Exit gate: virtual and live matrices settle every logical endpoint exactly once
+under multiple variants, loss, retries, contradictions, deferral, backpressure,
+cancellation, and four-session concurrency with memory proportional to active
+work.
+
+## Phase 29 — Safe standards-based UDP probe pack
+
+Status: complete; implemented 2026-07-14
+
+Implement a reviewable low-impact core of independently specified,
+protocol-valid builders and strict parsers for unicast DNS, NTP, SNMPv3 engine
+discovery, RPC portmapper NULL, STUN, CoAP ping, RMCP/IPMI, memcached version,
+and low-impact PCP ANNOUNCE. Add typed bounded service evidence, begin schema-2
+emission, and make protocol-aware safe mode the default for an omitted UDP
+policy.
+
+Exit gate: independent golden vectors and dual-stack responders prove every safe
+request, correlation field, port state, and service-family result; exact capture
+proves no private prefix corrupts protocol requests.
+
+## Phase 30 — Extended standards pack and explicit-risk enforcement
+
+Status: complete; implemented 2026-07-14
+
+Add independently specified mDNS/DNS-SD, NetBIOS node status, NFS, TFTP, SIP,
+SSDP, IKE/L2TP, DTLS/QUIC, OpenVPN, RADIUS, SNMPv1, memcached statistics, and
+DHCP candidates only where their protocol and dependency reviews pass. Enforce
+amplification, stateful, fixed-source, multicast/broadcast,
+authentication-attempt, and sensitive-read consent independently from catalogue
+profile breadth.
+
+Exit gate: every accepted extended request has independent provenance, bounded
+live behavior, explicit impact classification, and responder evidence; adding
+broader entries does not alter or weaken safe mode.
+
+## Phase 31 — Comprehensive and legacy UDP catalogue parity
+
+Status: complete; implemented 2026-07-14
+
+Expand independently authored coverage across the behavioral scope, including
+multiple variants, legacy/proprietary services, reviewed source constraints, and
+a finite non-backtracking response-signature DSL. The repository ledger is
+primary-source-derived; any Nmap mapping remains a separate non-distributed
+owner audit.
+
+Exit gate: every project candidate is equivalent, standards-superseded,
+unsafe-opt-in, or blocked with independent evidence. No parity claim is made in
+this phase.
+
+## Phase 32 — Adaptive probing and scanner schema 2
+
+Status: complete; implemented 2026-07-14
+
+Order likely requests first, narrow follow-ups from soft service evidence, stop
+unsent variants on decisive evidence, pace conservatively under ICMP rate
+limiting, and freeze public profile/risk/intensity/strategy/fallback,
+catalogue-version, custom-probe, logical/physical progress, service-confidence,
+and schema-2 view semantics. Preserve schema-1 decoding rather than
+reinterpreting old columns.
+
+Exit gate: preregistered independent responder measurements show adaptive mode
+preserves definitive states and service-family recall while reducing physical
+requests or time to evidence; otherwise exhaustive mapped mode remains default.
+
+## Phase 33 — UDP parity audit and release candidate
+
+Status: implementation complete 2026-07-14; publication awaits native AArch64
+execution
+
+Audit provenance, parity scope, hostile parsing, fuzz/sanitizer/fault behavior,
+dual-stack namespaces, lifecycle stress, resource bounds, artifacts, consumers,
+reproducibility, and operator documentation. Compare aggregate behavior with the
+frozen Nmap reference only through non-distributed manual evaluation on an
+owner-controlled responder matrix. Do not claim complete Nmap service/version
+compatibility.
+
+Exit gate: the project capability ledger and external comparison have no
+unreported gap, all available quality and release gates pass, documentation
+states network impact and confidence correctly, and the scanner advances to
+unpublished `0.2.0-rc.1`. Native AArch64 execution remains the mandatory
+publication gate; see the [Phase 33 report](51-phase-33-report.md).
+
+The authoritative Phase 27–33 scope, ownership, licensing boundary, proposed
+API/schema, resource ceilings, verification matrix, and stop conditions are in
+the [UDP protocol-probe parity plan](43-udp-probe-parity-plan.md). Its readiness
+audit is [the UDP plan review](44-udp-probe-parity-plan-review.md).
+
+## Phases 34–44 — Advanced UDP and link discovery evolution
+
+Status: implementation complete; Phase 44 external release gates remain
+
+The next roadmap adds discovery protocols that cannot honestly use the current
+one-result-per-`(target, UDP port)` model. D-049 accepts a separate finite
+discovery session for one-query/many-responder protocols, a bounded
+evidence-derived endpoint graph for services on dynamic ports, registered-only
+alternate-response-port correlation, and bounded state machines for modern
+secure UDP transports. Existing scan schemas and catalogue identities remain
+unchanged until an explicitly versioned successor is necessary.
+
+### Phase 34 — Discovery session and bounded fan-out foundation
+
+Freeze and implement a separate discovery plan/session, discriminated link and
+target scopes, discovery result schema 1, deterministic one-to-many engine,
+terminal entity aggregation, row/metadata reservation, pull backpressure,
+lifecycle, and capability reporting without transmitting a live protocol.
+
+Exit gate: synthetic multi-responder work settles deterministically under
+duplicates, partial records, saturation, pause/cancel/close, context churn, and
+Worker teardown with no unbounded state or schema ambiguity.
+
+### Phase 35 — mDNS and DNS-SD discovery
+
+Add bounded DNS compression and PTR/SRV/TXT/A/AAAA parsing, exact IPv4/IPv6
+multicast interface/hop-limit ownership, adaptive service-type/instance/host
+queries, per-interface identity, finite collection windows, and explicit
+multicast/sensitive-read consent.
+
+Exit gate: independent dual-stack responders yield correctly assembled bounded
+service entities without cross-interface merging, unrelated-record admission, or
+permanent cache behavior.
+
+### Phase 36 — WS-Discovery and LLMNR
+
+Reuse the fan-out engine for WS-Discovery/DPWS/ONVIF device discovery and
+bounded LLMNR name evidence. Admit a streaming XML dependency only after a
+separate license/advisory/binary-size/hostile-input review; prohibit DTD,
+entities, external resources, and unbounded token/text work.
+
+Exit gate: camera/printer/Windows-style responders and link-local naming work on
+IPv4/IPv6 with exact scope, strict XML/DNS parsing, finite response windows, and
+honest parsed rather than authenticated evidence.
+
+### Phase 37 — Evidence-derived endpoints and adaptive rpcbind
+
+Add a registered bounded parent/child derivation graph, target containment,
+cycle suppression, provenance, reservation, and optional additive result
+columns. Use typed rpcbind `GETADDR` operations to discover and probe selected
+same-target NFS/mountd RPC ports; do not silently use unrestricted enumeration.
+
+Exit gate: a parent response can schedule finite explainable child work without
+escaping the target/exclusion set, hiding transmissions, or breaking retained
+schema decoding.
+
+### Phase 38 — Alternate-port correlation and TFTP
+
+Add an internal registered-only first-valid same-target port-pinning state
+machine and prove it with a session-random sentinel TFTP RRQ that stops after
+the minimum typed ERROR/DATA/OACK evidence. Never expose a general loose-port
+matcher or continue a file transfer.
+
+Exit gate: correct alternate-port responses survive retries/grace while wrong,
+competing, spoofed, late, and cross-interface traffic is rejected and all state
+tears down exactly once.
+
+### Phase 39 — High-yield targeted discovery pack
+
+Add non-mutating NAT-PMP external-address discovery, direct Microsoft SQL
+Browser discovery, and only a standards-valid explicitly configured Kerberos
+realm probe. Each candidate independently passes provenance, consent,
+amplification, strict parsing, and responder gates or remains blocked.
+
+Exit gate: every admitted probe yields useful typed evidence without creating a
+mapping, using an operator identity/credential, broadcasting implicitly, or
+accepting malformed response markers.
+
+### Phase 40 — QUIC version-negotiation discovery
+
+Implement invariant long-header reserved-version requests, CID-correlated
+Version Negotiation parsing, minimum datagram sizing, reviewed port eligibility,
+and conservative unauthenticated QUIC evidence without completing TLS or
+inferring HTTP/3 automatically.
+
+Exit gate: independent QUIC v1/v2 responders are identified under strict
+version/CID/size/work bounds without an unnecessary cryptographic dependency or
+inflated service claim.
+
+### Phase 41 — IKE and DTLS bounded handshakes
+
+Implement the smallest useful specification-valid IKEv2 and DTLS exchanges only
+after dependency, cryptographic, allocation, CPU, binary-size, target-impact,
+and teardown review. Require stateful-handshake consent and stop before
+authentication or long-lived state. A documented per-protocol no-go is valid.
+
+Exit gate: every accepted exchange has bounded state/CPU/bytes, typed correlated
+responses, exact cancellation cleanup, and discovery value exceeding its
+dependency and network-impact cost.
+
+### Phase 42 — DHCP topology discovery
+
+Implement explicitly scoped DHCPv4 INFORM and DHCPv6 Information-request as
+network-context discovery, not per-target port probes. Require interface,
+fixed-source, multicast/broadcast, and sensitive-read consent; never acquire,
+renew, release, or modify a lease or host configuration.
+
+Exit gate: disposable DHCP topologies and syscall traces prove bounded option
+evidence and no host-policy mutation or unsafe coexistence. Otherwise retain a
+namespace-only or blocked contract.
+
+### Phase 43 — Specialized opt-in discovery packs
+
+Evaluate GTP Echo, MQTT-SN gateway discovery, officially documented industrial
+protocols, and lower-priority game/voice discovery in that order. Every
+candidate independently requires a stable primary specification, non-mutating
+semantics, project-owned responder evidence, strict resource/risk bounds, and a
+useful typed result. Candidate no-go decisions do not block the release.
+
+Exit gate: every accepted candidate meets the core catalogue and discovery
+quality bar; unsupported proprietary, credential-bound, malware, or
+identity-bound payloads remain explicit blockers rather than approximations.
+
+### Phase 44 — Integrated audit and release candidate
+
+Freeze the discovery API/schema and any additive scan schema, audit all
+ownership/parser/impact/dependency/provenance boundaries, complete ordinary and
+privileged namespace matrices, fuzz/sanitizer/fault/resource stress, operator
+documentation, native x64/AArch64 execution, artifacts, consumers, and
+reproducibility, then prepare unpublished `0.3.0-rc.1`.
+
+Exit gate: advanced discovery is bounded, correctly attributed, non-mutating,
+documented, and release-rehearsed on both declared native architectures without
+changing existing scan behavior or broadening the Phase 33 Nmap comparison.
+
+The authoritative architecture, candidate dispositions, phase deliverables,
+resource ceilings, verification matrix, stop conditions, and research basis are
+in the
+[advanced UDP discovery evolution plan](53-advanced-udp-discovery-evolution-plan.md).
+The required Phase 34 questions and binding corrections are closed by the
+[advanced UDP discovery plan review](54-advanced-udp-discovery-plan-review.md).
+
 ## Cross-phase rule
 
 Do not expand breadth while a known descriptor-lifetime, buffer-lifetime,

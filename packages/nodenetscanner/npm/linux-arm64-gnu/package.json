@@ -1,6 +1,6 @@
 {
   "name": "@opsimathically/nodenetscanner-linux-arm64-gnu",
-  "version": "0.1.0-rc.1",
+  "version": "0.2.0-rc.1",
   "description": "Linux AArch64 glibc native binding for nodenetscanner",
   "license": "MIT",
   "repository": {

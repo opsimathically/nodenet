@@ -251,6 +251,8 @@ fn evidence(probe_id: u64, kind: EvidenceKind) -> EvidenceEvent {
         probe_id,
         kind,
         strength: EvidenceStrength::StrongPayload128,
+        icmp: None,
+        udp_service: None,
     }
 }
 

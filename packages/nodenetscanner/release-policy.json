@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "release": "0.1.0-rc.1",
+  "schemaVersion": 2,
+  "release": "0.2.0-rc.1",
   "platform": {
     "os": "linux",
     "architectures": ["x86_64", "aarch64"],
@@ -19,9 +19,18 @@
     "resultMetadataBytesMaximum": 4194304
   },
   "resultBatchSchema": {
-    "version": 1,
+    "emittedVersion": 2,
+    "acceptedVersions": [1, 2],
     "byteOrder": "little-endian",
     "addressByteOrder": "network"
+  },
+  "udpProbeCatalogue": {
+    "version": "1.3.0",
+    "protocolVariants": 33,
+    "safeVariants": 9,
+    "blockedCapabilities": 13,
+    "defaultProfile": "safe",
+    "defaultStrategy": "exhaustive"
   },
   "artifacts": [
     "@opsimathically/nodenetscanner",
@@ -33,8 +42,9 @@
     "musl",
     "32-bit architectures",
     "connect scanning",
-    "service or operating-system fingerprinting",
+    "complete service/version or operating-system fingerprinting",
     "firewall or namespace mutation",
-    "AF_XDP"
+    "AF_XDP",
+    "published AArch64 artifacts until native AArch64 execution passes"
   ]
 }

@@ -255,6 +255,110 @@ the module. No ring or UMEM view crosses N-API. An AF_XDP mode never replaces an
 operator-owned XDP program by default and detaches only an identity-matching
 module-owned attachment.
 
+## UDP protocol-probe invariants
+
+Phases 27–33 preserve one bounded logical result per target/UDP-port while
+allowing a finite programme of physical protocol requests. The checked
+worst-case product of targets, ports, variants, retries, request bytes,
+correlation entries, and deadline/rate capacity is validated before descriptor
+admission. Every physical request and neighbor-setup frame consumes the same
+rate budget; a multi-variant endpoint is never charged as one packet.
+
+Built-in requests and response handling are independently authored from primary
+specifications or permissioned project fixtures. Nmap's NPSL source and data are
+not copied, loaded, parsed, linked, executed as helpers, or distributed by the
+MIT project. Every catalogue entry carries source/provenance, request/response
+bounds, profile, amplification, destination, source-port, and side-effect
+classification. Missing provenance is an admission/build failure, not a
+documentation warning.
+
+Catalogue profiles control breadth only. Every high-amplification, stateful,
+fixed-source, multicast/broadcast, authentication-attempt, or sensitive-read
+variant additionally requires explicit snapshotted risk consent; a profile
+cannot imply it. Safe-profile requests remain unauthenticated, non-destructive,
+unicast, and low impact.
+
+Protocol mode never prepends an arbitrary private token. Correlation uses a
+protocol-valid transaction field or exclusive tuple/source-port ownership
+through the active and late-grace windows. Exact custom mode preserves caller
+bytes; legacy token prefixing is explicit. Transaction entropy is independent of
+the scheduling seed. Fixed-source variants require explicit consent, preserve
+module-internal four-session isolation, and never claim race-free ownership
+against unrelated host processes.
+
+The response target must match. Same-port replies are the default; a different
+source port is accepted only when a primary specification requires it and a
+catalogue rule requires either a returned transaction field or an exclusive-
+lane, strictly parsed first-response handshake that pins the accepted port
+within the same target and active/grace window. Arbitrary tuple-only evidence
+never admits an alternate port. IP fragments and multi-datagram application
+messages are not reassembled in these phases; incomplete traffic cannot produce
+service identity.
+
+Typed parsers are length-first, strict, non-recursive beyond declared depth, and
+allocation-bounded. The Phase 31 response-signature engine permits only finite
+exact/prefix/masked checks and capped extraction; it has no backtracking,
+arbitrary code, JavaScript callback, or raw-response export. Malformed bodies
+may support only tuple-level `open` evidence and never service identity. The
+Phase 30 runtime resets a 4 MiB per-session and 256 KiB per-target typed
+parser-work budget each runtime tick. Responses above their descriptor ceiling
+or after budget exhaustion may receive bounded tuple classification but cannot
+enter a service parser. Stateful catalogue entries also declare a nonzero live
+state ceiling enforced against the admitted maximum timeout.
+
+Direct protocol-correlated open evidence, tuple-only direct evidence,
+target-originated port-unreachable, other ICMP errors, and silence form a
+deterministic evidence lattice independent of arrival order. Strong open
+evidence cannot be overwritten by an unreachable response to another variant.
+Contradictory, invalid, duplicate, late, and rate-limited evidence is counted
+within bounded diagnostics.
+
+Safe mode excludes implicit broadcast/multicast expansion, directed broadcast,
+high-amplification, materially state-changing, exploit-like, and conflicting
+fixed-source requests. Comprehensive or legacy behavior requires explicit
+selection but never bypasses target, route, packet, rate, response-byte,
+lifecycle, or memory limits. The library does not authenticate, brute-force,
+mutate remote configuration, or install local network policy.
+
+## Advanced discovery invariants
+
+Phases 34–44 add one-to-many discovery only through a separate finite session
+with an explicit link or target scope, operations, deadline, and risk consent.
+Omission never means every eligible interface, target, or discovery protocol.
+IPv6 link-local results retain their interface scope, and identical names on
+different interfaces are never merged by name alone.
+
+Every physical query is rate-charged. Every new responder, protocol record,
+terminal entity, metadata byte, parser token, derived endpoint, correlation
+entry, and result row is admitted against a hard bound before retention or
+transmission that promises a result. Saturation produces deterministic reported
+truncation and pauses unsustainable work; it does not silently evict promised
+results or allocate from untrusted declared lengths.
+
+The session fan-out pool is reserved before its first query. Each physical query
+then leases its operation-declared worst-case new rows and metadata from that
+pool before send, so several admitted queries cannot overpromise lossless valid
+results. Protocol-violating excess responses are bounded, counted, and reported
+as truncation.
+
+Derived endpoints are registered, provenance-bearing, same-target by default,
+bounded in depth/fan-out/total work, cycle-suppressed, and revalidated against
+the original target/exclusion set. An alternate response port is accepted only
+by a registered protocol state machine that structurally validates and
+atomically pins the first same-target/interface response. No public custom
+option may loosen tuple matching.
+
+Multicast presence and unauthenticated version negotiation are never described
+as authenticated identity. Stateful probes declare byte, CPU, state-lifetime,
+entropy, dependency, and cleanup ceilings and stop before authentication,
+configuration mutation, leases, mappings, tunnels, or file transfer. DHCP must
+not interfere with host client ownership or write network configuration. A
+candidate that cannot prove these properties remains blocked or records no-go.
+
+The complete advanced-discovery resource and impact contract is
+`53-advanced-udp-discovery-evolution-plan.md`; its readiness corrections are in
+`54-advanced-udp-discovery-plan-review.md`.
+
 ## Review checklist for every native export
 
 1. Are all JS inputs type-, range-, and combination-checked?

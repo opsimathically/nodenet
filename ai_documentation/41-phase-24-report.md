@@ -106,7 +106,7 @@ The following gates pass locally on Linux x86-64 with Node.js 26 and Rust
 - optimized x86-64 ELF machine, stripping, and GLIBC requirement inspection;
 - clean loader/target package installation with lifecycle smoke testing; and
 - two clean optimized builds with identical SHA-256
-  `5ff54dc69b9e8f9b33479f352cac3c2b6667266814c8b519964abe965f07f0c6` after the
+  `06f8fdf20aa5f67fab96bd9efb0d623effb7e2e8c542726ba0e9c801fc703fd4` after the
   post-completion audit corrections.
 
 Scheduled CI now executes engine/protocol fuzzing, address/thread sanitizers,
@@ -135,6 +135,10 @@ candidate defects:
 - The Phase 19/20 sudo namespace harness builds the integration-test binary as
   the repository owner and executes only that binary with namespace authority,
   preserving both `CAP_NET_ADMIN` behavior and non-root artifact ownership.
+- Cached unresolved routes preserve their ARP/NDP setup requirement across
+  per-prefix and result-capacity deferral. A mixed-subnet regression exceeds the
+  1,024-probe prefix window and requires every responsive or silent-neighbor
+  probe to settle without terminalizing the session.
 
 Focused Rust and Node regression tests cover all corrected boundaries. The
 canonical `sudo npm run test:phase19:namespace` and Phase 20 wrapper now run

@@ -60,10 +60,11 @@ JavaScript boundary and callback-quiescence gaps and repeated all release gates.
 The repository has been migrated without a public API change into the `nodenet`
 monorepo. The root is a private npm workspace and virtual Cargo workspace;
 `packages/nodenetraw` owns the existing Node package, `crates/nodenetraw-native`
-owns its Rust addon, and `packages/nodenetscanner` is a private Phase 23 preview
-with an initial Node API. The shared scanner foundations are internal Rust
-crates. Root commands continue to provide the canonical build, test, hardening,
-and release interface. See D-030 and the monorepo migration report.
+owns its Rust addon, and `packages/nodenetscanner` is the unpublished
+`0.2.0-rc.1` package with a TypeScript Node API. The shared scanner foundations
+are internal Rust crates. Root commands continue to provide the canonical build,
+test, hardening, and release interface. See D-030 and the monorepo migration
+report.
 
 Phases 16 through 24 are the accepted portable scanner evolution roadmap. Phases
 16 through 22 are complete: the internal `nodenet-protocols` crate provides
@@ -107,6 +108,61 @@ supported- link scope, native runtime/completion isolation, complete rate/result
 reservation, packet-socket outgoing/VLAN behavior, pull/cancel/close semantics,
 and the statistical/XDP ownership conditions for an extreme backend. See the
 [network evolution plan review](32-network-evolution-plan-review.md).
+
+Phases 27 through 33 define the service-aware UDP evolution and are
+implementation-complete. The roadmap replaces the scanner's one session-wide,
+token-prefixed UDP payload with an independently authored protocol catalogue,
+byte-exact and dynamically correlated request builders, bounded multi-variant
+scheduling, typed service evidence, a low-impact core, extended explicit-risk
+enforcement, comprehensive/legacy coverage, adaptive early stopping, schema 2,
+and a final parity/provenance audit. Nmap commit
+`10dfd2ff1cef6c1925232db45352149b659979b4` was inspected as a behavioral
+architecture baseline only. Its NPSL source and `nmap-service-probes` data will
+not be copied, parsed, loaded, generated from, or distributed by this MIT
+project. The preimplementation review is closed in the
+[UDP protocol-probe plan review](44-udp-probe-parity-plan-review.md). Phase 27
+is complete: its exact request, catalogue/provenance, policy, logical/wire
+identity, capability, and retained schema-2 decoder foundations are recorded in
+the [Phase 27 report](45-phase-27-report.md). Phase 28 is complete: bounded
+physical subprobe waves, logical aggregation, full ICMP evidence retention,
+collision-free source lanes, and metadata reservation are recorded in the
+[Phase 28 report](46-phase-28-report.md). Phases 29 and 30 are complete: the
+unchanged safe pack, schema-2 emission, extended standards pack, and independent
+risk/resource enforcement are recorded in the
+[Phase 29 report](47-phase-29-report.md) and
+[Phase 30 report](48-phase-30-report.md). Phase 31 is complete: catalogue
+`1.3.0` has 33 independently authored variants, an unchanged nine-probe safe
+profile, checked port ranges, a finite non-backtracking signature engine, and an
+executable 46-entry capability ledger with 13 explicit blockers. See the
+[Phase 31 report](49-phase-31-report.md). Phase 32 completes adaptive ordering,
+evidence-only stopping, conservative pacing, and public summary/view semantics;
+see the [Phase 32 report](50-phase-32-report.md). Phase 33 completes the
+provenance and black-box behavioral audit, dual-stack mode matrix,
+fuzz/sanitizer/stress/release gates, operator documentation, and the unpublished
+`0.2.0-rc.1` advance. Its deliberately narrow UDP elicitation/state claim and
+remaining native AArch64 publication gate are in the
+[Phase 33 report](51-phase-33-report.md). The adversarial post-implementation
+review and receive-parser corrections are recorded in the
+[Phases 27–33 implementation audit](52-phase-27-33-implementation-audit.md).
+
+Phases 34 through 44 are now the accepted planning direction for advanced UDP
+and link discovery. D-049 keeps one-query/many-responder work in a separate
+finite discovery session and result schema, then adds bounded evidence-derived
+endpoints, registered-only alternate response ports, high-yield targeted
+protocols, QUIC/IKE/DTLS state machines, DHCP topology discovery, and optional
+specialized packs. Existing scan schemas 1/2, catalogue `1.3.0`, default UDP
+policy, and the narrow Phase 33 comparison claim remain unchanged. The first
+implementation pass is recorded after D-050 closed the adversarial review by
+aligning the API with the existing lifecycle, making fan-out reservation precede
+network work, adding per-query worst-case leases and explicit link/target
+scopes, sharing environment limits, defining lazy privilege-separated transport,
+and tightening schema, registry, mDNS, XML, TFTP, QUIC, and DHCP contracts. See
+the
+[advanced UDP discovery evolution plan](53-advanced-udp-discovery-evolution-plan.md)
+and its [readiness review](54-advanced-udp-discovery-plan-review.md).
+Implemented operations, accepted no-go outcomes, verification evidence, and the
+remaining Phase 37/AArch64 gates are in the
+[Phases 34–44 implementation report](55-phase-34-44-implementation-report.md).
 
 ## Documents
 
@@ -152,6 +208,20 @@ and the statistical/XDP ownership conditions for an extreme backend. See the
 40. [Phase 23 completion report](40-phase-23-report.md)
 41. [Phase 24 completion report](41-phase-24-report.md)
 42. [Phase 25 completion report](42-phase-25-report.md)
+43. [UDP protocol-probe parity plan](43-udp-probe-parity-plan.md)
+44. [UDP protocol-probe parity plan review](44-udp-probe-parity-plan-review.md)
+45. [Phase 27 completion report](45-phase-27-report.md)
+46. [Phase 28 completion report](46-phase-28-report.md)
+47. [Phase 29 completion report](47-phase-29-report.md)
+48. [Phase 30 completion report](48-phase-30-report.md)
+49. [Phase 31 completion report](49-phase-31-report.md)
+50. [Phase 32 completion report](50-phase-32-report.md)
+51. [Phase 33 completion report](51-phase-33-report.md)
+52. [Phases 27–33 implementation audit](52-phase-27-33-implementation-audit.md)
+53. [Advanced UDP discovery evolution plan](53-advanced-udp-discovery-evolution-plan.md)
+54. [Advanced UDP discovery plan review](54-advanced-udp-discovery-plan-review.md)
+55. [Phases 34–44 implementation report](55-phase-34-44-implementation-report.md)
+56. [Phases 34–44 product-hardening report](56-phase-34-44-hardening-report.md)
 
 `AGENTS.md` is the compact operational context. These documents contain the
 rationale and phase details. If they disagree, resolve the discrepancy and
@@ -177,6 +247,15 @@ update both rather than choosing silently.
   scheduling, correlation, and packet I/O in non-published Rust crates linked
   into a separate scanner addon; JavaScript receives only control, progress,
   summaries, and bounded result batches.
+- The accepted UDP evolution independently authors protocol-valid request and
+  response handling from primary specifications. It keeps one logical result per
+  target/port while rate-charging and bounding every physical protocol subprobe,
+  and it does not ingest or redistribute Nmap code or data.
+- The accepted advanced-discovery direction does not weaken that target/port
+  model. Link-local fan-out uses a separate bounded discovery session;
+  same-target derived ports and alternate response ports require registered
+  state machines, exact provenance, independent risk consent, and explicit
+  result/resource accounting.
 
 ## Accepted Phase 1 choices
 
@@ -210,4 +289,18 @@ Phases 16–25 are complete, including the post-completion correlation, admissio
 and privileged-harness corrections recorded in the Phase 24 report. Phase 25
 retained the portable backend with D-039 `no-go`, so Phase 26 is closed unless a
 new evidence decision reopens it. Native AArch64 execution remains the
-outstanding publication gate for the scanner artifact.
+outstanding publication gate for the scanner artifact. Phases 27 through 33 are
+implementation-complete. Phase 33 advances the scanner to unpublished
+`0.2.0-rc.1` after the narrow black-box UDP elicitation/state comparison and all
+available provenance, dual-stack, fuzz, sanitizer, stress, x86-64 artifact,
+consumer, and reproducibility gates. Native AArch64 execution remains mandatory
+before publication; see `51-phase-33-report.md`. The post-implementation audit
+is complete; see `52-phase-27-33-implementation-audit.md`. The Phase 34–44
+implementation pass is recorded in `55-phase-34-44-implementation-report.md`.
+The adversarial runtime/protocol corrections and current release gates are in
+`56-phase-34-44-hardening-report.md` and supersede the initial assumptions where
+they differ. Phase 37 now executes its single bounded, transaction-correlated,
+same-target NFSv3 child probe and exposes parent/derivation identity. The
+privileged namespace matrix is green after hardening. The next action is the
+remaining Phase 44 AArch64, gated stress/fuzz/sanitizer, and refreshed artifact/
+reproducibility matrix. Native AArch64 remains mandatory before publication.

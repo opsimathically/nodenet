@@ -7,6 +7,10 @@ mod arp;
 mod bounds;
 mod checksum;
 mod correlation;
+mod discovery_dns;
+mod discovery_registry;
+mod discovery_targeted;
+mod discovery_ws;
 mod envelope;
 mod error;
 mod icmpv4;
@@ -22,6 +26,12 @@ mod tcp;
 mod template;
 mod types;
 mod udp;
+mod udp_capability;
+mod udp_catalogue;
+mod udp_extended;
+mod udp_request;
+mod udp_safe;
+mod udp_signature;
 mod writer;
 
 pub use arp::{
@@ -45,6 +55,40 @@ pub use correlation::{
     ResponseTuple, ReuseGuardError, SessionSecret, classify_arp_reply, classify_echo_reply,
     classify_neighbor_advertisement, classify_quoted_response, classify_tcp_reply,
     classify_udp_reply,
+};
+pub use discovery_dns::{
+    DiscoveryDnsError, DiscoveryDnsMessage, DiscoveryDnsName, DiscoveryDnsQuestion,
+    DiscoveryDnsRecord, DiscoveryDnsRecordData, DiscoveryDnsTxtEntry,
+    MAX_DISCOVERY_DNS_MESSAGE_BYTES, MAX_DISCOVERY_DNS_NAME_BYTES, MAX_DISCOVERY_DNS_POINTERS,
+    MAX_DISCOVERY_DNS_RECORDS, MAX_DISCOVERY_DNS_TXT_BYTES, MAX_DISCOVERY_DNS_TXT_ENTRIES,
+    build_discovery_dns_query, build_mdns_service_enumeration_query, parse_discovery_dns_message,
+};
+pub use discovery_registry::{
+    DISCOVERY_OPERATION_REGISTRY, DISCOVERY_OPERATION_REGISTRY_VERSION, DiscoveryEntityKind,
+    DiscoveryEvidenceKind, DiscoveryOperationDescriptor, DiscoveryOperationId,
+    DiscoveryOperationProvenance, DiscoveryRegistryError, DiscoveryScopeKind,
+    DiscoveryTransportKind, MAX_DISCOVERY_OPERATIONS, MAX_DISCOVERY_REQUEST_BYTES,
+    MAX_DISCOVERY_RESPONSE_BYTES, discovery_operation_registry_sha256,
+    discovery_operation_registry_sha256_hex, validate_discovery_operation_registry,
+};
+pub use discovery_targeted::{
+    MAX_QUIC_ADVERTISED_VERSIONS, MAX_SQL_BROWSER_FIELDS, MAX_SQL_BROWSER_INSTANCES,
+    MAX_SQL_BROWSER_RESPONSE_BYTES, MAX_SQL_BROWSER_TEXT_BYTES, MAX_TFTP_DISCOVERY_RESPONSE_BYTES,
+    NatPmpExternalAddressResponse, QUIC_VERSION_NEGOTIATION_REQUEST_BYTES,
+    QuicVersionNegotiationRequest, QuicVersionNegotiationResponse, SqlBrowserInstance,
+    TargetedDiscoveryError, TftpDiscoveryResponse, build_nat_pmp_external_address_request,
+    build_quic_version_negotiation_request, build_rpcbind_getaddr_request,
+    build_sql_browser_enumeration_request, build_tftp_discovery_rrq, build_tftp_termination_error,
+    parse_nat_pmp_external_address_response, parse_quic_version_negotiation_response,
+    parse_rpcbind_getaddr_response, parse_rpcbind_universal_address, parse_sql_browser_response,
+    parse_tftp_discovery_response,
+};
+pub use discovery_ws::{
+    LlmnrResponse, MAX_WS_DISCOVERY_ENVELOPE_BYTES, MAX_WS_DISCOVERY_MATCHES,
+    MAX_WS_DISCOVERY_TEXT_BYTES, MAX_WS_DISCOVERY_VALUES, MAX_WS_DISCOVERY_XML_DEPTH,
+    MAX_WS_DISCOVERY_XML_TOKENS, WsDiscoveryAppSequence, WsDiscoveryError, WsDiscoveryProbeMatch,
+    WsDiscoveryProbeMatches, build_llmnr_query, build_ws_discovery_probe, parse_llmnr_response,
+    parse_ws_discovery_probe_matches,
 };
 pub use envelope::{ParsedNetworkFrame, ParsedNetworkPayload, parse_network_frame};
 pub use error::{BuildError, Field, Layer, ParseError, Resource};
@@ -84,6 +128,36 @@ pub use types::{
 pub use udp::{
     OwnedUdpDatagram, ParsedUdpDatagram, UdpChecksumMode, UdpChecksumStatus, UdpDatagram,
     parse_udp_datagram,
+};
+pub use udp_capability::{
+    CapabilityImplementation, UDP_CAPABILITY_LEDGER, UdpCapabilityDisposition, UdpCapabilityEntry,
+    UdpCapabilityLedgerError, validate_udp_capability_ledger,
+};
+pub use udp_catalogue::{
+    MAX_UDP_CATALOGUE_VARIANTS, MAX_UDP_CORRELATION_FIELDS, MAX_UDP_RESPONSE_BYTES,
+    UDP_PROBE_CATALOGUE, UDP_PROBE_CATALOGUE_SHA256_HEX, UDP_PROBE_CATALOGUE_VERSION,
+    UdpAddressFamilies, UdpCatalogueError, UdpCorrelationField, UdpCorrelationFieldKind,
+    UdpPortRange, UdpProbeDescriptor, UdpProbeId, UdpProbeProfile, UdpProbeProvenance,
+    UdpProbeRisk, UdpProbeRiskSet, UdpResponseEndpointPolicy, UdpServiceFamilyId,
+    UdpSourcePortConstraint, udp_probe_catalogue_sha256, udp_probe_catalogue_sha256_hex,
+    validate_udp_probe_catalogue,
+};
+pub use udp_extended::{
+    UdpCatalogueProbe, UdpProbeBuildContext, build_udp_catalogue_request,
+    parse_udp_catalogue_response,
+};
+pub use udp_request::{
+    MAX_UDP_REQUEST_BYTES, MAX_UDP_REQUEST_PATCHES, UdpRequestPatch, UdpRequestPatchField,
+    UdpRequestPatchKind, UdpRequestPatchValue, UdpRequestPlan, UdpRequestPlanError,
+};
+pub use udp_safe::{
+    MAX_UDP_SERVICE_METADATA_BYTES, UdpSafeCodecError, UdpSafeMatch, UdpSafeProbe,
+    build_udp_safe_request, parse_udp_safe_response,
+};
+pub use udp_signature::{
+    MAX_UDP_SIGNATURE_CLAUSES, MAX_UDP_SIGNATURE_EXTRACT_BYTES, MAX_UDP_SIGNATURE_WORK,
+    UdpByteSignature, UdpSignatureClause, UdpSignatureError, UdpSignatureMatch,
+    match_udp_signature, validate_udp_signature,
 };
 pub use writer::{OwnedPacket, PacketPlan};
 

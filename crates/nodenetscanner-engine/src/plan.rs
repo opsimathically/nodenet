@@ -2,7 +2,7 @@ use nodenet_protocols::ProbePort;
 
 use crate::{
     LogicalProbe, MAX_PORTS_PER_PROBE_FAMILY, MAX_PROBE_DEFINITIONS, PlanError, ProbeFamily,
-    TargetSet,
+    TargetSet, UdpProbeProgramme,
 };
 
 /// One explicit probe family and its destination ports, if applicable.
@@ -10,6 +10,7 @@ use crate::{
 pub struct ProbeDefinition {
     family: ProbeFamily,
     ports: Vec<ProbePort>,
+    udp_programme: Option<UdpProbeProgramme>,
 }
 
 impl ProbeDefinition {
@@ -33,7 +34,23 @@ impl ProbeDefinition {
         if ports.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(PlanError::DuplicatePort);
         }
-        Ok(Self { family, ports })
+        let udp_programme = (family == ProbeFamily::Udp).then(UdpProbeProgramme::single);
+        Ok(Self {
+            family,
+            ports,
+            udp_programme,
+        })
+    }
+
+    /// Constructs a UDP definition with a bounded physical subprobe programme.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid ports using the same rules as [`Self::new`].
+    pub fn udp(ports: Vec<ProbePort>, programme: UdpProbeProgramme) -> Result<Self, PlanError> {
+        let mut value = Self::new(ProbeFamily::Udp, ports)?;
+        value.udp_programme = Some(programme);
+        Ok(value)
     }
 
     #[must_use]
@@ -44,6 +61,11 @@ impl ProbeDefinition {
     #[must_use]
     pub fn ports(&self) -> &[ProbePort] {
         &self.ports
+    }
+
+    #[must_use]
+    pub fn udp_programme(&self) -> Option<&UdpProbeProgramme> {
+        self.udp_programme.as_ref()
     }
 
     fn port_factor(&self) -> u64 {
@@ -192,6 +214,15 @@ impl ScanPlan {
             family: dimension.definition.family,
             port,
         })
+    }
+
+    /// Returns the programme attached to a decoded UDP logical probe.
+    #[must_use]
+    pub fn udp_programme_for(&self, probe: LogicalProbe) -> Option<&UdpProbeProgramme> {
+        self.dimensions
+            .iter()
+            .find(|dimension| dimension.definition.family == probe.family)
+            .and_then(|dimension| dimension.definition.udp_programme())
     }
 }
 

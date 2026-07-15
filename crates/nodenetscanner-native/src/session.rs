@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,7 +11,10 @@ use napi_derive::napi;
 use nodenet_linux_context::{
     NetworkSnapshot, RouteContext, RouteDisposition, RoutePlanKind, RouteQuery,
 };
-use nodenet_protocols::{EvidenceStrength, ProbePort};
+use nodenet_protocols::{
+    EvidenceStrength, ProbePort, UDP_PROBE_CATALOGUE_SHA256_HEX, UDP_PROBE_CATALOGUE_VERSION,
+    UdpProbeRisk,
+};
 use nodenetscanner_engine::{
     Clock, ContextFailure, ContextResolution, ContextResolver, LogicalProbe, MonotonicTime,
     NetworkState, PrefixKey, ProbeEmission, ProbeFamily, ProbeOutcome, ProbeTransport,
@@ -24,8 +28,10 @@ use crate::socket::PortableSockets;
 use crate::wire::{RouteBinding, WireState};
 
 const MAX_QUEUED_RESULTS: usize = 262_144;
+const MAX_SESSION_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ENVIRONMENT_METADATA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECEIVES_PER_TICK: usize = 128;
-const RESULT_BATCH_SCHEMA_VERSION: u32 = 1;
+const MAX_BATCH_SERVICE_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MISSING_U64: u64 = u64::MAX;
 
 #[napi(object)]
@@ -49,6 +55,13 @@ pub struct NativeScanResultBatch {
     pub evidence: Buffer,
     pub metadata_bytes: Buffer,
     pub metadata_offsets: Buffer,
+    pub terminal_udp_probe_ids: Option<Buffer>,
+    pub udp_variants_attempted: Option<Buffer>,
+    pub udp_response_kinds: Option<Buffer>,
+    pub udp_service_families: Option<Buffer>,
+    pub udp_service_confidences: Option<Buffer>,
+    pub service_metadata_bytes: Option<Buffer>,
+    pub service_metadata_offsets: Option<Buffer>,
 }
 
 pub struct SealedScanResultBatch {
@@ -70,6 +83,13 @@ pub struct SealedScanResultBatch {
     pub evidence: Vec<u8>,
     pub metadata_bytes: Vec<u8>,
     pub metadata_offsets: Vec<u8>,
+    pub terminal_udp_probe_ids: Option<Vec<u8>>,
+    pub udp_variants_attempted: Option<Vec<u8>>,
+    pub udp_response_kinds: Option<Vec<u8>>,
+    pub udp_service_families: Option<Vec<u8>>,
+    pub udp_service_confidences: Option<Vec<u8>>,
+    pub service_metadata_bytes: Option<Vec<u8>>,
+    pub service_metadata_offsets: Option<Vec<u8>>,
 }
 
 impl NativeScanResultBatch {
@@ -94,6 +114,13 @@ impl NativeScanResultBatch {
             evidence: value.evidence.into(),
             metadata_bytes: value.metadata_bytes.into(),
             metadata_offsets: value.metadata_offsets.into(),
+            terminal_udp_probe_ids: value.terminal_udp_probe_ids.map(Into::into),
+            udp_variants_attempted: value.udp_variants_attempted.map(Into::into),
+            udp_response_kinds: value.udp_response_kinds.map(Into::into),
+            udp_service_families: value.udp_service_families.map(Into::into),
+            udp_service_confidences: value.udp_service_confidences.map(Into::into),
+            service_metadata_bytes: value.service_metadata_bytes.map(Into::into),
+            service_metadata_offsets: value.service_metadata_offsets.map(Into::into),
         }
     }
 }
@@ -147,6 +174,7 @@ pub struct NativeScanProgress {
 #[napi(object)]
 #[derive(Clone, Debug, Default)]
 pub struct NativeScanSummary {
+    pub schema_version: u32,
     pub state: String,
     pub logical_probes: String,
     pub results: String,
@@ -164,6 +192,16 @@ pub struct NativeScanSummary {
     pub forged_or_unrelated: String,
     pub duplicates: String,
     pub late_responses: String,
+    pub udp_icmp_pacing: String,
+    pub udp_catalogue_version: Option<String>,
+    pub udp_catalogue_sha256: Option<String>,
+    pub udp_policy_mode: Option<String>,
+    pub udp_profile: Option<String>,
+    pub udp_intensity: Option<u32>,
+    pub udp_strategy: Option<String>,
+    pub udp_empty_fallback: Option<String>,
+    pub udp_allow_risks: Option<Vec<String>>,
+    pub udp_custom_correlation: Option<String>,
     pub progress: NativeScanProgress,
     pub scheduling_seed: Option<String>,
     pub accuracy_tradeoff: bool,
@@ -200,6 +238,10 @@ struct ResultQueue {
     capacity: usize,
     low_watermark: usize,
     reserved: usize,
+    reserved_metadata_bytes: usize,
+    queued_metadata_bytes: usize,
+    schema_version: u32,
+    environment_metadata_bytes: Arc<AtomicUsize>,
     backpressured: bool,
     application_backpressured: u64,
     values: VecDeque<ScanResult>,
@@ -208,7 +250,11 @@ struct ResultQueue {
 }
 
 impl ResultQueue {
-    fn new(logical_probes: u64) -> Self {
+    fn new(
+        logical_probes: u64,
+        environment_metadata_bytes: Arc<AtomicUsize>,
+        schema_version: u32,
+    ) -> Self {
         let capacity = usize::try_from(logical_probes)
             .unwrap_or(MAX_QUEUED_RESULTS)
             .clamp(1, MAX_QUEUED_RESULTS);
@@ -216,6 +262,10 @@ impl ResultQueue {
             capacity,
             low_watermark: capacity / 2,
             reserved: 0,
+            reserved_metadata_bytes: 0,
+            queued_metadata_bytes: 0,
+            schema_version,
+            environment_metadata_bytes,
             backpressured: false,
             application_backpressured: 0,
             values: VecDeque::new(),
@@ -228,14 +278,36 @@ impl ResultQueue {
         if self.values.is_empty() {
             return None;
         }
-        let count = maximum.min(self.values.len());
+        let mut count = 0;
+        let mut service_bytes = 0_usize;
+        for value in self.values.iter().take(maximum) {
+            let next = value
+                .udp
+                .as_ref()
+                .and_then(|udp| udp.service.as_ref())
+                .map_or(0, |service| service.metadata.len());
+            if service_bytes.saturating_add(next) > MAX_BATCH_SERVICE_METADATA_BYTES {
+                break;
+            }
+            service_bytes += next;
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
         let values = self.values.drain(..count);
-        Some(seal_result_batch(values, count))
+        self.queued_metadata_bytes = self.queued_metadata_bytes.saturating_sub(service_bytes);
+        self.environment_metadata_bytes
+            .fetch_sub(service_bytes, Ordering::AcqRel);
+        Some(seal_result_batch(values, count, self.schema_version))
     }
 
     fn discard(&mut self) -> u64 {
         let count = u64::try_from(self.values.len()).unwrap_or(u64::MAX);
         self.values.clear();
+        self.environment_metadata_bytes
+            .fetch_sub(self.queued_metadata_bytes, Ordering::AcqRel);
+        self.queued_metadata_bytes = 0;
         self.counters.discarded = self.counters.discarded.saturating_add(count);
         count
     }
@@ -269,9 +341,71 @@ impl ResultSink for ResultQueue {
         }
         self.reserved -= 1;
         self.completed_ids.push_back(result.probe.logical_id);
-        count_result(&mut self.counters, result);
+        count_result(&mut self.counters, &result);
         self.values.push_back(result);
         Ok(())
+    }
+
+    fn try_reserve_with_bytes(
+        &mut self,
+        maximum_metadata_bytes: usize,
+    ) -> Result<SinkReservation, SinkFailure> {
+        let row = self.try_reserve()?;
+        if row == SinkReservation::Saturated {
+            return Ok(row);
+        }
+        let Some(session_total) = self
+            .reserved_metadata_bytes
+            .checked_add(maximum_metadata_bytes)
+        else {
+            self.reserved -= 1;
+            return Ok(SinkReservation::Saturated);
+        };
+        if session_total > MAX_SESSION_METADATA_BYTES
+            || self
+                .environment_metadata_bytes
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(maximum_metadata_bytes)
+                        .filter(|total| *total <= MAX_ENVIRONMENT_METADATA_BYTES)
+                })
+                .is_err()
+        {
+            self.reserved -= 1;
+            self.backpressured = true;
+            self.application_backpressured = self.application_backpressured.saturating_add(1);
+            return Ok(SinkReservation::Saturated);
+        }
+        self.reserved_metadata_bytes = session_total;
+        Ok(SinkReservation::Reserved)
+    }
+
+    fn commit_reserved_with_bytes(
+        &mut self,
+        result: ScanResult,
+        actual_metadata_bytes: usize,
+        reserved_metadata_bytes: usize,
+    ) -> Result<(), SinkFailure> {
+        let retained_metadata_bytes = result
+            .udp
+            .as_ref()
+            .and_then(|udp| udp.service.as_ref())
+            .map_or(0, |service| service.metadata.len());
+        if actual_metadata_bytes != retained_metadata_bytes
+            || actual_metadata_bytes > reserved_metadata_bytes
+            || reserved_metadata_bytes > self.reserved_metadata_bytes
+        {
+            return Err(SinkFailure { code: 3 });
+        }
+        self.reserved_metadata_bytes -= reserved_metadata_bytes;
+        self.queued_metadata_bytes = self
+            .queued_metadata_bytes
+            .saturating_add(actual_metadata_bytes);
+        self.environment_metadata_bytes.fetch_sub(
+            reserved_metadata_bytes - actual_metadata_bytes,
+            Ordering::AcqRel,
+        );
+        self.commit_reserved(result)
     }
 
     fn release_reserved(&mut self, count: usize) -> Result<(), SinkFailure> {
@@ -280,6 +414,32 @@ impl ResultSink for ResultQueue {
         }
         self.reserved -= count;
         Ok(())
+    }
+
+    fn release_reserved_with_bytes(
+        &mut self,
+        count: usize,
+        maximum_metadata_bytes: usize,
+    ) -> Result<(), SinkFailure> {
+        if maximum_metadata_bytes > self.reserved_metadata_bytes {
+            return Err(SinkFailure { code: 4 });
+        }
+        self.reserved_metadata_bytes -= maximum_metadata_bytes;
+        self.environment_metadata_bytes
+            .fetch_sub(maximum_metadata_bytes, Ordering::AcqRel);
+        self.release_reserved(count)
+    }
+}
+
+impl Drop for ResultQueue {
+    fn drop(&mut self) {
+        self.environment_metadata_bytes.fetch_sub(
+            self.reserved_metadata_bytes
+                .saturating_add(self.queued_metadata_bytes),
+            Ordering::AcqRel,
+        );
+        self.reserved_metadata_bytes = 0;
+        self.queued_metadata_bytes = 0;
     }
 }
 
@@ -314,6 +474,10 @@ impl ProbeTransport for TransportAdapter {
         }
         Ok(())
     }
+
+    fn retire(&mut self, probe_id: u64) {
+        lock(&self.network).wire.retire_physical(probe_id);
+    }
 }
 
 struct ResolverAdapter<'a> {
@@ -325,14 +489,14 @@ struct ResolverAdapter<'a> {
 
 impl ContextResolver for ResolverAdapter<'_> {
     fn resolve(&mut self, probe: LogicalProbe) -> Result<ContextResolution, ContextFailure> {
-        if lock(&self.network).wire.has_route(probe.logical_id) {
-            let generation = lock(&self.network)
-                .wire_generation(probe.logical_id)
-                .unwrap_or_default();
+        if let Some((generation, neighbor_setup)) = lock(&self.network)
+            .wire
+            .route_resolution(probe.logical_id, probe.family)
+        {
             return Ok(ContextResolution::Ready(ResolvedContext {
                 generation,
                 prefix_key: PrefixKey::default_for(probe.target),
-                neighbor_setup: None,
+                neighbor_setup,
             }));
         }
         match self.resolve_inner(probe) {
@@ -427,46 +591,38 @@ impl ResolverAdapter<'_> {
         if destination_mac.is_none() && kind == RoutePlanKind::Multicast {
             destination_mac = multicast_mac(destination);
         }
-        let neighbor_setup = if destination_mac.is_none()
-            && matches!(
-                kind,
-                RoutePlanKind::EthernetOnLink | RoutePlanKind::EthernetGateway
-            )
-            && !matches!(probe.family, ProbeFamily::Arp | ProbeFamily::Ndp)
-        {
-            Some(if destination.is_ipv4() {
-                ProbeFamily::Arp
-            } else {
-                ProbeFamily::Ndp
-            })
-        } else {
-            None
-        };
         let generation = plan.generation;
-        lock(&self.network).wire.insert_route(
-            probe.logical_id,
-            RouteBinding {
-                generation,
-                kind,
-                interface_index,
-                source,
-                destination,
-                next_hop,
-                source_mac,
-                destination_mac,
-            },
-        );
+        let neighbor_setup = {
+            let mut network = lock(&self.network);
+            network.wire.insert_route(
+                probe.logical_id,
+                RouteBinding {
+                    generation,
+                    kind,
+                    interface_index,
+                    source,
+                    destination,
+                    next_hop,
+                    source_mac,
+                    destination_mac,
+                },
+            );
+            network
+                .wire
+                .route_resolution(probe.logical_id, probe.family)
+                .ok_or_else(|| {
+                    ScannerError::internal(
+                        "resolve route",
+                        "inserted route binding was not retained",
+                    )
+                })?
+                .1
+        };
         Ok(ContextResolution::Ready(ResolvedContext {
             generation,
             prefix_key: PrefixKey::default_for(probe.target),
             neighbor_setup,
         }))
-    }
-}
-
-impl SocketNetwork {
-    fn wire_generation(&self, probe_id: u64) -> Option<u64> {
-        self.wire.generation(probe_id)
     }
 }
 
@@ -487,6 +643,19 @@ pub(crate) struct SessionCore {
     wire_retried: u64,
     terminal_error: Option<ScannerError>,
     context_changed: bool,
+    udp_summary: UdpSummary,
+}
+
+#[derive(Clone, Debug, Default)]
+struct UdpSummary {
+    catalogue: bool,
+    mode: Option<String>,
+    profile: Option<String>,
+    intensity: Option<u8>,
+    strategy: Option<String>,
+    empty_fallback: Option<String>,
+    allow_risks: Option<Vec<String>>,
+    custom_correlation: Option<String>,
 }
 
 impl SessionCore {
@@ -496,6 +665,7 @@ impl SessionCore {
         slot: u8,
         validated: ValidatedPlan,
         context: &mut RouteContext,
+        environment_metadata_bytes: Arc<AtomicUsize>,
     ) -> Result<Self, ScannerError> {
         if context.current_snapshot().is_none() {
             context.snapshot().map_err(|error| {
@@ -530,6 +700,34 @@ impl SessionCore {
         scheduler.start(&clock)?;
         let interface = validated.options.interface.clone();
         let source = validated.options.source_address;
+        let result_schema_version = validated.options.result_schema_version;
+        let udp = &validated.options.udp_program;
+        let udp_summary = UdpSummary {
+            catalogue: udp.catalogue_mode,
+            mode: udp.policy_mode.clone(),
+            profile: udp.profile.clone(),
+            intensity: udp.intensity,
+            strategy: udp.policy_mode.as_ref().map(|_| match udp.strategy {
+                nodenetscanner_engine::UdpProbeStrategy::Adaptive => "adaptive".into(),
+                nodenetscanner_engine::UdpProbeStrategy::Exhaustive => "exhaustive".into(),
+            }),
+            empty_fallback: udp.empty_fallback.clone(),
+            allow_risks: udp.catalogue_mode.then(|| {
+                [
+                    (UdpProbeRisk::HighAmplification, "highAmplification"),
+                    (UdpProbeRisk::StatefulHandshake, "statefulHandshake"),
+                    (UdpProbeRisk::FixedSourcePort, "fixedSourcePort"),
+                    (UdpProbeRisk::MulticastOrBroadcast, "multicastOrBroadcast"),
+                    (UdpProbeRisk::AuthenticationAttempt, "authenticationAttempt"),
+                    (UdpProbeRisk::SensitiveRead, "sensitiveRead"),
+                ]
+                .into_iter()
+                .filter(|(risk, _)| udp.allowed_risks.contains(*risk))
+                .map(|(_, name)| name.into())
+                .collect()
+            }),
+            custom_correlation: udp.custom_correlation.clone(),
+        };
         Ok(Self {
             scanner_id,
             scheduler,
@@ -539,7 +737,11 @@ impl SessionCore {
                 wire: WireState::new(secret, slot, validated.options),
                 last_error: None,
             }))),
-            results: ResultQueue::new(logical_probes),
+            results: ResultQueue::new(
+                logical_probes,
+                environment_metadata_bytes,
+                result_schema_version,
+            ),
             logical_probes,
             interface,
             source,
@@ -551,6 +753,7 @@ impl SessionCore {
             wire_retried: 0,
             terminal_error: None,
             context_changed: false,
+            udp_summary,
         })
     }
 
@@ -562,6 +765,7 @@ impl SessionCore {
         let Some(network) = self.network.clone() else {
             return;
         };
+        lock(&network).wire.begin_receive_tick();
         self.receive(&network);
         self.sync_terminal_correlations(&network);
         if self.context_changed {
@@ -769,6 +973,7 @@ impl SessionCore {
         let diagnostics = self.scheduler.diagnostics();
         let counters = &self.results.counters;
         NativeScanSummary {
+            schema_version: self.results.schema_version,
             state: state_name(self.scheduler.lifecycle()).into(),
             logical_probes: self.logical_probes.to_string(),
             results: counters.results.to_string(),
@@ -786,6 +991,22 @@ impl SessionCore {
             forged_or_unrelated: diagnostics.forged_or_unrelated.to_string(),
             duplicates: diagnostics.duplicates.to_string(),
             late_responses: diagnostics.late_responses.to_string(),
+            udp_icmp_pacing: diagnostics.udp_icmp_pacing.to_string(),
+            udp_catalogue_version: self
+                .udp_summary
+                .catalogue
+                .then(|| UDP_PROBE_CATALOGUE_VERSION.into()),
+            udp_catalogue_sha256: self
+                .udp_summary
+                .catalogue
+                .then(|| UDP_PROBE_CATALOGUE_SHA256_HEX.into()),
+            udp_policy_mode: self.udp_summary.mode.clone(),
+            udp_profile: self.udp_summary.profile.clone(),
+            udp_intensity: self.udp_summary.intensity.map(u32::from),
+            udp_strategy: self.udp_summary.strategy.clone(),
+            udp_empty_fallback: self.udp_summary.empty_fallback.clone(),
+            udp_allow_risks: self.udp_summary.allow_risks.clone(),
+            udp_custom_correlation: self.udp_summary.custom_correlation.clone(),
             progress: self.progress_snapshot(),
             scheduling_seed: self
                 .scheduler
@@ -927,6 +1148,7 @@ pub(crate) fn state_name(value: SessionLifecycle) -> &'static str {
 fn seal_result_batch(
     values: impl Iterator<Item = ScanResult>,
     count: usize,
+    schema_version: u32,
 ) -> SealedScanResultBatch {
     let mut address_bytes = Vec::with_capacity(count.saturating_mul(16));
     let mut address_offsets = Vec::with_capacity((count + 1).saturating_mul(4));
@@ -946,6 +1168,17 @@ fn seal_result_batch(
     let mut metadata_offsets = Vec::with_capacity((count + 1).saturating_mul(4));
     push_u32(&mut address_offsets, 0);
     push_u32(&mut metadata_offsets, 0);
+    let mut terminal_udp_probe_ids = (schema_version == 2).then(|| Vec::with_capacity(count * 2));
+    let mut udp_variants_attempted = (schema_version == 2).then(|| Vec::with_capacity(count * 2));
+    let mut udp_response_kinds = (schema_version == 2).then(|| Vec::with_capacity(count));
+    let mut udp_service_families = (schema_version == 2).then(|| Vec::with_capacity(count * 2));
+    let mut udp_service_confidences = (schema_version == 2).then(|| Vec::with_capacity(count));
+    let mut service_metadata_bytes = (schema_version == 2).then(Vec::new);
+    let mut service_metadata_offsets = (schema_version == 2).then(|| {
+        let mut offsets = Vec::with_capacity((count + 1) * 4);
+        push_u32(&mut offsets, 0);
+        offsets
+    });
 
     for value in values {
         match value.probe.target.address {
@@ -962,6 +1195,41 @@ fn seal_result_batch(
             &mut address_offsets,
             u32::try_from(address_bytes.len()).unwrap_or(u32::MAX),
         );
+        if schema_version == 2 {
+            let udp = value.udp.as_ref();
+            push_u16(
+                terminal_udp_probe_ids.as_mut().unwrap(),
+                udp.and_then(|value| value.terminal_probe_id)
+                    .map_or(0, nodenetscanner_engine::ProbeVariantId::get),
+            );
+            push_u16(
+                udp_variants_attempted.as_mut().unwrap(),
+                udp.map_or(0, |value| value.variants_attempted),
+            );
+            udp_response_kinds
+                .as_mut()
+                .unwrap()
+                .push(udp.map_or(0, |value| value.response_kind as u8));
+            let service = udp.and_then(|value| value.service.as_ref());
+            push_u16(
+                udp_service_families.as_mut().unwrap(),
+                service.map_or(0, |value| value.family),
+            );
+            udp_service_confidences
+                .as_mut()
+                .unwrap()
+                .push(service.map_or(0, |value| value.confidence as u8));
+            if let Some(service) = service {
+                service_metadata_bytes
+                    .as_mut()
+                    .unwrap()
+                    .extend_from_slice(&service.metadata);
+            }
+            push_u32(
+                service_metadata_offsets.as_mut().unwrap(),
+                u32::try_from(service_metadata_bytes.as_ref().unwrap().len()).unwrap_or(u32::MAX),
+            );
+        }
         push_u32(
             &mut scopes,
             value
@@ -978,7 +1246,7 @@ fn seal_result_batch(
         });
         outcomes.push(outcome_code(value.outcome));
         push_u32(&mut attempts, value.attempt);
-        push_u32(&mut transmissions, u32::from(value.transmissions));
+        push_u32(&mut transmissions, value.transmissions);
         push_u64(
             &mut rtt_nanoseconds,
             value.rtt.map_or(MISSING_U64, |duration| {
@@ -999,7 +1267,7 @@ fn seal_result_batch(
     }
 
     SealedScanResultBatch {
-        schema_version: RESULT_BATCH_SCHEMA_VERSION,
+        schema_version,
         row_count: u32::try_from(count).unwrap_or(u32::MAX),
         address_bytes,
         address_offsets,
@@ -1017,6 +1285,13 @@ fn seal_result_batch(
         evidence,
         metadata_bytes,
         metadata_offsets,
+        terminal_udp_probe_ids,
+        udp_variants_attempted,
+        udp_response_kinds,
+        udp_service_families,
+        udp_service_confidences,
+        service_metadata_bytes,
+        service_metadata_offsets,
     }
 }
 
@@ -1072,10 +1347,14 @@ const fn evidence_code(value: EvidenceStrength) -> u8 {
         EvidenceStrength::TruncatedQuote => 2,
         EvidenceStrength::StrongTcpSequence32 => 3,
         EvidenceStrength::StrongPayload128 => 4,
+        EvidenceStrength::ProtocolTransaction16 => 5,
+        EvidenceStrength::ProtocolTransaction32 => 6,
+        EvidenceStrength::ProtocolTransaction64 => 7,
+        EvidenceStrength::AlternateEndpointHandshake => 8,
     }
 }
 
-fn count_result(counters: &mut SummaryCounters, value: ScanResult) {
+fn count_result(counters: &mut SummaryCounters, value: &ScanResult) {
     counters.results = counters.results.saturating_add(1);
     if value.terminal_reason == TerminalReason::Timeout {
         counters.timed_out = counters.timed_out.saturating_add(1);
@@ -1127,11 +1406,18 @@ fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use nodenet_protocols::{IpAddress, Ipv4Address, ProbePort};
-    use nodenetscanner_engine::{ScanTarget, TargetScope};
+    use nodenetscanner_engine::{
+        ProbeVariantId, ScanTarget, TargetScope, UdpResponseKind, UdpResultEvidence,
+        UdpServiceConfidence, UdpServiceEvidence,
+    };
+
+    fn result_queue(logical_probes: u64) -> ResultQueue {
+        ResultQueue::new(logical_probes, Arc::new(AtomicUsize::new(0)), 1)
+    }
 
     #[test]
     fn result_queue_reserves_before_commit_and_saturates() {
-        let mut queue = ResultQueue::new(1);
+        let mut queue = result_queue(1);
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Saturated);
         let result = ScanResult {
@@ -1153,18 +1439,19 @@ mod tests {
             terminal_at: MonotonicTime::from_micros(1),
             route_generation: 1,
             terminal_reason: TerminalReason::Timeout,
+            udp: None,
         };
-        queue.commit_reserved(result).unwrap();
+        queue.commit_reserved(result.clone()).unwrap();
         assert_eq!(queue.take_completed_ids(), vec![0]);
         let batch = queue.take(1).unwrap();
-        assert_eq!(batch.schema_version, RESULT_BATCH_SCHEMA_VERSION);
+        assert_eq!(batch.schema_version, 1);
         assert_eq!(batch.row_count, 1);
         assert_eq!(batch.families, vec![4]);
 
-        let mut queue = ResultQueue::new(4);
+        let mut queue = result_queue(4);
         for logical_id in 0..4 {
             assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
-            let mut value = result;
+            let mut value = result.clone();
             value.probe.logical_id = logical_id;
             queue.commit_reserved(value).unwrap();
         }
@@ -1174,13 +1461,86 @@ mod tests {
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Saturated);
         assert_eq!(queue.take(1).unwrap().row_count, 1);
         assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
+
+        let mut metadata_queue = result_queue(2);
+        assert_eq!(
+            metadata_queue
+                .try_reserve_with_bytes(MAX_SESSION_METADATA_BYTES + 1)
+                .unwrap(),
+            SinkReservation::Saturated
+        );
+        assert_eq!(metadata_queue.reserved, 0);
+        assert_eq!(
+            metadata_queue.try_reserve_with_bytes(1_024).unwrap(),
+            SinkReservation::Reserved
+        );
+        assert_eq!(metadata_queue.reserved_metadata_bytes, 1_024);
+        metadata_queue
+            .commit_reserved_with_bytes(result, 0, 1_024)
+            .unwrap();
+        assert_eq!(metadata_queue.reserved_metadata_bytes, 0);
+    }
+
+    #[test]
+    fn schema_two_seals_bounded_udp_service_evidence_and_releases_bytes() {
+        let environment = Arc::new(AtomicUsize::new(0));
+        let mut queue = ResultQueue::new(1, environment.clone(), 2);
+        assert_eq!(
+            queue.try_reserve_with_bytes(1_024).unwrap(),
+            SinkReservation::Reserved
+        );
+        let metadata: Box<[u8]> = [1, 3, 0, b'D', b'N', b'S', 0, 0, 0].into();
+        let result = ScanResult {
+            probe: LogicalProbe {
+                logical_id: 0,
+                attempt: 1,
+                target: ScanTarget {
+                    address: IpAddress::V4(Ipv4Address::new([127, 0, 0, 1])),
+                    scope: None,
+                },
+                family: ProbeFamily::Udp,
+                port: Some(ProbePort::new(53).unwrap()),
+            },
+            outcome: ProbeOutcome::Network(NetworkState::Open),
+            evidence_strength: Some(EvidenceStrength::ProtocolTransaction16),
+            attempt: 1,
+            transmissions: 1,
+            rtt: None,
+            terminal_at: MonotonicTime::from_micros(1),
+            route_generation: 1,
+            terminal_reason: TerminalReason::Evidence(
+                nodenetscanner_engine::EvidenceKind::UdpReply,
+            ),
+            udp: Some(UdpResultEvidence {
+                terminal_probe_id: ProbeVariantId::new(1),
+                variants_attempted: 1,
+                response_kind: UdpResponseKind::DirectUdp,
+                contradictions: 0,
+                service: Some(UdpServiceEvidence {
+                    family: 1,
+                    confidence: UdpServiceConfidence::TransactionCorrelated,
+                    metadata: metadata.clone(),
+                }),
+            }),
+        };
+        queue
+            .commit_reserved_with_bytes(result, metadata.len(), 1_024)
+            .unwrap();
+        assert_eq!(environment.load(Ordering::Acquire), metadata.len());
+        let batch = queue.take(1).unwrap();
+        assert_eq!(batch.schema_version, 2);
+        assert_eq!(batch.terminal_udp_probe_ids.unwrap(), 1_u16.to_le_bytes());
+        assert_eq!(batch.udp_service_families.unwrap(), 1_u16.to_le_bytes());
+        assert_eq!(batch.udp_service_confidences.unwrap(), [3]);
+        assert_eq!(batch.service_metadata_bytes.unwrap(), metadata.as_ref());
+        assert_eq!(environment.load(Ordering::Acquire), 0);
     }
 
     #[test]
     fn completion_queue_survives_long_run_saturation_and_drain_cycles() {
         const CAPACITY: usize = 64;
         const CYCLES: u64 = 4_096;
-        let mut queue = ResultQueue::new(CAPACITY as u64);
+        let mut queue = result_queue(CAPACITY as u64);
         let template = ScanResult {
             probe: LogicalProbe {
                 logical_id: 0,
@@ -1200,11 +1560,12 @@ mod tests {
             terminal_at: MonotonicTime::from_micros(1),
             route_generation: 1,
             terminal_reason: TerminalReason::Timeout,
+            udp: None,
         };
         for cycle in 0..CYCLES {
             for offset in 0..CAPACITY {
                 assert_eq!(queue.try_reserve().unwrap(), SinkReservation::Reserved);
-                let mut value = template;
+                let mut value = template.clone();
                 value.probe.logical_id = cycle * CAPACITY as u64 + offset as u64;
                 queue.commit_reserved(value).unwrap();
             }

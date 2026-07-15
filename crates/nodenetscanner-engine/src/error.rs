@@ -32,6 +32,11 @@ pub enum PlanError {
     NoCompatibleTargets,
     LogicalProbeCountOverflow,
     LogicalProbeIndexOutOfRange,
+    TooManyUdpVariants,
+    DuplicateUdpVariant,
+    InvalidUdpMetadataReservation,
+    InvalidUdpPortRange,
+    PhysicalProbeCountOverflow,
 }
 
 /// Stable scheduler configuration failures.

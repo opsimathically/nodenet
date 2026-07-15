@@ -10,10 +10,10 @@ decision changes the commands, architecture, safety rules, or repository layout.
 `@opsimathically/nodenetraw` is the implemented, Linux-only native module for
 low-level raw socket capabilities. TypeScript is its public Node-facing
 environment. Rust implements native operations and crosses into Node through
-N-API. `@opsimathically/nodenetscanner` is a private Phase 23 preview with an
-initial TypeScript control API and Rust-owned portable Linux scan data plane.
-Its shared protocol, deterministic scan-engine, and read-only network-context
-foundations are implemented as internal crates.
+N-API. `@opsimathically/nodenetscanner` is the unpublished `0.2.0-rc.1`
+candidate with a TypeScript control API and Rust-owned portable Linux scan data
+plane. Its shared protocol, deterministic scan-engine, and read-only
+network-context foundations are implemented as internal crates.
 
 The project prioritizes:
 
@@ -126,7 +126,63 @@ fully recorded benchmark harness. Do not publish until native AArch64 execution
 passes; the supported x86-64 privileged namespace/fault matrix and benchmark
 pass locally. The post-Phase-25 audit corrected collision-free ICMP correlation
 lanes, four-way source-port partitioning, admission-time UDP wire-size limits,
-and repository-owner-built/root-executed Phase 19/20 namespace tests.
+repository-owner-built/root-executed Phase 19/20 namespace tests, and cached
+route deferral that must retain ARP/NDP setup until session-local learning.
+
+D-040 accepts the next scanner evolution in Phases 27–33. Phases 27 through 33
+are implementation-complete under D-041 through D-047. The goal is independently
+authored, protocol-aware UDP payload and state parity with the behavior of the
+frozen Nmap commit `10dfd2ff1cef6c1925232db45352149b659979b4`, followed by typed
+service evidence, adaptive probing, schema 2, and a parity/hardening audit. Nmap
+is an architecture/behavior reference only: its NPSL source and
+`nmap-service-probes` data must not be copied, loaded, parsed, generated from,
+linked, invoked as a helper, or shipped by this MIT project. The Phase 27
+readiness review is closed in
+`ai_documentation/44-udp-probe-parity-plan-review.md`, and completion evidence
+is in `ai_documentation/45-phase-27-report.md` through
+`ai_documentation/51-phase-33-report.md`. Catalogue `1.3.0` contains the nine
+independently authored safe probes plus comprehensive NetBIOS node status, NFS
+v3 NULL, SIP OPTIONS, SSDP unicast, L2TP SCCRQ, SNMPv1 `sysDescr.0`, and
+memcached statistics probes plus 17 comprehensive/legacy game, directory,
+device, industrial/building, peer-to-peer, remote-control, routing, and
+historical variants. Comprehensive breadth never grants risk consent; native
+admission filters every entry against amplification, stateful,
+authentication-attempt, sensitive-read, and target-impact permissions. Omitted
+UDP policy still selects only the unchanged safe pack. Phase 31 also adds
+checked destination-port ranges, a finite bounded byte-signature engine, and an
+executable project-owned capability ledger with 13 explicit blockers. Protocol
+sessions emit schema 2 with bounded service evidence, while retained schema-1
+decoding remains supported. Phase 32 implements sequential adaptive variants,
+evidence-only early stopping, soft family narrowing, conservative per-host ICMP
+pacing, and normalized policy/catalogue summary metadata; exhaustive remains the
+default. Phase 33 advances the scanner to unpublished `0.2.0-rc.1`, completes
+the line-by-line provenance audit, narrow black-box UDP elicitation/state
+comparison, dual-stack mode matrix, sanitizers/fuzzing/stress, and x86-64
+release rehearsal. It does not claim Nmap compatibility or complete
+service/version parity. Native AArch64 execution remains the only publication
+gate; see `ai_documentation/51-phase-33-report.md`. The adversarial Phase 27–33
+post-implementation audit corrected strict receive-parser gaps without changing
+request bytes, catalogue `1.3.0`, schema 2, or public policy. All locally
+available gates pass again; see
+`ai_documentation/52-phase-27-33-implementation-audit.md`.
+
+D-049 accepts Phases 34 through 44 as the next planning direction. High-value
+one-query/many-responder protocols will use a separate finite discovery session
+and discovery schema rather than weakening the existing one-result-per-target
+scan model. The sequence adds a bounded fan-out foundation, mDNS/DNS-SD,
+WS-Discovery/LLMNR, same-target evidence-derived endpoints with adaptive
+rpcbind, registered-only alternate-port correlation with TFTP, NAT-PMP/SQL
+Browser/configured Kerberos, QUIC Version Negotiation, reviewed IKE/DTLS, DHCP
+topology discovery, optional GTP/MQTT-SN/industrial packs, and an integrated
+release audit. Existing scan schemas 1/2, catalogue `1.3.0`, default UDP policy,
+and the Phase 33 comparison wording remain unchanged. D-050 closes the dedicated
+readiness review after correcting API lifecycle, pre-send fan-out reservation,
+per-query worst-case leases, explicit link/target scopes, combined environment
+ceilings, lazy privilege-separated transport, discovery registry/schema
+identity, advertised-endpoint authority, and protocol-specific mDNS/XML/TFTP/
+QUIC/DHCP contracts. Phase 34 is ready to implement and must emit no live
+discovery protocol; see
+`ai_documentation/54-advanced-udp-discovery-plan-review.md`.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -226,6 +282,17 @@ The current source of planning truth is
   terminal failures, and bounded pull batches. Context generation changes
   invalidate joined probes; terminal wire-correlation state is pruned after its
   finite late-response grace period rather than growing with the total scan.
+- D-040 governs protocol-aware UDP evolution. One logical target/port may own a
+  bounded lazy programme of physical protocol subprobes; every frame is rate
+  charged, every active/grace correlation entry is bounded, and one reserved
+  terminal result aggregates an arrival-order-independent evidence lattice.
+  Protocol requests use specification-valid transaction fields or exclusive
+  tuple/source-port ownership. Exact custom bytes, explicit legacy token prefix,
+  catalogue provenance/risk profiles, and schema-1-compatible schema 2 are
+  distinct contracts. `maxOutstanding` counts physical live subprobes. Profile
+  breadth never grants risk consent; safe mode never implicitly broadcasts,
+  multicasts, authenticates, reads sensitive data, or admits amplification-
+  prone/stateful/fixed-source behavior.
 
 ## Expected repository shape
 
@@ -237,12 +304,15 @@ The workspace uses this separation:
   package-specific release tooling, README, and changelog;
 - `crates/nodenetraw-native/` for the Rust N-API crate and its independently
   locked fuzz project;
-- `packages/nodenetscanner/` for the private, non-publishable Phase 22 scanner
-  TypeScript API, tests, and documentation;
+- `packages/nodenetscanner/` for the unpublished `0.2.0-rc.1` scanner TypeScript
+  API, tests, release tooling, and documentation;
 - implemented `crates/nodenet-protocols/`, `crates/nodenet-linux-context/`, and
   `crates/nodenetscanner-engine/` as non-published, N-API-free Rust libraries;
 - `crates/nodenetscanner-native/` for the scanner's environment runtime, Linux
   sockets, packet path, and N-API adapter;
+- the implemented UDP catalogue remains project-owned source/data within the
+  internal protocol/scanner crates, is generated deterministically without a
+  production dependency, and never reads an external Nmap registry;
 - `.github/workflows/ci.yml` for the unprivileged x86-64 quality gate;
 - Rust-local unit tests for native invariants;
 - `ai_documentation/` for plans, decisions, risks, and progress context.
@@ -297,6 +367,14 @@ or dependency directories.
   storage through N-API.
 - Do not begin an extreme backend before Phase 24 is release-capable and Phase
   25 records that one backend meets its performance/accuracy threshold.
+- For Phases 27–33, keep logical endpoint results distinct from physical UDP
+  subprobes, validate the worst-case variants × retries product before socket
+  admission, and place correlation only in protocol-valid fields. Prefer strict
+  typed parsers; any signature DSL must be finite, non-backtracking, bounded,
+  native-only, and unable to invoke JavaScript.
+- Every built-in UDP request/parser/port association requires primary-spec or
+  permissioned project-fixture provenance. Missing independent provenance is a
+  phase blocker, not permission to copy Nmap bytes or fingerprints.
 - Prefer additive, reviewable API slices over attempting every raw socket
   feature in one change.
 - Pair each exported native operation with argument validation, lifecycle
@@ -364,6 +442,8 @@ Install reproducibly with `npm ci`. The supported commands are:
   tests.
 - `npm run test:phase23:namespace`: Phase 23 batches and progress over the live
   loopback plus dual-stack veth/VLAN scanner matrix.
+- `npm run udp:catalogue:check`: validate deterministic UDP catalogue ordering,
+  provenance/resource contracts, and the frozen version/content hash.
 - `npm run hardening:verify`: release version, platform, license, dependency,
   target-manifest, and production advisory policy.
 - `npm run fuzz`: one minute of syscall-free parser/serializer libFuzzer work;
@@ -470,3 +550,38 @@ Do not report a change as verified without naming which gates actually ran.
 - `ai_documentation/40-phase-23-report.md`: compact scanner batches,
   backpressure, progress, abortable pulls, event adapter, and verification
   evidence.
+- `ai_documentation/41-phase-24-report.md`: scanner release hardening,
+  target-package, hostile-input, benchmark, and post-audit correction evidence.
+- `ai_documentation/42-phase-25-report.md`: portable/extreme backend comparison
+  evidence and the D-039 `no-go` outcome.
+- `ai_documentation/43-udp-probe-parity-plan.md`: accepted Phase 27–33
+  protocol-aware UDP parity, provenance, architecture, API/schema, safety,
+  testing, and release contract.
+- `ai_documentation/44-udp-probe-parity-plan-review.md`: closed Phase 27
+  readiness audit and binding corrections.
+- `ai_documentation/45-phase-27-report.md`: UDP catalogue/request-plan, policy
+  compatibility, schema-2 decoder, and verification evidence.
+- `ai_documentation/46-phase-28-report.md`: physical UDP scheduling, logical
+  aggregation, source-lane, ICMP-matrix, reservation, and verification evidence.
+- `ai_documentation/47-phase-29-report.md`: safe UDP standards pack, default
+  protocol policy, service evidence, and schema-2 emission evidence.
+- `ai_documentation/48-phase-30-report.md`: extended standards pack, independent
+  risk admission, resource bounds, deferrals, and live responder evidence.
+- `ai_documentation/49-phase-31-report.md`: comprehensive/legacy catalogue,
+  finite signatures, checked ranges, capability ledger, and verification
+  evidence.
+- `ai_documentation/50-phase-32-report.md`: adaptive UDP scheduling, evidence
+  stopping, public schema-2 views, and verification evidence.
+- `ai_documentation/51-phase-33-report.md`: final UDP provenance/parity audit,
+  release-candidate policy, and verification evidence.
+- `ai_documentation/52-phase-27-33-implementation-audit.md`: post-implementation
+  receive-parser, hostile-input, privileged, and release-health audit.
+- `ai_documentation/53-advanced-udp-discovery-evolution-plan.md`: accepted Phase
+  34–44 fan-out, derived-endpoint, alternate-port, handshake, topology, and
+  release contract.
+- `ai_documentation/54-advanced-udp-discovery-plan-review.md`: closed Phase 34
+  readiness audit and binding corrections.
+- `ai_documentation/55-phase-34-44-implementation-report.md`: initial advanced
+  discovery implementation and verification record.
+- `ai_documentation/56-phase-34-44-hardening-report.md`: adversarial findings,
+  runtime/protocol/API corrections, and current verification/open-gate record.

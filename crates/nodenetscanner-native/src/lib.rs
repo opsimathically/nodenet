@@ -9,6 +9,7 @@ compile_error!("nodenetscanner-native supports Linux only");
 
 mod backend;
 mod binding;
+mod discovery_session;
 mod error;
 mod model;
 mod runtime;

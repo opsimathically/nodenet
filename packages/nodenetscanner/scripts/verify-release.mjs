@@ -32,6 +32,19 @@ requireCondition(packageJson.engines.node === ">=26.0.0", "Node floor drift");
 requireCondition(packageJson.os?.join() === "linux", "Linux-only policy drift");
 requireCondition(packageJson.libc?.join() === "glibc", "glibc policy drift");
 requireCondition(policy.artifacts.length === 3, "artifact matrix incomplete");
+requireCondition(policy.schemaVersion === 2, "release policy schema drift");
+requireCondition(
+  policy.resultBatchSchema?.emittedVersion === 2 &&
+    policy.resultBatchSchema?.acceptedVersions?.join() === "1,2",
+  "result batch schema policy drift",
+);
+requireCondition(
+  policy.udpProbeCatalogue?.version === "1.3.0" &&
+    policy.udpProbeCatalogue?.protocolVariants === 33 &&
+    policy.udpProbeCatalogue?.safeVariants === 9 &&
+    policy.udpProbeCatalogue?.blockedCapabilities === 13,
+  "UDP catalogue policy drift",
+);
 const nativeCargo = readFileSync(manifests[0], "utf8");
 requireCondition(
   nativeCargo.includes(`version = "${packageJson.version}"`),

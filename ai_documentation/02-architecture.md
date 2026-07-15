@@ -117,6 +117,94 @@ result batches. Raw packets, packet-ring mappings, and any future UMEM storage
 never cross N-API. The portable backend is complete and independently releasable
 before any optional extreme backend is selected.
 
+### Service-aware UDP composition
+
+Phases 27–31 implement the catalogue, scheduler, safe/extended codecs, service
+evidence, and risk/resource admission described here. Phases 31–33 extend the
+same composition without another descriptor owner or packet path. A
+project-owned, statically linked UDP catalogue selects bounded protocol request
+programmes by destination port and explicit profile. The catalogue and every
+builder/parser live in the syscall-free protocol crate; Nmap source and data are
+neither build inputs nor runtime resources.
+
+One logical UDP endpoint remains one target/port result, but its programme may
+contain several physical protocol subprobes. The deterministic engine owns the
+programme cursor, fairness, retry policy, evidence lattice, decisive early
+stopping, and result reservation. The native addon owns exact request bytes,
+dynamic transaction values, collision-free source-port/grace entries, route and
+neighbor state, and packet I/O. Every physical frame consumes the rate budget,
+while result memory is reserved once for the logical endpoint.
+
+`rate.maxOutstanding` counts live physical subprobes, not logical endpoints.
+Result admission reserves both one row and the catalogue-declared maximum
+winning-metadata bytes. Profile breadth and per-risk consent are separate;
+selecting comprehensive or legacy entries does not authorize amplification,
+state, fixed-source, multicast/broadcast, authentication, or sensitive reads.
+Catalogue response/parser ceilings and amplification ratios are enforced before
+typed parsing; the live runtime additionally limits typed parser work to 4 MiB
+per session and 256 KiB per target in one tick.
+
+Logical result IDs and physical wire-correlation IDs are separate. Compact
+numeric service/probe/confidence evidence stays in the engine; variable bounded
+product/version metadata is held in a native sidecar and only the winning
+evidence sidecar is sealed into the terminal result. Losing, malformed, late,
+and expired sidecars are discarded deterministically.
+
+Protocol requests place correlation only in fields permitted by their
+specification. Exact custom mode sends caller bytes without modification; legacy
+token-prefix behavior remains an explicit compatibility mode. Typed response
+parsers or the finite non-backtracking signature engine may produce bounded
+service evidence. Raw responses and JavaScript callbacks never enter the packet
+hot path.
+
+Responses default to the probed target and source port. A catalogue entry may
+allow a specification-required alternate source port only for the same target
+with either a returned transaction field or an exclusive-lane, strictly parsed
+first-response handshake that pins the accepted server port. Arbitrary
+tuple-only evidence cannot open that exception. These phases do not add
+IP-fragment or application-message reassembly, and incomplete traffic cannot
+produce service identity.
+
+Decisive evidence may stop unsent variants, but a logical result remains in a
+bounded settling state while an already-emitted variant could still change its
+state or deterministic service winner. Its row and byte reservation remains held
+until settlement.
+
+Schema version 2 adds selected probe identity, attempted-variant count, physical
+transmissions, response kind, correlation strength, and optional bounded service
+metadata. It is a new schema rather than a reinterpretation of schema 1.
+Catalogue version/hash and selected policy make results reproducible across
+catalogue updates. The authoritative ownership, parity, licensing, API, and
+phase contract is [`43-udp-probe-parity-plan.md`](43-udp-probe-parity-plan.md).
+
+### Advanced discovery composition
+
+Phases 34–44 do not force multicast fan-out into the scan target/port product. A
+separate finite discovery session shares the environment runtime, immutable
+network context, lifecycle style, and sealed pull-batch machinery, but owns a
+distinct one-query/many-responder engine and discovery result schema. Explicit
+interfaces and families define link scope. A distinct targeted-discovery scope
+reuses checked targets/exclusions for operations that can produce several
+entities or require explicit inputs without turning them into scan rows. Every
+responder, record, entity, metadata byte, and physical query is independently
+bounded and reserved.
+
+Targeted evidence-derived work remains in the scan engine through a registered
+parent/child graph. Derived addresses cannot escape the original target and
+exclusion set; same-address/different-port is the accepted initial form. A
+registered alternate-port protocol uses an atomic first-valid same-target pin,
+not a relaxed tuple matcher. Stateful QUIC/IKE/DTLS discovery uses finite native
+state machines with declared byte, CPU, lifetime, dependency, and teardown
+budgets.
+
+Discovery schema 1 is independent from scan schemas 1/2. Any future scan
+parent/child columns require an additive schema 3 while retaining old decoders.
+The authoritative contract, sequencing, and initial ceilings are in
+[`53-advanced-udp-discovery-evolution-plan.md`](53-advanced-udp-discovery-evolution-plan.md).
+Its Phase 34 API, reservation, transport, schema, registry, privilege, and
+protocol-boundary questions are closed in
+[`54-advanced-udp-discovery-plan-review.md`](54-advanced-udp-discovery-plan-review.md).
+
 ## Module layers
 
 - **Public TypeScript facade:** exports supported classes/functions and types;

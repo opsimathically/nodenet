@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use nodenet_protocols::{EvidenceStrength, IpAddress, ProbePort};
 
-use crate::{ConfigError, EngineError};
+use crate::{ConfigError, EngineError, UdpProbeVariant};
 
 /// Microsecond monotonic time used for deterministic arithmetic.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -136,6 +136,67 @@ impl ProbeFamily {
             Self::Ndp | Self::Icmpv6Echo | Self::TcpSyn | Self::Udp
         )
     }
+}
+
+/// Stable identity of one user-visible logical endpoint probe.
+///
+/// Phase 27 introduces this separately from wire transmission identity so
+/// Phase 28 can schedule several physical UDP variants without multiplying
+/// public results.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LogicalProbeId(u64);
+
+impl LogicalProbeId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Stable identity of one physical on-wire transmission.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WireProbeId(u64);
+
+impl WireProbeId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Catalogue variant selected for a physical UDP probe.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ProbeVariantId(u16);
+
+impl ProbeVariantId {
+    #[must_use]
+    pub const fn new(value: u16) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// Explicit logical-to-wire association retained by future multi-variant work.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WireProbeIdentity {
+    pub logical: LogicalProbeId,
+    pub wire: WireProbeId,
+    pub variant: ProbeVariantId,
+    pub transmission: u8,
 }
 
 /// One lazily decoded logical probe tuple.
@@ -351,11 +412,39 @@ pub enum ContextResolution {
 /// One frame emission request; the transport constructs actual bytes in Phase 22.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProbeEmission {
+    /// Unique physical correlation identity. It equals the logical ID for
+    /// non-programme probes and compatibility single-variant UDP scans.
     pub probe_id: u64,
     pub probe: LogicalProbe,
     pub route_generation: u64,
     pub purpose: EmissionPurpose,
     pub transmission: u8,
+    /// Physical UDP request selected from the immutable programme snapshot.
+    pub udp_variant: Option<UdpProbeVariant>,
+}
+
+/// ICMP details retained until UDP aggregation has applied the frozen matrix.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct IcmpEvidence {
+    pub family: u8,
+    pub message_type: u8,
+    pub code: u8,
+    pub emitter_is_target: bool,
+    pub quote_strength: EvidenceStrength,
+}
+
+/// Stable physical response category used by UDP logical aggregation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum UdpResponseKind {
+    None = 0,
+    DirectUdp = 1,
+    Icmpv4TargetPortUnreachable = 2,
+    OtherIcmpv4 = 3,
+    Icmpv6TargetPortUnreachable = 4,
+    Icmpv6ParameterProblem = 5,
+    OtherIcmpv6 = 6,
+    Silence = 7,
 }
 
 /// Protocol-normalized response meaning supplied by the future receive path.
@@ -365,6 +454,8 @@ pub enum EvidenceKind {
     TcpReset,
     EchoReply,
     UdpReply,
+    /// Non-terminal parser evidence that may only narrow adaptive follow-ups.
+    UdpServiceHint,
     IcmpPortUnreachable,
     IcmpOtherError,
     ExplicitUnreachable,
@@ -374,11 +465,28 @@ pub enum EvidenceKind {
 }
 
 /// Correlated evidence addressed to an outstanding probe ID.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EvidenceEvent {
     pub probe_id: u64,
     pub kind: EvidenceKind,
     pub strength: EvidenceStrength,
+    pub icmp: Option<IcmpEvidence>,
+    pub udp_service: Option<UdpServiceEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum UdpServiceConfidence {
+    Signature = 1,
+    Parsed = 2,
+    TransactionCorrelated = 3,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct UdpServiceEvidence {
+    pub family: u16,
+    pub confidence: UdpServiceConfidence,
+    pub metadata: Box<[u8]>,
 }
 
 /// Structurally valid input that cannot safely classify a probe.
@@ -425,13 +533,13 @@ pub enum TerminalReason {
 }
 
 /// One lossless compact terminal transition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanResult {
     pub probe: LogicalProbe,
     pub outcome: ProbeOutcome,
     pub evidence_strength: Option<EvidenceStrength>,
     pub attempt: u32,
-    pub transmissions: u8,
+    pub transmissions: u32,
     pub rtt: Option<ScanDuration>,
     /// Terminal timestamp in microseconds from the session's monotonic origin.
     ///
@@ -440,6 +548,19 @@ pub struct ScanResult {
     pub terminal_at: MonotonicTime,
     pub route_generation: u64,
     pub terminal_reason: TerminalReason,
+    /// Physical UDP evidence that won deterministic aggregation.
+    pub udp: Option<UdpResultEvidence>,
+}
+
+/// Compact numeric UDP aggregation result; schema-2 serialization begins in
+/// Phase 29, while Phase 28 keeps it losslessly in the engine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpResultEvidence {
+    pub terminal_probe_id: Option<ProbeVariantId>,
+    pub variants_attempted: u16,
+    pub response_kind: UdpResponseKind,
+    pub contradictions: u16,
+    pub service: Option<UdpServiceEvidence>,
 }
 
 /// Bounded diagnostic counters; saturation is explicit and never wraps.
@@ -452,6 +573,8 @@ pub struct DiagnosticCounters {
     pub duplicates: u64,
     pub late_responses: u64,
     pub context_invalidations: u64,
+    /// Adaptive host cooldowns triggered by correlated-ICMP-then-silence symptoms.
+    pub udp_icmp_pacing: u64,
 }
 
 /// Nonblocking sink reservation outcome.

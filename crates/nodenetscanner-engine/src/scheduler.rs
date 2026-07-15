@@ -5,10 +5,12 @@ use nodenet_protocols::EvidenceStrength;
 use crate::{
     Clock, ContextResolution, ContextResolver, DiagnosticCounters, DiagnosticKind,
     DiscoverySilencePolicy, DriveReport, EmissionPurpose, EngineError, EvidenceEvent, EvidenceKind,
-    LogicalProbe, MAX_DEFERRED_CANDIDATES, MAX_TRANSITIONS_PER_DRIVE, MonotonicTime, NetworkState,
-    PrefixKey, ProbeEmission, ProbeFamily, ProbeOutcome, ProbeTransport, ResolvedContext,
-    ResultSink, RttEstimator, ScanDuration, ScanPlan, ScanResult, SchedulerConfig,
-    SeededPermutation, SessionLifecycle, SinkReservation, TerminalReason, TokenBucket,
+    IcmpEvidence, LogicalProbe, MAX_CONCURRENT_UDP_VARIANTS, MAX_DEFERRED_CANDIDATES,
+    MAX_TRANSITIONS_PER_DRIVE, MonotonicTime, NetworkState, PrefixKey, ProbeEmission, ProbeFamily,
+    ProbeOutcome, ProbeTransport, ResolvedContext, ResultSink, RttEstimator, ScanDuration,
+    ScanPlan, ScanResult, SchedulerConfig, SeededPermutation, SessionLifecycle, SinkReservation,
+    TerminalReason, TokenBucket, UdpProbeStrategy, UdpProbeVariant, UdpResponseKind,
+    UdpResultEvidence,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,8 +37,55 @@ struct ActiveProbe {
     context: ResolvedContext,
     stage: ActiveStage,
     stage_transmissions: u8,
-    total_transmissions: u8,
+    total_transmissions: u32,
     last_probe_sent_at: Option<MonotonicTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProgrammePhysical {
+    logical_id: u64,
+    variant: UdpProbeVariant,
+    stage: ActiveStage,
+    transmissions: u8,
+    last_sent_at: Option<MonotonicTime>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProgrammeBest {
+    rank: u8,
+    state: NetworkState,
+    strength: Option<EvidenceStrength>,
+    reason: TerminalReason,
+    response_kind: UdpResponseKind,
+    variant: UdpProbeVariant,
+    rtt: Option<ScanDuration>,
+    service: Option<crate::UdpServiceEvidence>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProgrammeLogical {
+    probe: LogicalProbe,
+    context: ResolvedContext,
+    variant_count: usize,
+    next_variant: usize,
+    active: usize,
+    grace: usize,
+    attempted: u16,
+    transmissions: u32,
+    contradictions: u16,
+    best: Option<ProgrammeBest>,
+    reservation_bytes: usize,
+    neighbor_ready: bool,
+    stop_unsent: bool,
+    soft_service_family: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProgrammeGrace {
+    logical_id: u64,
+    expires: MonotonicTime,
+    variant: UdpProbeVariant,
+    last_sent_at: Option<MonotonicTime>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,9 +121,16 @@ pub struct ScanScheduler {
     cursor: u64,
     active: BTreeMap<u64, ActiveProbe>,
     grace: BTreeMap<u64, MonotonicTime>,
+    programmes: BTreeMap<u64, ProgrammeLogical>,
+    programme_ready: VecDeque<u64>,
+    physical: BTreeMap<u64, ProgrammePhysical>,
+    programme_grace: BTreeMap<u64, ProgrammeGrace>,
+    next_wire_id: u64,
     deferred: VecDeque<LogicalProbe>,
     per_target: BTreeMap<crate::ScanTarget, usize>,
     per_prefix: BTreeMap<PrefixKey, usize>,
+    adaptive_icmp_seen: BTreeMap<crate::ScanTarget, u16>,
+    adaptive_not_before: BTreeMap<crate::ScanTarget, MonotonicTime>,
     bucket: Option<TokenBucket>,
     rtt: RttEstimator,
     diagnostics: DiagnosticCounters,
@@ -102,6 +158,7 @@ impl ScanScheduler {
                 crate::PlanError::LogicalProbeIndexOutOfRange,
             ));
         }
+        let next_wire_id = plan.logical_probe_count();
         Ok(Self {
             plan,
             config,
@@ -112,9 +169,16 @@ impl ScanScheduler {
             cursor: 0,
             active: BTreeMap::new(),
             grace: BTreeMap::new(),
+            programmes: BTreeMap::new(),
+            programme_ready: VecDeque::new(),
+            physical: BTreeMap::new(),
+            programme_grace: BTreeMap::new(),
+            next_wire_id,
             deferred: VecDeque::new(),
             per_target: BTreeMap::new(),
             per_prefix: BTreeMap::new(),
+            adaptive_icmp_seen: BTreeMap::new(),
+            adaptive_not_before: BTreeMap::new(),
             bucket: None,
             rtt: RttEstimator::default(),
             diagnostics: DiagnosticCounters::default(),
@@ -226,6 +290,7 @@ impl ScanScheduler {
         let now = self.observe_now(clock)?;
         self.prune_grace(now);
         let mut report = MutableReport::default();
+        self.prune_programme_grace(now, transport, sink, &mut report)?;
         self.sink_backpressured = false;
         if self.lifecycle == SessionLifecycle::Pausing {
             self.lifecycle = SessionLifecycle::Paused;
@@ -263,6 +328,11 @@ impl ScanScheduler {
     /// # Errors
     ///
     /// Propagates clock, transport, or sink failures.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::needless_pass_by_value,
+        reason = "legacy and programme evidence share one exactly-once lifecycle boundary"
+    )]
     pub fn handle_evidence<C, T, S>(
         &mut self,
         clock: &C,
@@ -277,6 +347,8 @@ impl ScanScheduler {
     {
         let now = self.observe_now(clock)?;
         self.prune_grace(now);
+        let mut grace_report = MutableReport::default();
+        self.prune_programme_grace(now, transport, sink, &mut grace_report)?;
         if self.deadline_reached(now) && !self.is_terminal() && self.stop.is_none() {
             self.initiate_stop(
                 ProbeOutcome::SessionDeadline,
@@ -302,6 +374,13 @@ impl ScanScheduler {
                     self.diagnostics.forged_or_unrelated.saturating_add(1);
                 return Ok(());
             }
+        }
+        if self.physical.contains_key(&event.probe_id)
+            || self.programme_grace.contains_key(&event.probe_id)
+        {
+            self.handle_programme_evidence(now, &event, sink)?;
+            self.complete_if_finished();
+            return Ok(());
         }
         if self.grace.contains_key(&event.probe_id) {
             self.diagnostics.duplicates = self.diagnostics.duplicates.saturating_add(1);
@@ -339,7 +418,7 @@ impl ScanScheduler {
             return Ok(());
         }
 
-        let Ok(mut terminal) = classify_terminal(active.probe, event) else {
+        let Ok(mut terminal) = classify_terminal(active.probe, &event) else {
             self.diagnostics.forged_or_unrelated =
                 self.diagnostics.forged_or_unrelated.saturating_add(1);
             return Ok(());
@@ -439,10 +518,39 @@ impl ScanScheduler {
                 Some(report),
             )?;
         }
+        let programme_ids: Vec<u64> = self
+            .programmes
+            .iter()
+            .filter_map(|(id, logical)| filter.matches(logical.context.generation).then_some(*id))
+            .take(MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions))
+            .collect();
+        for id in programme_ids {
+            if self
+                .programmes
+                .get(&id)
+                .is_some_and(|logical| logical.best.as_ref().is_some())
+            {
+                self.finish_programme_correlations(id, false)?;
+                self.settle_programme(id, now, sink, report)?;
+            } else {
+                self.abort_programme(
+                    id,
+                    now,
+                    ProbeOutcome::ContextInvalidated,
+                    TerminalReason::ContextInvalidated,
+                    sink,
+                    report,
+                )?;
+            }
+        }
         if !self
             .active
             .values()
             .any(|active| filter.matches(active.context.generation))
+            && !self
+                .programmes
+                .values()
+                .any(|logical| filter.matches(logical.context.generation))
         {
             self.invalidating_generation = None;
         }
@@ -529,8 +637,21 @@ impl ScanScheduler {
         }
         sink.release_reserved(self.active.len())
             .map_err(EngineError::Sink)?;
+        let programme_bytes = self
+            .programmes
+            .values()
+            .try_fold(0_usize, |total, logical| {
+                total.checked_add(logical.reservation_bytes)
+            })
+            .ok_or(EngineError::StateCapacityExceeded)?;
+        sink.release_reserved_with_bytes(self.programmes.len(), programme_bytes)
+            .map_err(EngineError::Sink)?;
         self.active.clear();
         self.grace.clear();
+        self.programmes.clear();
+        self.programme_ready.clear();
+        self.physical.clear();
+        self.programme_grace.clear();
         self.deferred.clear();
         self.per_target.clear();
         self.per_prefix.clear();
@@ -540,18 +661,23 @@ impl ScanScheduler {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "logical reservation and route admission remain one transactional boundary"
+    )]
     fn admit<R: ContextResolver, S: ResultSink>(
         &mut self,
-        _now: MonotonicTime,
+        now: MonotonicTime,
         resolver: &mut R,
         sink: &mut S,
         report: &mut MutableReport,
     ) -> Result<(), EngineError> {
         let mut examined = 0_usize;
         let mut deferred_remaining = self.deferred.len();
-        while self.active.len() < self.config.max_outstanding
+        while self.outstanding_physical() < self.config.max_outstanding
+            && self.active.len() + self.programmes.len() < self.config.max_outstanding
             && report.transitions < MAX_TRANSITIONS_PER_DRIVE
-            && self.grace.len() + self.active.len() < self.config.max_grace_entries
+            && self.total_correlation_entries() < self.config.max_grace_entries
             && examined < MAX_TRANSITIONS_PER_DRIVE
         {
             let Some(probe) = self.next_candidate(&mut deferred_remaining)? else {
@@ -601,6 +727,54 @@ impl ScanScheduler {
                 >= self.config.max_per_prefix
             {
                 self.defer(probe)?;
+                report.transitions += 1;
+                continue;
+            }
+            let udp_programme = self.plan.udp_programme_for(probe).map(|programme| {
+                let port = probe.port.expect("UDP probes always have ports");
+                (
+                    programme.variant_count_for(probe.target.address, port),
+                    programme.maximum_metadata_bytes_for_port(probe.target.address, port),
+                    programme.requires_logical_programme(probe.target.address, port),
+                )
+            });
+            if let Some((variant_count, reservation_bytes, requires_programme)) = udp_programme
+                && requires_programme
+            {
+                let reservation = sink
+                    .try_reserve_with_bytes(reservation_bytes)
+                    .map_err(EngineError::Sink)?;
+                if reservation == SinkReservation::Saturated {
+                    self.deferred.push_front(probe);
+                    self.sink_backpressured = true;
+                    report.transitions += 1;
+                    break;
+                }
+                let logical = ProgrammeLogical {
+                    probe,
+                    context,
+                    variant_count,
+                    next_variant: 0,
+                    active: 0,
+                    grace: 0,
+                    attempted: 0,
+                    transmissions: 0,
+                    contradictions: 0,
+                    best: None,
+                    reservation_bytes,
+                    neighbor_ready: context.neighbor_setup.is_none(),
+                    stop_unsent: false,
+                    soft_service_family: None,
+                };
+                if self.programmes.insert(probe.logical_id, logical).is_some() {
+                    return Err(EngineError::ReservationInvariant);
+                }
+                if variant_count == 0 {
+                    self.settle_programme(probe.logical_id, now, sink, report)?;
+                } else {
+                    self.programme_ready.push_back(probe.logical_id);
+                }
+                self.context_waiting = false;
                 report.transitions += 1;
                 continue;
             }
@@ -655,6 +829,8 @@ impl ScanScheduler {
         sink: &mut S,
         report: &mut MutableReport,
     ) -> Result<(), EngineError> {
+        self.schedule_programme_variants(now, report)?;
+        self.emit_programme_pending(now, transport, sink, report)?;
         let remaining = MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions);
         let ids: Vec<u64> = self
             .active
@@ -696,12 +872,24 @@ impl ScanScheduler {
                 route_generation: active.context.generation,
                 purpose,
                 transmission: active.stage_transmissions.saturating_add(1),
+                udp_variant: self
+                    .plan
+                    .udp_programme_for(active.probe)
+                    .and_then(|programme| {
+                        programme.variant_at_for(
+                            active.probe.target.address,
+                            active.probe.port.expect("UDP probes have ports"),
+                            0,
+                        )
+                    }),
             };
             let tracked = self
                 .active
                 .get_mut(&id)
                 .ok_or(EngineError::ReservationInvariant)?;
-            tracked.total_transmissions = tracked.total_transmissions.saturating_add(1);
+            if active.probe.family != ProbeFamily::Udp || purpose == EmissionPurpose::Probe {
+                tracked.total_transmissions = tracked.total_transmissions.saturating_add(1);
+            }
             if let Err(error) = transport.emit(emission) {
                 if let Some(terminal) = terminal {
                     self.terminalize(id, now, terminal, sink, Some(report))?;
@@ -732,12 +920,241 @@ impl ScanScheduler {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded scheduling transaction applies fairness, adaptive policy, and identity allocation"
+    )]
+    fn schedule_programme_variants(
+        &mut self,
+        now: MonotonicTime,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let mut turns = self.programme_ready.len();
+        while turns > 0
+            && self.outstanding_physical() < self.config.max_outstanding
+            && self.total_correlation_entries() < self.config.max_grace_entries
+            && report.transitions < MAX_TRANSITIONS_PER_DRIVE
+        {
+            turns -= 1;
+            let Some(logical_id) = self.programme_ready.pop_front() else {
+                break;
+            };
+            let Some(logical) = self.programmes.get(&logical_id) else {
+                continue;
+            };
+            if logical.stop_unsent || logical.next_variant >= logical.variant_count {
+                continue;
+            }
+            let programme = self
+                .plan
+                .udp_programme_for(logical.probe)
+                .ok_or(EngineError::ReservationInvariant)?;
+            let maximum_concurrent = if programme.strategy() == UdpProbeStrategy::Adaptive {
+                1
+            } else {
+                MAX_CONCURRENT_UDP_VARIANTS
+            };
+            if programme.strategy() == UdpProbeStrategy::Adaptive
+                && self
+                    .adaptive_not_before
+                    .get(&logical.probe.target)
+                    .is_some_and(|deadline| now < *deadline)
+            {
+                self.programme_ready.push_back(logical_id);
+                continue;
+            }
+            if logical.active >= maximum_concurrent
+                || (!logical.neighbor_ready && logical.active > 0)
+                || self
+                    .per_target
+                    .get(&logical.probe.target)
+                    .copied()
+                    .unwrap_or(0)
+                    >= self.config.max_per_target
+                || self
+                    .per_prefix
+                    .get(&logical.context.prefix_key)
+                    .copied()
+                    .unwrap_or(0)
+                    >= self.config.max_per_prefix
+            {
+                self.programme_ready.push_back(logical_id);
+                continue;
+            }
+            let mut selected_index = logical.next_variant;
+            let variant = loop {
+                let Some(candidate) = programme.variant_at_for(
+                    logical.probe.target.address,
+                    logical.probe.port.expect("UDP probes have ports"),
+                    selected_index,
+                ) else {
+                    break None;
+                };
+                if logical
+                    .soft_service_family
+                    .is_none_or(|family| candidate.service_family == Some(family))
+                {
+                    break Some(candidate);
+                }
+                selected_index += 1;
+            };
+            if variant.is_none() {
+                self.programmes
+                    .get_mut(&logical_id)
+                    .ok_or(EngineError::ReservationInvariant)?
+                    .next_variant = logical.variant_count;
+                continue;
+            }
+            let variant = variant.expect("checked above");
+            let purpose = if logical.neighbor_ready {
+                EmissionPurpose::Probe
+            } else {
+                EmissionPurpose::NeighborSetup(
+                    logical
+                        .context
+                        .neighbor_setup
+                        .ok_or(EngineError::InvalidContext)?,
+                )
+            };
+            let wire_id = self.next_wire_id;
+            self.next_wire_id = self
+                .next_wire_id
+                .checked_add(1)
+                .ok_or(EngineError::StateCapacityExceeded)?;
+            if self
+                .physical
+                .insert(
+                    wire_id,
+                    ProgrammePhysical {
+                        logical_id,
+                        variant,
+                        stage: ActiveStage::Pending(purpose),
+                        transmissions: 0,
+                        last_sent_at: None,
+                    },
+                )
+                .is_some()
+            {
+                return Err(EngineError::ReservationInvariant);
+            }
+            let logical = self
+                .programmes
+                .get_mut(&logical_id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            logical.next_variant = selected_index + 1;
+            logical.active += 1;
+            increment(&mut self.per_target, logical.probe.target);
+            increment(&mut self.per_prefix, logical.context.prefix_key);
+            if logical.neighbor_ready
+                && logical.next_variant < logical.variant_count
+                && logical.active < maximum_concurrent
+            {
+                self.programme_ready.push_back(logical_id);
+                turns += 1;
+            }
+            report.transitions += 1;
+        }
+        Ok(())
+    }
+
+    fn emit_programme_pending<T: ProbeTransport, S: ResultSink>(
+        &mut self,
+        now: MonotonicTime,
+        transport: &mut T,
+        sink: &mut S,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let remaining = MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions);
+        let ids: Vec<u64> = self
+            .physical
+            .iter()
+            .filter_map(|(id, physical)| {
+                matches!(physical.stage, ActiveStage::Pending(_)).then_some(*id)
+            })
+            .take(remaining)
+            .collect();
+        for wire_id in ids {
+            if !self
+                .bucket
+                .as_mut()
+                .ok_or(EngineError::InvalidLifecycle)?
+                .try_take(now)?
+            {
+                break;
+            }
+            let physical = self
+                .physical
+                .get(&wire_id)
+                .copied()
+                .ok_or(EngineError::ReservationInvariant)?;
+            let ActiveStage::Pending(purpose) = physical.stage else {
+                continue;
+            };
+            let logical = self
+                .programmes
+                .get(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            let emission = ProbeEmission {
+                probe_id: wire_id,
+                probe: logical.probe,
+                route_generation: logical.context.generation,
+                purpose,
+                transmission: physical.transmissions.saturating_add(1),
+                udp_variant: Some(physical.variant),
+            };
+            if let Err(error) = transport.emit(emission) {
+                self.fail_transport(now, error.code, sink, report)?;
+                break;
+            }
+            let timeout = self.timeout_for(physical.transmissions)?;
+            let deadline = now
+                .checked_add(timeout)
+                .ok_or(EngineError::DeadlineOverflow)?;
+            let tracked = self
+                .physical
+                .get_mut(&wire_id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            tracked.transmissions = tracked.transmissions.saturating_add(1);
+            tracked.stage = ActiveStage::Waiting { purpose, deadline };
+            if purpose == EmissionPurpose::Probe {
+                tracked.last_sent_at = Some(now);
+                let logical = self
+                    .programmes
+                    .get_mut(&physical.logical_id)
+                    .ok_or(EngineError::ReservationInvariant)?;
+                logical.transmissions = logical
+                    .transmissions
+                    .checked_add(1)
+                    .ok_or(EngineError::StateCapacityExceeded)?;
+                if physical.transmissions == 0 {
+                    logical.attempted = logical.attempted.saturating_add(1);
+                }
+            }
+            report.emissions += 1;
+            report.transitions += 1;
+        }
+        Ok(())
+    }
+
     fn process_timeouts<S: ResultSink>(
         &mut self,
         now: MonotonicTime,
         sink: &mut S,
         report: &mut MutableReport,
     ) -> Result<(), EngineError> {
+        let remaining = MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions);
+        let physical_ids: Vec<u64> = self
+            .physical
+            .iter()
+            .filter_map(|(id, physical)| match physical.stage {
+                ActiveStage::Waiting { deadline, .. } if now >= deadline => Some(*id),
+                _ => None,
+            })
+            .take(remaining)
+            .collect();
+        for id in physical_ids {
+            self.timeout_programme_one(id, now, report)?;
+        }
         let remaining = MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions);
         let ids: Vec<u64> = self
             .active
@@ -754,6 +1171,526 @@ impl ScanScheduler {
             }
             self.timeout_one(id, now, sink, report)?;
         }
+        Ok(())
+    }
+
+    fn timeout_programme_one(
+        &mut self,
+        wire_id: u64,
+        now: MonotonicTime,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let physical = self
+            .physical
+            .get(&wire_id)
+            .copied()
+            .ok_or(EngineError::ReservationInvariant)?;
+        let ActiveStage::Waiting { purpose, .. } = physical.stage else {
+            return Ok(());
+        };
+        if physical.transmissions.saturating_sub(1) < self.config.max_retransmissions {
+            self.physical
+                .get_mut(&wire_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .stage = ActiveStage::Pending(purpose);
+            report.transitions += 1;
+            return Ok(());
+        }
+        if matches!(purpose, EmissionPurpose::NeighborSetup(_)) {
+            self.programmes
+                .get_mut(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .stop_unsent = true;
+        } else if self.programme_strategy(physical.logical_id)? == UdpProbeStrategy::Adaptive {
+            let target = self
+                .programmes
+                .get(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .probe
+                .target;
+            if self.adaptive_icmp_seen.contains_key(&target) {
+                let deadline = now
+                    .checked_add(self.config.initial_timeout)
+                    .ok_or(EngineError::DeadlineOverflow)?;
+                self.adaptive_not_before.insert(target, deadline);
+                self.diagnostics.udp_icmp_pacing =
+                    self.diagnostics.udp_icmp_pacing.saturating_add(1);
+            }
+        }
+        self.retire_physical(wire_id, now, report)
+    }
+
+    fn retire_physical(
+        &mut self,
+        wire_id: u64,
+        now: MonotonicTime,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let physical = self
+            .physical
+            .remove(&wire_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        let expires = now
+            .checked_add(self.config.late_grace)
+            .ok_or(EngineError::DeadlineOverflow)?;
+        let logical = self
+            .programmes
+            .get_mut(&physical.logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        logical.active = logical
+            .active
+            .checked_sub(1)
+            .ok_or(EngineError::ReservationInvariant)?;
+        logical.grace += 1;
+        decrement(&mut self.per_target, logical.probe.target)?;
+        decrement(&mut self.per_prefix, logical.context.prefix_key)?;
+        self.programme_grace.insert(
+            wire_id,
+            ProgrammeGrace {
+                logical_id: physical.logical_id,
+                expires,
+                variant: physical.variant,
+                last_sent_at: physical.last_sent_at,
+            },
+        );
+        if !logical.stop_unsent
+            && logical.next_variant < logical.variant_count
+            && !self.programme_ready.contains(&physical.logical_id)
+        {
+            self.programme_ready.push_back(physical.logical_id);
+        }
+        report.transitions += 1;
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "active, grace, neighbor, hint, and terminal evidence share one exactly-once boundary"
+    )]
+    fn handle_programme_evidence<S: ResultSink>(
+        &mut self,
+        now: MonotonicTime,
+        event: &EvidenceEvent,
+        sink: &mut S,
+    ) -> Result<(), EngineError> {
+        if let Some(grace) = self.programme_grace.get(&event.probe_id).copied() {
+            self.diagnostics.late_responses = self.diagnostics.late_responses.saturating_add(1);
+            if event.kind == EvidenceKind::UdpServiceHint {
+                if let Some(service) = event.udp_service.as_ref() {
+                    if self.programme_strategy(grace.logical_id)? == UdpProbeStrategy::Adaptive {
+                        self.programmes
+                            .get_mut(&grace.logical_id)
+                            .ok_or(EngineError::ReservationInvariant)?
+                            .soft_service_family = Some(service.family);
+                    }
+                } else {
+                    self.diagnostics.forged_or_unrelated =
+                        self.diagnostics.forged_or_unrelated.saturating_add(1);
+                }
+                return Ok(());
+            }
+            if let Some(best) = classify_udp_evidence(grace.variant, event, grace.last_sent_at, now)
+            {
+                let decisive = best.rank == 4;
+                let adaptive_stop = self.programme_strategy(grace.logical_id)?
+                    == UdpProbeStrategy::Adaptive
+                    && best.rank >= 3;
+                self.update_programme_best(grace.logical_id, best)?;
+                if adaptive_stop {
+                    self.programmes
+                        .get_mut(&grace.logical_id)
+                        .ok_or(EngineError::ReservationInvariant)?
+                        .stop_unsent = true;
+                } else if decisive {
+                    self.finish_programme_correlations(grace.logical_id, true)?;
+                }
+                if adaptive_stop || decisive {
+                    let mut report = MutableReport::default();
+                    self.settle_ready_programmes(now, sink, &mut report)?;
+                }
+            } else if !is_udp_observation(event.kind) {
+                self.diagnostics.forged_or_unrelated =
+                    self.diagnostics.forged_or_unrelated.saturating_add(1);
+            }
+            return Ok(());
+        }
+        let physical = self
+            .physical
+            .get(&event.probe_id)
+            .copied()
+            .ok_or(EngineError::ReservationInvariant)?;
+        let ActiveStage::Waiting { purpose, deadline } = physical.stage else {
+            self.diagnostics.forged_or_unrelated =
+                self.diagnostics.forged_or_unrelated.saturating_add(1);
+            return Ok(());
+        };
+        if now >= deadline {
+            let mut report = MutableReport::default();
+            self.timeout_programme_one(event.probe_id, now, &mut report)?;
+            self.diagnostics.late_responses = self.diagnostics.late_responses.saturating_add(1);
+            if let Some(grace) = self.programme_grace.get(&event.probe_id).copied()
+                && let Some(best) =
+                    classify_udp_evidence(grace.variant, event, grace.last_sent_at, now)
+            {
+                let decisive = best.rank == 4;
+                let adaptive_stop = self.programme_strategy(grace.logical_id)?
+                    == UdpProbeStrategy::Adaptive
+                    && best.rank >= 3;
+                self.update_programme_best(grace.logical_id, best)?;
+                if adaptive_stop {
+                    self.programmes
+                        .get_mut(&grace.logical_id)
+                        .ok_or(EngineError::ReservationInvariant)?
+                        .stop_unsent = true;
+                    self.settle_ready_programmes(now, sink, &mut report)?;
+                } else if decisive {
+                    self.finish_programme_correlations(grace.logical_id, true)?;
+                    self.settle_ready_programmes(now, sink, &mut report)?;
+                }
+            }
+            return Ok(());
+        }
+        if let EmissionPurpose::NeighborSetup(setup) = purpose {
+            if !valid_neighbor_evidence(setup, event.kind) {
+                self.diagnostics.forged_or_unrelated =
+                    self.diagnostics.forged_or_unrelated.saturating_add(1);
+                return Ok(());
+            }
+            self.physical
+                .get_mut(&event.probe_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .stage = ActiveStage::Pending(EmissionPurpose::Probe);
+            self.physical
+                .get_mut(&event.probe_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .transmissions = 0;
+            let logical = self
+                .programmes
+                .get_mut(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            logical.neighbor_ready = true;
+            if !self.programme_ready.contains(&physical.logical_id) {
+                self.programme_ready.push_back(physical.logical_id);
+            }
+            return Ok(());
+        }
+        if event.kind == EvidenceKind::UdpServiceHint {
+            let Some(service) = event.udp_service.as_ref() else {
+                self.diagnostics.forged_or_unrelated =
+                    self.diagnostics.forged_or_unrelated.saturating_add(1);
+                return Ok(());
+            };
+            if self.programme_strategy(physical.logical_id)? == UdpProbeStrategy::Adaptive {
+                self.programmes
+                    .get_mut(&physical.logical_id)
+                    .ok_or(EngineError::ReservationInvariant)?
+                    .soft_service_family = Some(service.family);
+            }
+            let mut report = MutableReport::default();
+            self.retire_physical(event.probe_id, now, &mut report)?;
+            self.settle_ready_programmes(now, sink, &mut report)?;
+            return Ok(());
+        }
+        let Some(best) = classify_udp_evidence(physical.variant, event, physical.last_sent_at, now)
+        else {
+            if !is_udp_observation(event.kind) {
+                self.diagnostics.forged_or_unrelated =
+                    self.diagnostics.forged_or_unrelated.saturating_add(1);
+            }
+            return Ok(());
+        };
+        let decisive = best.rank == 4;
+        let adaptive_stop = self.programme_strategy(physical.logical_id)?
+            == UdpProbeStrategy::Adaptive
+            && best.rank >= 3;
+        if self.programme_strategy(physical.logical_id)? == UdpProbeStrategy::Adaptive
+            && event.icmp.is_some()
+        {
+            let target = self
+                .programmes
+                .get(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .probe
+                .target;
+            let value = self.adaptive_icmp_seen.entry(target).or_default();
+            *value = value.saturating_add(1);
+        }
+        self.update_programme_best(physical.logical_id, best)?;
+        let mut report = MutableReport::default();
+        self.retire_physical(event.probe_id, now, &mut report)?;
+        if adaptive_stop {
+            self.programmes
+                .get_mut(&physical.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?
+                .stop_unsent = true;
+        } else if decisive {
+            self.finish_programme_correlations(physical.logical_id, true)?;
+        }
+        self.settle_ready_programmes(now, sink, &mut report)
+    }
+
+    fn programme_strategy(&self, logical_id: u64) -> Result<UdpProbeStrategy, EngineError> {
+        let logical = self
+            .programmes
+            .get(&logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        self.plan
+            .udp_programme_for(logical.probe)
+            .map(crate::UdpProbeProgramme::strategy)
+            .ok_or(EngineError::ReservationInvariant)
+    }
+
+    fn update_programme_best(
+        &mut self,
+        logical_id: u64,
+        candidate: ProgrammeBest,
+    ) -> Result<(), EngineError> {
+        let logical = self
+            .programmes
+            .get_mut(&logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        if logical
+            .best
+            .as_ref()
+            .is_some_and(|prior| prior.state != candidate.state)
+        {
+            logical.contradictions = logical.contradictions.saturating_add(1);
+        }
+        let replace = logical.best.as_ref().is_none_or(|prior| {
+            candidate.rank > prior.rank
+                || (candidate.rank == prior.rank
+                    && (service_rank(candidate.service.as_ref())
+                        > service_rank(prior.service.as_ref())
+                        || (service_rank(candidate.service.as_ref())
+                            == service_rank(prior.service.as_ref())
+                            && variant_order(candidate.variant) < variant_order(prior.variant))))
+        });
+        if replace {
+            logical.best = Some(candidate);
+        }
+        Ok(())
+    }
+
+    fn finish_programme_correlations(
+        &mut self,
+        logical_id: u64,
+        normalize_decisive: bool,
+    ) -> Result<(), EngineError> {
+        let (target, prefix) = self
+            .programmes
+            .get(&logical_id)
+            .map(|logical| (logical.probe.target, logical.context.prefix_key))
+            .ok_or(EngineError::ReservationInvariant)?;
+        let active_ids: Vec<u64> = self
+            .physical
+            .iter()
+            .filter_map(|(id, physical)| (physical.logical_id == logical_id).then_some(*id))
+            .collect();
+        for id in active_ids {
+            self.physical.remove(&id);
+            decrement(&mut self.per_target, target)?;
+            decrement(&mut self.per_prefix, prefix)?;
+        }
+        self.programme_grace
+            .retain(|_, grace| grace.logical_id != logical_id);
+        self.programme_ready.retain(|id| *id != logical_id);
+        let logical = self
+            .programmes
+            .get_mut(&logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        logical.active = 0;
+        logical.grace = 0;
+        logical.stop_unsent = true;
+        // A direct UDP response is the maximum lattice rank. Earlier/later
+        // lower-rank observations cannot change the serialized winner, and
+        // normalizing this non-wire diagnostic keeps arrival order irrelevant.
+        if normalize_decisive {
+            logical.contradictions = 0;
+        }
+        Ok(())
+    }
+
+    fn prune_programme_grace<T: ProbeTransport, S: ResultSink>(
+        &mut self,
+        now: MonotonicTime,
+        transport: &mut T,
+        sink: &mut S,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let expired: Vec<u64> = self
+            .programme_grace
+            .iter()
+            .filter_map(|(id, grace)| (now >= grace.expires).then_some(*id))
+            .take(MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions))
+            .collect();
+        for id in expired {
+            let grace = self
+                .programme_grace
+                .remove(&id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            transport.retire(id);
+            let logical = self
+                .programmes
+                .get_mut(&grace.logical_id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            logical.grace = logical
+                .grace
+                .checked_sub(1)
+                .ok_or(EngineError::ReservationInvariant)?;
+            report.transitions += 1;
+        }
+        self.settle_ready_programmes(now, sink, report)
+    }
+
+    fn settle_ready_programmes<S: ResultSink>(
+        &mut self,
+        now: MonotonicTime,
+        sink: &mut S,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let ready: Vec<u64> = self
+            .programmes
+            .iter()
+            .filter_map(|(id, logical)| {
+                let no_more = logical.stop_unsent || logical.next_variant == logical.variant_count;
+                (no_more && logical.active == 0 && logical.grace == 0).then_some(*id)
+            })
+            .take(MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions))
+            .collect();
+        for logical_id in ready {
+            self.settle_programme(logical_id, now, sink, report)?;
+        }
+        Ok(())
+    }
+
+    fn settle_programme<S: ResultSink>(
+        &mut self,
+        logical_id: u64,
+        now: MonotonicTime,
+        sink: &mut S,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let logical = self
+            .programmes
+            .remove(&logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        let (outcome, strength, rtt, reason, response_kind, terminal_probe_id, service) =
+            logical.best.map_or(
+                (
+                    ProbeOutcome::Network(NetworkState::OpenOrFiltered),
+                    None,
+                    None,
+                    TerminalReason::Timeout,
+                    UdpResponseKind::Silence,
+                    None,
+                    None,
+                ),
+                |best| {
+                    (
+                        ProbeOutcome::Network(best.state),
+                        best.strength,
+                        best.rtt,
+                        best.reason,
+                        best.response_kind,
+                        best.variant.catalogue_probe_id,
+                        best.service,
+                    )
+                },
+            );
+        let result = ScanResult {
+            probe: logical.probe,
+            outcome,
+            evidence_strength: strength,
+            attempt: logical.probe.attempt,
+            transmissions: logical.transmissions,
+            rtt,
+            terminal_at: now,
+            route_generation: logical.context.generation,
+            terminal_reason: reason,
+            udp: Some(UdpResultEvidence {
+                terminal_probe_id,
+                variants_attempted: logical.attempted,
+                response_kind,
+                contradictions: logical.contradictions,
+                service,
+            }),
+        };
+        let actual_metadata_bytes = result
+            .udp
+            .as_ref()
+            .and_then(|udp| udp.service.as_ref())
+            .map_or(0, |service| service.metadata.len());
+        sink.commit_reserved_with_bytes(result, actual_metadata_bytes, logical.reservation_bytes)
+            .map_err(EngineError::Sink)?;
+        self.prune_adaptive_target_state(logical.probe.target);
+        report.results += 1;
+        report.transitions += 1;
+        Ok(())
+    }
+
+    fn prune_adaptive_target_state(&mut self, target: crate::ScanTarget) {
+        if !self
+            .programmes
+            .values()
+            .any(|logical| logical.probe.target == target)
+        {
+            self.adaptive_icmp_seen.remove(&target);
+            self.adaptive_not_before.remove(&target);
+        }
+    }
+
+    fn abort_programme<S: ResultSink>(
+        &mut self,
+        logical_id: u64,
+        now: MonotonicTime,
+        outcome: ProbeOutcome,
+        reason: TerminalReason,
+        sink: &mut S,
+        report: &mut MutableReport,
+    ) -> Result<(), EngineError> {
+        let logical = self
+            .programmes
+            .remove(&logical_id)
+            .ok_or(EngineError::ReservationInvariant)?;
+        let active_ids: Vec<u64> = self
+            .physical
+            .iter()
+            .filter_map(|(id, physical)| (physical.logical_id == logical_id).then_some(*id))
+            .collect();
+        for id in active_ids {
+            let physical = self
+                .physical
+                .remove(&id)
+                .ok_or(EngineError::ReservationInvariant)?;
+            decrement(&mut self.per_target, logical.probe.target)?;
+            decrement(&mut self.per_prefix, logical.context.prefix_key)?;
+            debug_assert_eq!(physical.logical_id, logical_id);
+        }
+        self.programme_grace
+            .retain(|_, grace| grace.logical_id != logical_id);
+        self.programme_ready.retain(|id| *id != logical_id);
+        let result = ScanResult {
+            probe: logical.probe,
+            outcome,
+            evidence_strength: None,
+            attempt: logical.probe.attempt,
+            transmissions: logical.transmissions,
+            rtt: None,
+            terminal_at: now,
+            route_generation: logical.context.generation,
+            terminal_reason: reason,
+            udp: Some(UdpResultEvidence {
+                terminal_probe_id: None,
+                variants_attempted: logical.attempted,
+                response_kind: UdpResponseKind::Silence,
+                contradictions: logical.contradictions,
+                service: None,
+            }),
+        };
+        sink.commit_reserved_with_bytes(result, 0, logical.reservation_bytes)
+            .map_err(EngineError::Sink)?;
+        report.results += 1;
+        report.transitions += 1;
         Ok(())
     }
 
@@ -828,6 +1765,7 @@ impl ScanScheduler {
             terminal_at: now,
             route_generation: active.context.generation,
             terminal_reason: terminal.reason,
+            udp: None,
         };
         sink.commit_reserved(result).map_err(EngineError::Sink)?;
         if self.active.remove(&id).is_none() {
@@ -883,7 +1821,25 @@ impl ScanScheduler {
                 Some(report),
             )?;
         }
-        if self.active.is_empty() {
+        let programme_ids: Vec<u64> = self
+            .programmes
+            .keys()
+            .copied()
+            .take(MAX_TRANSITIONS_PER_DRIVE.saturating_sub(report.transitions))
+            .collect();
+        for id in programme_ids {
+            if self
+                .programmes
+                .get(&id)
+                .is_some_and(|logical| logical.best.is_some())
+            {
+                self.finish_programme_correlations(id, false)?;
+                self.settle_programme(id, now, sink, report)?;
+            } else {
+                self.abort_programme(id, now, stop.outcome, stop.reason, sink, report)?;
+            }
+        }
+        if self.active.is_empty() && self.programmes.is_empty() {
             self.lifecycle = stop.final_lifecycle;
             self.stop = None;
         }
@@ -965,6 +1921,58 @@ impl ScanScheduler {
         Ok(now)
     }
 
+    fn outstanding_physical(&self) -> usize {
+        self.active.len().saturating_add(self.physical.len())
+    }
+
+    fn total_correlation_entries(&self) -> usize {
+        self.active
+            .len()
+            .saturating_add(self.physical.len())
+            .saturating_add(self.grace.len())
+            .saturating_add(self.programme_grace.len())
+    }
+
+    fn can_schedule_programme_variant(&self, now: MonotonicTime) -> bool {
+        if self.outstanding_physical() >= self.config.max_outstanding
+            || self.total_correlation_entries() >= self.config.max_grace_entries
+        {
+            return false;
+        }
+        self.programme_ready.iter().any(|logical_id| {
+            self.programmes.get(logical_id).is_some_and(|logical| {
+                let programme = self.plan.udp_programme_for(logical.probe);
+                let maximum_concurrent = if programme
+                    .is_some_and(|value| value.strategy() == UdpProbeStrategy::Adaptive)
+                {
+                    1
+                } else {
+                    MAX_CONCURRENT_UDP_VARIANTS
+                };
+                !logical.stop_unsent
+                    && logical.next_variant < logical.variant_count
+                    && logical.active < maximum_concurrent
+                    && self
+                        .adaptive_not_before
+                        .get(&logical.probe.target)
+                        .is_none_or(|deadline| now >= *deadline)
+                    && (logical.neighbor_ready || logical.active == 0)
+                    && self
+                        .per_target
+                        .get(&logical.probe.target)
+                        .copied()
+                        .unwrap_or(0)
+                        < self.config.max_per_target
+                    && self
+                        .per_prefix
+                        .get(&logical.context.prefix_key)
+                        .copied()
+                        .unwrap_or(0)
+                        < self.config.max_per_prefix
+            })
+        })
+    }
+
     fn deadline_reached(&self, now: MonotonicTime) -> bool {
         self.session_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -979,6 +1987,8 @@ impl ScanScheduler {
             && self.cursor == self.plan.logical_probe_count()
             && self.deferred.is_empty()
             && self.active.is_empty()
+            && self.programmes.is_empty()
+            && self.physical.is_empty()
         {
             self.lifecycle = SessionLifecycle::Completed;
         }
@@ -1002,9 +2012,9 @@ impl ScanScheduler {
                 transitions: report.transitions,
                 emissions: report.emissions,
                 results: report.results,
-                outstanding: self.active.len(),
+                outstanding: self.outstanding_physical(),
                 deferred: self.deferred.len(),
-                grace: self.grace.len(),
+                grace: self.grace.len().saturating_add(self.programme_grace.len()),
                 sink_backpressured: self.sink_backpressured,
                 context_waiting: self.context_waiting,
                 next_wakeup: None,
@@ -1019,15 +2029,39 @@ impl ScanScheduler {
                 next_wakeup = earlier(next_wakeup, Some(deadline));
             }
         }
+        for physical in self.physical.values() {
+            if let ActiveStage::Waiting { deadline, .. } = physical.stage {
+                next_wakeup = earlier(next_wakeup, Some(deadline));
+            }
+        }
         if self.lifecycle == SessionLifecycle::Running {
             next_wakeup = earlier(next_wakeup, self.grace.values().copied().min());
+            next_wakeup = earlier(
+                next_wakeup,
+                self.programme_grace
+                    .values()
+                    .map(|grace| grace.expires)
+                    .min(),
+            );
+            next_wakeup = earlier(
+                next_wakeup,
+                self.adaptive_not_before
+                    .values()
+                    .copied()
+                    .filter(|value| now < *value)
+                    .min(),
+            );
         }
         let has_pending_frame = self.active.values().any(|active| {
             matches!(
                 active.stage,
                 ActiveStage::Pending(_) | ActiveStage::PendingCleanup(_)
             )
-        });
+        }) || self
+            .physical
+            .values()
+            .any(|physical| matches!(physical.stage, ActiveStage::Pending(_)))
+            || self.can_schedule_programme_variant(now);
         let can_admit = !self.context_waiting
             && !self.sink_backpressured
             && (self.cursor < self.plan.logical_probe_count() || !self.deferred.is_empty());
@@ -1044,14 +2078,18 @@ impl ScanScheduler {
             transitions: report.transitions,
             emissions: report.emissions,
             results: report.results,
-            outstanding: self.active.len(),
+            outstanding: self.outstanding_physical(),
             deferred: self.deferred.len(),
-            grace: self.grace.len(),
+            grace: self.grace.len().saturating_add(self.programme_grace.len()),
             sink_backpressured: self.sink_backpressured,
             context_waiting: self.context_waiting,
             next_wakeup,
         })
     }
+}
+
+fn service_rank(service: Option<&crate::UdpServiceEvidence>) -> u8 {
+    service.map_or(0, |value| value.confidence as u8)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1063,7 +2101,7 @@ struct MutableReport {
 
 fn classify_terminal(
     probe: LogicalProbe,
-    event: EvidenceEvent,
+    event: &EvidenceEvent,
 ) -> Result<PendingTerminal, EngineError> {
     let state = match probe.family {
         ProbeFamily::TcpSyn => match event.kind {
@@ -1110,6 +2148,99 @@ fn classify_terminal(
         rtt: None,
         reason: TerminalReason::Evidence(event.kind),
     })
+}
+
+fn classify_udp_evidence(
+    variant: UdpProbeVariant,
+    event: &EvidenceEvent,
+    sent_at: Option<MonotonicTime>,
+    now: MonotonicTime,
+) -> Option<ProgrammeBest> {
+    let (rank, state, response_kind) = match event.kind {
+        EvidenceKind::UdpReply => (4, NetworkState::Open, UdpResponseKind::DirectUdp),
+        EvidenceKind::IcmpPortUnreachable
+        | EvidenceKind::IcmpOtherError
+        | EvidenceKind::ExplicitUnreachable => classify_udp_icmp(event.icmp, event.kind)?,
+        _ => return None,
+    };
+    Some(ProgrammeBest {
+        rank,
+        state,
+        strength: Some(event.strength),
+        reason: TerminalReason::Evidence(event.kind),
+        response_kind,
+        variant,
+        rtt: sent_at.and_then(|sent| now.elapsed_since(sent)),
+        service: event.udp_service.clone(),
+    })
+}
+
+const fn is_udp_observation(kind: EvidenceKind) -> bool {
+    matches!(
+        kind,
+        EvidenceKind::UdpReply
+            | EvidenceKind::IcmpPortUnreachable
+            | EvidenceKind::IcmpOtherError
+            | EvidenceKind::ExplicitUnreachable
+    )
+}
+
+fn classify_udp_icmp(
+    detail: Option<IcmpEvidence>,
+    legacy_kind: EvidenceKind,
+) -> Option<(u8, NetworkState, UdpResponseKind)> {
+    let Some(detail) = detail else {
+        return match legacy_kind {
+            EvidenceKind::IcmpPortUnreachable => Some((
+                3,
+                NetworkState::Closed,
+                UdpResponseKind::Icmpv4TargetPortUnreachable,
+            )),
+            EvidenceKind::IcmpOtherError | EvidenceKind::ExplicitUnreachable => {
+                Some((2, NetworkState::Filtered, UdpResponseKind::OtherIcmpv4))
+            }
+            _ => None,
+        };
+    };
+    match (detail.family, detail.message_type, detail.code) {
+        (4, 3, 3) | (6, 1, 4) if detail.emitter_is_target => Some((
+            3,
+            NetworkState::Closed,
+            if detail.family == 4 {
+                UdpResponseKind::Icmpv4TargetPortUnreachable
+            } else {
+                UdpResponseKind::Icmpv6TargetPortUnreachable
+            },
+        )),
+        (4, 3, 3) => Some((2, NetworkState::Filtered, UdpResponseKind::OtherIcmpv4)),
+        (4, 3, 0 | 1 | 2 | 9 | 10 | 13) | (4, 11, 0 | 1) | (6, 1, 0..=6) | (6, 4, 1) => Some((
+            2,
+            NetworkState::Filtered,
+            if detail.family == 4 {
+                UdpResponseKind::OtherIcmpv4
+            } else if detail.message_type == 4 {
+                UdpResponseKind::Icmpv6ParameterProblem
+            } else {
+                UdpResponseKind::OtherIcmpv6
+            },
+        )),
+        (6, 4, 0) => Some((
+            4,
+            NetworkState::Open,
+            UdpResponseKind::Icmpv6ParameterProblem,
+        )),
+        _ => None,
+    }
+}
+
+const fn variant_order(variant: UdpProbeVariant) -> (u16, u16) {
+    (
+        match variant.catalogue_probe_id {
+            Some(value) => value.get(),
+            None => u16::MAX,
+        },
+        variant.request_index,
+    )
 }
 
 const fn valid_neighbor_setup(probe: LogicalProbe, setup: Option<ProbeFamily>) -> bool {

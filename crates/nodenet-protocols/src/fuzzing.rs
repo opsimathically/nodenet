@@ -2,13 +2,14 @@
 
 use crate::{
     ArpEthernetIpv4Operation, ArpEthernetIpv4Packet, ETHER_TYPE_IPV4, EthernetFrame,
-    EthernetHeader, FrameTemplate, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address, Ipv6Extension,
-    Ipv6Packet, MAX_ETHERNET_FRAME_LENGTH, MacAddress, NdpContext, PacketKind, PacketPlan,
-    PacketStart, ParseMode, PatchDescriptor, PatchKind, PatchValue, TemplatePatch,
-    TransportChecksumContext, VlanStack, VlanTag, VlanTagProtocol, inspect_packet,
-    parse_arp_packet, parse_ethernet_frame, parse_icmpv4_message, parse_icmpv6_message,
-    parse_ipv4_packet, parse_ipv6_packet, parse_ndp_message, parse_network_frame,
-    parse_quoted_ip_packet, parse_tcp_segment, parse_udp_datagram,
+    EthernetHeader, FrameTemplate, IpAddress, IpProtocol, Ipv4Address, Ipv4Packet, Ipv6Address,
+    Ipv6Extension, Ipv6Packet, MAX_ETHERNET_FRAME_LENGTH, MacAddress, NdpContext, PacketKind,
+    PacketPlan, PacketStart, ParseMode, PatchDescriptor, PatchKind, PatchValue, TemplatePatch,
+    TransportChecksumContext, UdpCatalogueProbe, UdpProbeBuildContext, VlanStack, VlanTag,
+    VlanTagProtocol, build_udp_catalogue_request, inspect_packet, parse_arp_packet,
+    parse_ethernet_frame, parse_icmpv4_message, parse_icmpv6_message, parse_ipv4_packet,
+    parse_ipv6_packet, parse_ndp_message, parse_network_frame, parse_quoted_ip_packet,
+    parse_tcp_segment, parse_udp_catalogue_response, parse_udp_datagram,
 };
 
 /// Exercises strict and explicitly compatible parser surfaces with arbitrary bytes.
@@ -60,6 +61,54 @@ pub fn parse_surface(data: &[u8]) {
         },
     );
     let _ = parse_quoted_ip_packet(payload);
+    for probe in [
+        UdpCatalogueProbe::Dns,
+        UdpCatalogueProbe::Ntp,
+        UdpCatalogueProbe::SnmpV3,
+        UdpCatalogueProbe::Rpcbind,
+        UdpCatalogueProbe::Stun,
+        UdpCatalogueProbe::Coap,
+        UdpCatalogueProbe::AsfRmcp,
+        UdpCatalogueProbe::Memcached,
+        UdpCatalogueProbe::Pcp,
+        UdpCatalogueProbe::NetbiosNodeStatus,
+        UdpCatalogueProbe::NfsV3Null,
+        UdpCatalogueProbe::SipOptions,
+        UdpCatalogueProbe::SsdpUnicast,
+        UdpCatalogueProbe::L2tpSccrq,
+        UdpCatalogueProbe::SnmpV1SystemDescription,
+        UdpCatalogueProbe::MemcachedStatistics,
+        UdpCatalogueProbe::Echo,
+        UdpCatalogueProbe::Daytime,
+        UdpCatalogueProbe::QuoteOfTheDay,
+        UdpCatalogueProbe::CharacterGenerator,
+        UdpCatalogueProbe::ActiveUsers,
+        UdpCatalogueProbe::NetworkStatus,
+        UdpCatalogueProbe::RipV2Table,
+        UdpCatalogueProbe::XdmcpQuery,
+        UdpCatalogueProbe::SourceEngineInfo,
+        UdpCatalogueProbe::RaknetUnconnectedPing,
+        UdpCatalogueProbe::BacnetWhoIs,
+        UdpCatalogueProbe::EthernetIpListIdentity,
+        UdpCatalogueProbe::KnxnetIpSearch,
+        UdpCatalogueProbe::BitTorrentDhtPing,
+        UdpCatalogueProbe::DnsChaosVersion,
+        UdpCatalogueProbe::NtpControlReadVariables,
+        UdpCatalogueProbe::SlpServiceAgent,
+    ] {
+        if let Ok(request) = build_udp_catalogue_request(
+            probe,
+            [selector; 16],
+            UdpProbeBuildContext {
+                source: IpAddress::V4(Ipv4Address::new([192, 0, 2, selector])),
+                destination: IpAddress::V4(Ipv4Address::new([198, 51, 100, selector])),
+                source_port: 49_152 + u16::from(selector),
+                destination_port: 1 + u16::from(selector),
+            },
+        ) {
+            let _ = parse_udp_catalogue_response(probe, &request, payload);
+        }
+    }
 }
 
 /// Exercises bounded owned and caller-owned construction with arbitrary bytes.

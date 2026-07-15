@@ -1,6 +1,6 @@
 # @opsimathically/nodenetscanner
 
-`@opsimathically/nodenetscanner` is an unpublished `0.1.0-rc.1` candidate for a
+`@opsimathically/nodenetscanner` is an unpublished `0.2.0-rc.1` candidate for a
 bounded, Linux-native network scanner for Node.js 26+. TypeScript provides the
 public control API; Rust owns route inspection, raw and packet sockets, packet
 bytes, correlation secrets, scheduling, timers, result storage, and cleanup.
@@ -15,13 +15,18 @@ scheduler code is linked into the scanner addon at build time.
 - IPv4 ARP and IPv6 Neighbor Discovery for directly connected targets;
 - ICMPv4 and ICMPv6 Echo discovery;
 - IPv4 and IPv6 TCP SYN scanning;
-- IPv4 and IPv6 UDP scanning with an optional owned payload;
+- IPv4 and IPv6 UDP scanning with explicit empty, exact custom, or legacy
+  token-prefixed payload policy;
 - Ethernet, explicit 802.1Q VLAN, loopback, and local raw-IP paths;
 - compact CIDR or inclusive-range targets and exclusions;
 - bounded rate, outstanding-work, retry, deadline, and result controls;
 - pause, resume, cancel, terminal summaries, abortable compact result batches,
   coalesced progress snapshots, and an optional batch event adapter; and
-- read-only interface, address, route, rule, and neighbor inspection.
+- read-only interface, address, route, rule, and neighbor inspection;
+- finite link discovery through legacy-unicast mDNS/DNS-SD, WS-Discovery, and
+  explicit-name LLMNR; and
+- finite targeted discovery for NAT-PMP, SQL Browser, rpcbind/NFS endpoint
+  evidence, TFTP, and QUIC Version Negotiation.
 
 The scanner does not change links, addresses, routes, neighbors, firewall rules,
 or network namespaces. It does not enable promiscuous mode and never tries to
@@ -76,8 +81,9 @@ try {
       { kind: "tcpSyn", ports: [22, 443, { start: 8000, end: 8010 }] },
       {
         kind: "udp",
-        ports: [53],
-        payload: new Uint8Array([0x00]),
+        // Omitted policy selects low-impact protocol-aware requests on mapped
+        // ports (DNS, NTP, and SNMP here).
+        ports: [53, 123, 161],
       },
     ],
     deadlineMs: 30_000,
@@ -116,6 +122,133 @@ try {
 }
 ```
 
+## Discovery examples
+
+`startDiscovery()` is separate from target/port scanning because one multicast
+query can return many independently bounded entities. It starts immediately,
+uses ordinary UDP sockets, and therefore does not require root or `CAP_NET_RAW`.
+Every link and address family is explicit; `"allEligible"` is an affirmative
+selection and fails if more than 16 eligible links exist.
+
+Legacy-unicast mDNS/DNS-SD and WS-Discovery require both multicast and sensitive
+read consent:
+
+```ts
+import {
+  DISCOVERY_CAPABILITIES,
+  createScanner,
+} from "@opsimathically/nodenetscanner";
+
+const scanner = await createScanner();
+const discovery = await scanner.startDiscovery({
+  scope: {
+    kind: "links",
+    interfaces: ["eth0"], // or the explicit sentinel "allEligible"
+    families: ["ipv4", "ipv6"],
+  },
+  operations: [
+    { operation: "mdnsDnsSdLegacy", receiveMode: "legacyUnicast" },
+    { operation: "wsDiscoveryProbe" },
+    { operation: "llmnrQuery", query: "printer.local" },
+  ],
+  allowRisks: ["multicastOrBroadcast", "sensitiveRead"],
+  deadlineMs: 5_000,
+  limits: { maxResults: 8_192, maxMetadataBytes: 16 * 1024 * 1024 },
+});
+
+for (;;) {
+  const batch = await discovery.nextBatch({ maxResults: 512 });
+  if (batch === null) break;
+  for (const entity of batch) {
+    console.log(
+      entity.protocol,
+      entity.responder,
+      entity.responderPort,
+      entity.kind,
+      entity.addresses,
+      entity.metadata.map(({ key, text }) => [key, text]),
+    );
+  }
+}
+console.log(await discovery.summary());
+await discovery.close();
+await scanner.close();
+
+console.log(DISCOVERY_CAPABILITIES.registryVersion);
+console.table(DISCOVERY_CAPABILITIES.operations);
+```
+
+Targeted discovery reuses bounded CIDR/range normalization and exclusions. The
+special default-gateway selector is accepted only by the non-mutating NAT-PMP
+external-address operation:
+
+```ts
+const gateway = await scanner.startDiscovery({
+  scope: {
+    kind: "targets",
+    targets: "kernelDefaultIpv4Gateway",
+    families: ["ipv4"],
+  },
+  operations: [{ operation: "natPmpExternalAddress" }],
+  allowRisks: ["sensitiveRead"],
+  deadlineMs: 2_000,
+});
+
+const services = await scanner.startDiscovery({
+  scope: {
+    kind: "targets",
+    targets: [{ cidr: "192.0.2.0/24" }],
+    exclude: [{ cidr: "192.0.2.1/32" }],
+    families: ["ipv4"],
+  },
+  operations: [
+    { operation: "sqlBrowserEnumeration" },
+    // By default, a valid NFSv3 endpoint authorizes one same-target NFS NULL
+    // child probe. Set followUp: false to collect rpcbind evidence only.
+    { operation: "rpcbindGetAddress", followUp: true },
+    { operation: "tftpSentinelRead" },
+    { operation: "quicVersionNegotiation" },
+  ],
+  allowRisks: [
+    "highAmplification", // required by SQL Browser enumeration
+    "statefulHandshake",
+    "sensitiveRead",
+  ],
+  deadlineMs: 4_000,
+  rate: { packetsPerSecond: 100, burst: 16 },
+});
+```
+
+SQL advertised ports, mDNS addresses, and WS-Discovery `XAddrs` remain untrusted
+result metadata and never cause new work or URL fetches. Rpcbind is the narrow
+exception: a transaction-correlated NFSv3 `GETADDR` reply may authorize exactly
+one typed NFSv3 NULL child probe to the same original target. Its result exposes
+`parentEntityId` and `derivationKind: "rpcbindGetAddress"`; it cannot expand the
+target scope, and `followUp: false` disables that child transmission. TFTP uses
+a randomized project-prefixed sentinel, pins only the first structurally valid
+same-target transfer port, and sends one terminal ERROR after DATA/OACK rather
+than continuing a file transfer. QUIC reports matched Version Negotiation only;
+it does not claim HTTP/3 or authentication.
+
+`progress()` is a live native snapshot while discovery is running; it does not
+wait for the response deadline. Results are finite and bounded by `limits`, and
+`nextBatch()` exposes immutable Node-owned batches after correlation and
+aggregation are complete. The summary records `receiveModes: ["legacyUnicast"]`
+when mDNS legacy-unicast collection was selected.
+
+The response tuple is explicit: `responder` contains the IP address,
+`responderPort` contains the observed UDP source port, and `interfaceIndex`
+contains packet-info attribution when available. This matters for registered
+alternate-port exchanges such as TFTP. A session admits at most 256 UDP sockets
+and 1,024 total initial/adaptive physical queries; both ceilings are exported
+through `DISCOVERY_CAPABILITIES`.
+
+The frozen `DISCOVERY_CAPABILITIES` export lists exact operation bounds and
+no-go families. Fixed-port mDNS browsing remains a no-go until coexistence with
+the host mDNS daemon is proved. Kerberos, IKE, DTLS, host-namespace DHCP, GTP,
+MQTT-SN, ADS, and FINS remain explicit no-go/blocked candidates; no malformed
+approximation is sent for catalogue breadth.
+
 The supported probe matrix is also exported as the frozen
 `SUPPORTED_SCAN_PROBES` tuple:
 
@@ -135,7 +268,7 @@ probe and target lists:
 const discovery = [{ kind: "icmpEcho", family: "ipv4" }] as const;
 const tcp = [{ kind: "tcpSyn", ports: [22, 80, 443] }] as const;
 const udp = [
-  { kind: "udp", ports: [53, 123], payload: new Uint8Array([0]) },
+  { kind: "udp", ports: [53, 123] }, // safe protocol-aware probes by default
 ] as const;
 const ipv6 = [
   { kind: "icmpEcho", family: "ipv6" },
@@ -153,6 +286,181 @@ const session = await scanner.start({
 ARP accepts IPv4 targets and NDP accepts IPv6 targets only when route context
 shows that the target is on-link. Their learned link address is session-local;
 it is not inserted into the kernel neighbor table.
+
+### UDP payload policy
+
+One plan may contain one UDP definition. Its policy applies independently to
+every selected target and port:
+
+```ts
+const safeServices = {
+  kind: "udp",
+  ports: [53, 111, 123, 161, 623, 3478, 5351, 5683, 11211],
+} as const;
+```
+
+With no `policy`, the scanner sends an independently authored, unicast,
+low-impact request only on the corresponding assigned port: DNS root A with EDNS
+padding and a 512-byte ceiling, rpcbind v2 NULL, NTP client, SNMPv3 engine
+discovery, ASF/RMCP presence, STUN Binding, PCP ANNOUNCE, CoAP Empty
+Confirmable, or framed memcached `version`. PCP ANNOUNCE is an additional safe
+probe: it discovers PCP without creating or changing a mapping. An unlisted port
+receives the default exact empty fallback. No safe request broadcasts,
+multicasts, uses a fixed source port, authenticates, reads application data, or
+changes server state.
+
+```ts
+const exact = {
+  kind: "udp",
+  ports: [53],
+  policy: {
+    mode: "custom",
+    payload: Uint8Array.from([0x12, 0x34]),
+    correlation: "tuple",
+  },
+} as const; // sends exactly 12 34
+
+const empty = {
+  kind: "udp",
+  ports: [123],
+  policy: { mode: "empty" },
+} as const; // sends a zero-length UDP payload
+
+const compatible = {
+  kind: "udp",
+  ports: [7],
+  policy: {
+    mode: "custom",
+    payload: Uint8Array.from([1, 2, 3]),
+    correlation: "prefixToken",
+  },
+} as const; // prepends the scanner's 16-byte correlation token
+```
+
+The older top-level `payload` property remains temporarily supported and means
+`custom/prefixToken`; it is mutually exclusive with `policy`. Explicit `empty`
+and `custom` policies preserve generic UDP behavior. The immutable
+`UDP_PROBE_CATALOGUE` export identifies the 33-entry `1.3.0` catalogue and its
+content hash. `protocolModeAvailable: true` means the built-in safe pack is
+compiled in. `exhaustive` remains the compatibility default and emits every
+eligible variant. Opt-in `adaptive` emits the most likely mapped request first,
+waits for evidence before sending an alternative, stops unsent variants after a
+direct UDP response or target port-unreachable, and never treats silence as
+proof that a port is open:
+
+```ts
+const adaptiveUdp = {
+  kind: "udp",
+  ports: [53, 123, 161, 11211],
+  policy: {
+    mode: "protocol",
+    profile: "safe",
+    intensity: 7,
+    strategy: "adaptive",
+    emptyFallback: "unmapped",
+  },
+} as const;
+```
+
+Already-emitted correlations remain valid through the bounded late-response
+grace. A parser-only service-family hint may narrow compatible follow-ups, but
+cannot classify a port or assert a product. After correlated ICMP followed by
+silence, adaptive mode may delay further work for that host; it does not change
+the result state. `summary.udpIcmpPacing` records those conservative cooldowns.
+
+The `comprehensive` profile adds extended standards probes, but profile breadth
+never grants permission for their network impact. Each catalogue entry is
+eligible only when every risk it declares is also present in `allowRisks`:
+
+| Probe                          |        Port | Required consent                         |
+| ------------------------------ | ----------: | ---------------------------------------- |
+| NFS v3 NULL                    |        2049 | none                                     |
+| NetBIOS node status            |         137 | `sensitiveRead`                          |
+| SIP OPTIONS                    |        5060 | `sensitiveRead`                          |
+| SSDP unicast M-SEARCH          |        1900 | `highAmplification`, `sensitiveRead`     |
+| L2TP SCCRQ                     |        1701 | `statefulHandshake`                      |
+| SNMPv1 public `sysDescr.0` GET |         161 | `authenticationAttempt`, `sensitiveRead` |
+| memcached `stats`              |       11211 | `highAmplification`, `sensitiveRead`     |
+| Source engine `A2S_INFO`       |       27015 | `highAmplification`, `sensitiveRead`     |
+| RakNet unconnected ping        | 19132–19133 | `highAmplification`, `sensitiveRead`     |
+| BACnet/IP Who-Is (unicast)     |       47808 | `highAmplification`, `sensitiveRead`     |
+| EtherNet/IP ListIdentity       |       44818 | `highAmplification`, `sensitiveRead`     |
+| KNXnet/IP Search (unicast)     |        3671 | `sensitiveRead`                          |
+| BitTorrent DHT ping            |        6881 | `statefulHandshake`                      |
+| SLP service-agent request      |         427 | `highAmplification`, `sensitiveRead`     |
+
+At intensity 8 and above, comprehensive mode also includes the RIPv2 routing-
+table request on port 520, gated by `highAmplification` and `sensitiveRead`. The
+`legacy` profile is a superset and adds UDP Echo, Daytime, Quote of the Day,
+Character Generator, Active Users, Network Status, XDMCP, the DNS CHAOS
+`version.bind` convention, and NTP mode-6 READVAR. Amplifying or sensitive
+legacy variants still require their corresponding consent; selecting `legacy`
+alone does not authorize any risk-bearing member. Risk-free Echo and Daytime
+remain eligible at their configured intensities.
+
+For example, this admits the sensitive-read probes and risk-free NFS while
+leaving amplification-prone, stateful, and authentication-attempt probes out:
+
+```ts
+const session = await scanner.start({
+  targets: [{ cidr: "192.0.2.0/24" }],
+  probes: [
+    {
+      kind: "udp",
+      ports: [137, 161, 1900, 2049, 5060, 11211],
+      policy: {
+        mode: "protocol",
+        profile: "comprehensive",
+        intensity: 7,
+        strategy: "exhaustive",
+        allowRisks: ["sensitiveRead"],
+      },
+    },
+  ],
+  deadlineMs: 30_000,
+});
+```
+
+Selecting `safe` always retains the original nine-entry safe pack even when
+`allowRisks` is supplied. Unknown or duplicate consent values fail admission.
+Protocol-mode multicast or limited-broadcast targets additionally require
+`multicastOrBroadcast` consent and an explicit interface; the scanner never
+expands a unicast target into multicast or broadcast traffic.
+
+The project-owned capability ledger gives every researched family exactly one
+disposition: implemented equivalent, standards-superseded, explicit unsafe
+opt-in, or blocked. Current blockers include multi-responder mDNS/DNS-SD,
+alternate-port TFTP, fixed-source/broadcast DHCP, identity- or secret-dependent
+VPN/authentication exchanges, and proprietary protocols without an accepted
+stable public wire specification. These are reported omissions, not approximate
+payloads. The catalogue and release artifacts never load or redistribute a
+third-party probe database.
+
+Protocol-mode sessions emit result schema 2. Its retained columns identify the
+winning probe, attempted variants, direct/ICMP/silence response kind, numeric
+service family and confidence, and a bounded length-prefixed service-metadata
+record. Schema 1 remains accepted for retained batches and is still emitted by
+explicit empty/custom sessions. A direct, tuple-matched UDP datagram proves the
+endpoint is open even if its body is malformed; service identity and metadata
+are present only after the protocol parser validates the complete response and
+its transaction field. Raw response datagrams never cross the Node boundary.
+Lazy rows expose `udpTerminalProbeId`, `udpVariantsAttempted`,
+`udpResponseKind`, `udpServiceFamily`, `udpServiceConfidence`, and decoded
+bounded `udpService` product/version/field metadata. These properties are absent
+for schema-1 and non-UDP rows.
+
+Every summary separates logical and physical work: `logicalProbes` is the
+planned target/port count, while `progress.sent` is the number of physical
+frames actually transmitted, including UDP variants and retries. For UDP
+sessions, `summary.udp.policy` contains the normalized selected policy. Protocol
+summaries also contain the exact catalogue version and SHA-256 identity, making
+adaptive runs reproducible.
+
+Catalogue versions use semantic versioning: a major change may alter or remove
+an existing probe contract, a minor change only adds independently reviewed
+variants or compatible metadata, and a patch fixes behavior or documentation
+without changing catalogue membership. The content hash remains the
+authoritative byte-for-byte identity regardless of version.
 
 To select an explicit VLAN path, capture the interface, source address, and tag
 in the plan:
@@ -173,12 +481,13 @@ fail explicitly rather than guessing an Ethernet header or route.
 
 ## Compact batches
 
-`ScanResultBatch` schema version 1 is columnar. Creating a batch does not create
-one JavaScript object per result. Use `batch.at(index)`, iterate the batch, use
-`batch.filter(predicate)`, or call `batch.materialize()` only when owned
-ordinary objects are wanted. Exact RTTs, terminal timestamps, and route
-generations are `bigint`; timestamps are unsigned nanoseconds from the session's
-monotonic origin and never wall time.
+Protocol-mode sessions emit `ScanResultBatch` schema version 2; compatibility
+empty/custom sessions emit version 1. The retained decoder accepts both frozen
+schemas. Creating a batch does not create one JavaScript object per result. Use
+`batch.at(index)`, iterate the batch, use `batch.filter(predicate)`, or call
+`batch.materialize()` only when owned ordinary objects are wanted. Exact RTTs,
+terminal timestamps, and route generations are `bigint`; timestamps are unsigned
+nanoseconds from the session's monotonic origin and never wall time.
 
 The public `columns` contain copied, Node-owned `Uint8Array` storage.
 Fixed-width integers are little-endian; IP address octets remain in network byte
@@ -369,13 +678,25 @@ external network: `sudo npm run test:phase24:namespace` from the monorepo root.
 
 ## Support status
 
-This Phase 24 package is an unpublished `0.1.0-rc.1` release candidate. Linux
+This Phase 33 package is an unpublished `0.2.0-rc.1` release candidate. Linux
 x86-64 development, ordinary tests, and disposable privileged namespace tests
 are the local baseline. AArch64 glibc packages are configured and
 cross-compilable, but native AArch64 execution remains untested by the project
 owner and is a mandatory publication gate. The root package is loader-only;
 exact-version x64/AArch64 target packages contain the stripped addon, with no
 install scripts and no production Node dependencies.
+
+The project catalogue is independently authored from primary protocol
+specifications. In the Phase 33 owner-controlled comparison, catalogue `1.3.0`
+was evaluated against Nmap commit `10dfd2ff1cef6c1925232db45352149b659979b4` as
+a black-box behavioral baseline on the same disposable IPv4/IPv6 responder
+classes. The scanner elicited a direct response and definitive `open` state from
+every accepted responder in that comparison; the baseline did not exceed that
+coverage. This is a narrow UDP port-probe and state-accuracy result, not Nmap
+compatibility, affiliation, or parity with its complete service/version
+detection system. Thirteen researched capabilities remain explicitly blocked in
+the project capability ledger, so the package makes no full-database or
+full-service-fingerprinting claim.
 
 Phase 25 retained this portable engine as the only backend. Controlled
 `PACKET_MMAP` and AF_XDP prototypes did not produce a qualified, identical
@@ -386,4 +707,8 @@ gate with `sudo npm run benchmark:phase25` from the monorepo root; this is a
 diagnostic benchmark, not an end-user throughput promise.
 
 The authoritative design is the
-[Phase 16–26 network and scanner evolution plan](../../ai_documentation/31-network-and-scanner-evolution-plan.md).
+[Phase 16–26 network and scanner evolution plan](../../ai_documentation/31-network-and-scanner-evolution-plan.md)
+and the
+[Phase 27–33 UDP protocol-probe plan](../../ai_documentation/43-udp-probe-parity-plan.md).
+The final audit evidence is in the
+[Phase 33 report](../../ai_documentation/51-phase-33-report.md).
