@@ -46,7 +46,7 @@ try {
     { cwd: consumer },
   );
   const assertion =
-    "const m=await import('@opsimathically/nodenetscanner'); if(typeof m.createScanner!=='function'||typeof m.inspectNetworkContext!=='function'||m.RESULT_BATCH_SCHEMA_VERSION!==2||m.SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS.join(',')!=='1,2'||m.SUPPORTED_SCAN_PROBES.length!==6||m.UDP_PROBE_CATALOGUE.version!=='1.3.0'||m.UDP_PROBE_CATALOGUE.variants!==33)process.exit(1); const s=await m.createScanner(); await s.close()";
+    "const m=await import('@opsimathically/nodenetscanner'); if(typeof m.createScanner!=='function'||typeof m.inspectNetworkContext!=='function'||m.RESULT_BATCH_SCHEMA_VERSION!==2||m.SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS.join(',')!=='1,2'||m.SUPPORTED_SCAN_PROBES.length!==6||m.UDP_PROBE_CATALOGUE.version!=='1.4.1'||m.UDP_PROBE_CATALOGUE.variants!==37||m.UDP_COVERAGE_CAPABILITIES.version!=='1.1.0'||m.UDP_COVERAGE_CAPABILITIES.entries.length!==41)process.exit(1); const s=await m.createScanner(); await s.close()";
   run(process.execPath, ["--input-type=module", "--eval", assertion], {
     cwd: consumer,
   });

@@ -1,6 +1,11 @@
 import dgram from "node:dgram";
 import net from "node:net";
 import { Buffer } from "node:buffer";
+import {
+  IPPROTO_ICMPV6,
+  RawSocket,
+  interfaceIndex,
+} from "@opsimathically/nodenetraw";
 
 const tcpPort = Number(process.env.NODENETSCANNER_TCP_PORT ?? "18080");
 const udp4Port = Number(process.env.NODENETSCANNER_UDP4_PORT ?? "18082");
@@ -13,6 +18,62 @@ const udpPrefixPort = Number(
 );
 
 const servers = [];
+const rawSockets = [];
+const rawIntervals = [];
+const rawAbort = new globalThis.AbortController();
+
+async function startRouterAdvertisementResponder() {
+  const socket = await RawSocket.open({
+    family: "ipv6",
+    protocol: IPPROTO_ICMPV6,
+  });
+  rawSockets.push(socket);
+  await socket.setOption("bindToDevice", "target0");
+  await socket.setOption("ipv6MulticastHops", 255);
+  await socket.setOption("receiveHopLimit", true);
+  await socket.bind({ family: "ipv6", address: "::" });
+  const scopeId = await interfaceIndex("target0");
+  const response = Buffer.alloc(48);
+  response[0] = 134;
+  response[4] = 64;
+  response.writeUInt16BE(1_800, 6);
+  response[16] = 3;
+  response[17] = 4;
+  response[18] = 64;
+  response[19] = 0xc0;
+  response.writeUInt32BE(3_600, 20);
+  response.writeUInt32BE(1_800, 24);
+  Buffer.from("20010db8002200000000000000000000", "hex").copy(response, 32);
+  const advertise = (address) =>
+    socket.sendMessage({
+      data: response,
+      destination: { family: "ipv6", address, scopeId },
+      control: [{ kind: "ipv6HopLimit", value: 255 }],
+    });
+  const interval = globalThis.setInterval(() => {
+    void advertise("ff02::1").catch((error) => console.error(error));
+  }, 100);
+  rawIntervals.push(interval);
+  void (async () => {
+    while (!rawAbort.signal.aborted) {
+      try {
+        const message = await socket.receiveMessage({
+          dataCapacity: 2_048,
+          controlCapacity: 512,
+          signal: rawAbort.signal,
+        });
+        if (message.data[0] !== 133 || message.source?.family !== "ipv6")
+          continue;
+        // A Router Advertisement must use a link-local source. Sending the
+        // solicited response to all-nodes lets Linux select target0's
+        // link-local address even when the solicitation used a global source.
+        await advertise("ff02::1");
+      } catch (error) {
+        if (!rawAbort.signal.aborted) console.error(error);
+      }
+    }
+  })();
+}
 
 function netbiosResponse(message) {
   const header = Buffer.alloc(12);
@@ -138,6 +199,55 @@ function memcachedStatsResponse(message) {
     message.subarray(0, 8),
     Buffer.from("STAT version 1.6.fixture\r\nEND\r\n", "ascii"),
   ]);
+}
+
+function ripV1Response(address, metric) {
+  const response = Buffer.alloc(24);
+  response[0] = 2;
+  response[1] = 1;
+  response.writeUInt16BE(2, 4);
+  Buffer.from(address).copy(response, 8);
+  response.writeUInt32BE(metric, 20);
+  return response;
+}
+
+function ripV1Responses() {
+  return [
+    ripV1Response([192, 0, 2, 0], 1),
+    ripV1Response([198, 51, 100, 0], 2),
+  ];
+}
+
+function quake2StatusResponse() {
+  return Buffer.from(
+    "ffffffff7072696e740a5c686f73746e616d655c6e6f64656e65742d666978747572655c6d61706e616d655c716564325f62617365315c76657273696f6e5c666978747572652d312e300a302030205c5c666978747572652d706c617965725c5c0a",
+    "hex",
+  );
+}
+
+function quake3InfoResponse(message) {
+  const prefix = Buffer.from([
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    ...Buffer.from("getinfo "),
+  ]);
+  const challenge = message.subarray(prefix.length).toString("ascii");
+  return Buffer.from(
+    `\xff\xff\xff\xffinfoResponse\n\\challenge\\${challenge}\\hostname\\nodenet-fixture\\mapname\\q3dm1\\protocol\\68\\clients\\1\\sv_maxclients\\8`,
+    "latin1",
+  );
+}
+
+function mumbleExtendedPingResponse(message) {
+  const response = Buffer.alloc(24);
+  response.writeUInt32BE(0x0001_0500, 0);
+  message.copy(response, 4, 4, 12);
+  response.writeUInt32BE(1, 12);
+  response.writeUInt32BE(16, 16);
+  response.writeUInt32BE(72_000, 20);
+  return response;
 }
 
 function dnsName(value) {
@@ -421,6 +531,41 @@ for (const { type, port, accepts = () => true, respond } of [
     accepts: (message) => message.subarray(8).equals(Buffer.from("stats\r\n")),
     respond: memcachedStatsResponse,
   },
+  {
+    type: "udp4",
+    port: 520,
+    accepts: (message) =>
+      message.length === 24 &&
+      message.subarray(0, 4).equals(Buffer.from([1, 1, 0, 0])) &&
+      message.readUInt32BE(20) === 16,
+    respond: ripV1Responses,
+  },
+  ...["udp4", "udp6"].flatMap((type) => [
+    {
+      type,
+      port: 27_910,
+      accepts: (message) =>
+        message.equals(Buffer.from("ffffffff737461747573", "hex")),
+      respond: quake2StatusResponse,
+    },
+    {
+      type,
+      port: 27_960,
+      accepts: (message) =>
+        message.length === 28 &&
+        message
+          .subarray(0, 12)
+          .equals(Buffer.from("ffffffff676574696e666f20", "hex")),
+      respond: quake3InfoResponse,
+    },
+    {
+      type,
+      port: 64_738,
+      accepts: (message) =>
+        message.length === 12 && message.subarray(0, 4).equals(Buffer.alloc(4)),
+      respond: mumbleExtendedPingResponse,
+    },
+  ]),
   { type: "udp4", port: udp4Port },
   { type: "udp6", port: udp6Port },
   {
@@ -467,8 +612,11 @@ for (const { type, port, accepts = () => true, respond } of [
     ipv6Only: type === "udp6",
   });
   socket.on("message", (message, remote) => {
-    if (accepts(message))
-      socket.send(respond(message), remote.port, remote.address);
+    if (accepts(message)) {
+      const responses = respond(message);
+      for (const response of Array.isArray(responses) ? responses : [responses])
+        socket.send(response, remote.port, remote.address);
+    }
   });
   servers.push(socket);
   await new Promise((resolve, reject) => {
@@ -533,10 +681,15 @@ await multicastResponder({
     ),
 });
 
+await startRouterAdvertisementResponder();
+
 console.log("READY");
 
 const close = () => {
+  rawAbort.abort();
+  for (const interval of rawIntervals) globalThis.clearInterval(interval);
   for (const server of servers) server.close();
+  for (const socket of rawSockets) void socket.close();
 };
 process.once("SIGTERM", close);
 process.once("SIGINT", close);

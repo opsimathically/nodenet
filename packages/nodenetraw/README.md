@@ -1076,7 +1076,9 @@ intentionally not automated by these commands.
 
 The private workspace root and the package source tree both refuse direct
 publication. Only inspect and publish the staged packages produced by
-`npm run release:assemble`.
+`npm run release:assemble`. Assembly requires a clean Git worktree and records
+the verified `HEAD` commit in each provenance document; commit or intentionally
+discard every source change before staging a release.
 
 Additional focused commands include `npm run typecheck`, `npm run lint`,
 `npm run format:check`, `npm run rust:fmt`, `npm run rust:clippy`, and

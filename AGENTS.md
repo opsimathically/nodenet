@@ -166,23 +166,76 @@ request bytes, catalogue `1.3.0`, schema 2, or public policy. All locally
 available gates pass again; see
 `ai_documentation/52-phase-27-33-implementation-audit.md`.
 
-D-049 accepts Phases 34 through 44 as the next planning direction. High-value
-one-query/many-responder protocols will use a separate finite discovery session
-and discovery schema rather than weakening the existing one-result-per-target
-scan model. The sequence adds a bounded fan-out foundation, mDNS/DNS-SD,
-WS-Discovery/LLMNR, same-target evidence-derived endpoints with adaptive
-rpcbind, registered-only alternate-port correlation with TFTP, NAT-PMP/SQL
-Browser/configured Kerberos, QUIC Version Negotiation, reviewed IKE/DTLS, DHCP
-topology discovery, optional GTP/MQTT-SN/industrial packs, and an integrated
-release audit. Existing scan schemas 1/2, catalogue `1.3.0`, default UDP policy,
-and the Phase 33 comparison wording remain unchanged. D-050 closes the dedicated
-readiness review after correcting API lifecycle, pre-send fan-out reservation,
-per-query worst-case leases, explicit link/target scopes, combined environment
-ceilings, lazy privilege-separated transport, discovery registry/schema
-identity, advertised-endpoint authority, and protocol-specific mDNS/XML/TFTP/
-QUIC/DHCP contracts. Phase 34 is ready to implement and must emit no live
-discovery protocol; see
-`ai_documentation/54-advanced-udp-discovery-plan-review.md`.
+D-049 through D-051 govern the implementation-complete Phase 34–44 advanced
+discovery pass. The scanner now has a separate finite discovery session,
+discovery schema 1, registry `1.0.0`, bounded fan-out, legacy-unicast
+mDNS/DNS-SD, WS-Discovery, explicit LLMNR, NAT-PMP, SQL Browser, rpcbind with
+one same-target NFSv3 child, registered alternate-port TFTP cleanup, and QUIC
+Version Negotiation. Fixed-port mDNS browse, Kerberos, IKE/DTLS, host-namespace
+DHCP, and the Phase 43 candidates remain executable no-go outcomes. The
+adversarial hardening pass corrected environment capacity, result/runtime
+bounds, Linux family/interface attribution, source-port correlation, protocol
+state, hostile result validation, cancellation, and teardown. External Phase 44
+AArch64 execution, gated stress/fuzz/sanitizer, and refreshed artifact/
+reproducibility gates remain open; see
+`ai_documentation/55-phase-34-44-implementation-report.md` and
+`ai_documentation/56-phase-34-44-hardening-report.md`.
+
+D-052 accepts Phases 45–58 as the next planning direction. Phase 45 first
+freezes an additive provenance-preserving evidence model, conservative identity
+and conflict semantics, append-only expiry, and re-authorized derived work with
+no new network traffic. Later phases add finite metadata-only passive AF_PACKET
+observation, passive host/service and link/control-plane topology,
+scanner-native path discovery, a bounded ordinary-TCP conversation engine and
+independently risked service packs, governed cross-protocol enrichment,
+explainable asset and longitudinal views, optional specialized/context
+providers, transport-neutral multi-vantage evidence, and an integrated audit.
+Existing scan/discovery schemas and registries remain compatible.
+Authentication, vulnerability payloads, configuration changes, general packet
+recording, mandatory storage, and a built-in sensor server remain out of scope.
+See `ai_documentation/57-network-discovery-coverage-plan.md`.
+
+The Phase 45 readiness review is closed and Phase 45 is complete under D-053.
+`nodenetscanner-engine` now owns evidence schema 1, bounded deterministic
+retention, scan/discovery adapters, and registered same-address derived-work
+authority. The TypeScript package mirrors the immutable evidence types,
+adapters, hostile validation, and ledger. No Phase 45 path performs I/O or
+changes retained scan/discovery schemas. Phases 46–57 are complete under D-054
+and D-055: the scanner exposes bounded filtered metadata-only AF_PACKET
+observations, append-only passive lifetimes, explicit Router Solicitation,
+native path discovery, bounded credential-free TCP identification, governed
+semantic enrichment, conservative inventory, and scoped sensor interchange.
+Candidates that did not close independent safety/quality gates are executable
+no-go outcomes. All available Phase 58 x86-64 gates pass; native AArch64 is
+still mandatory before publication. See
+`ai_documentation/58-network-discovery-coverage-plan-review.md` and
+`ai_documentation/59-phase-45-report.md`, plus
+`ai_documentation/60-phases-46-58-implementation-report.md`. The reopened Phase
+46–57 adversarial repair pass is authoritative where it differs from that
+initial report; see
+`ai_documentation/61-phases-46-57-adversarial-repair-report.md`. It hardens
+passive parsing and lifetimes, scoped reconciliation and sensor provenance,
+owned-thread cancellation, path correlation/pacing, incremental service work,
+and native/TypeScript registry parity without admitting any no-go candidate.
+
+D-057 through D-059 close Phases 59–68 and the locally available Phase 69 audit.
+Catalogue `1.4.1` retains 37 variants including RIPv1, Quake II,
+challenge-correlated Quake III, and timestamp-correlated Mumble while preserving
+the nine-probe safe profile. Coverage registry `1.1.0` resolves all 41
+candidates to 5 implemented, 32 no-go, and 4 active-threat exclusions and
+exports exact runtime consents. Nmap remains a pinned human-only behavioral
+comparison; never copy, parse, generate from, load, or redistribute its payload
+or fingerprint data. Returned endpoints never grant authority. Native AArch64
+execution remains mandatory before publication. See
+`ai_documentation/62-udp-probe-coverage-expansion-plan.md` and
+`ai_documentation/66-phases-59-69-adversarial-repair-report.md`.
+
+Adversarial review 65 reopened Phases 59, 62, 63, 64, and 69; D-059 and report
+66 close every finding. RIPv1 discovery operation 10 retains multiple bounded
+route datagrams, Quake bounds and 64-bit correlation are consistent, coverage
+resources/consents/responders are executable joins, and provenance includes
+owned fixtures and staged artifacts. All available x86-64 gates pass. Native
+AArch64 execution remains the sole external publication gate.
 
 The current source of planning truth is
 [`ai_documentation/00-index.md`](ai_documentation/00-index.md).
@@ -585,3 +638,27 @@ Do not report a change as verified without naming which gates actually ran.
   discovery implementation and verification record.
 - `ai_documentation/56-phase-34-44-hardening-report.md`: adversarial findings,
   runtime/protocol/API corrections, and current verification/open-gate record.
+- `ai_documentation/57-network-discovery-coverage-plan.md`: accepted Phase 45–58
+  evidence, passive observation, topology, TCP identity, enrichment,
+  asset/change, specialized pack, multi-vantage, and audit contract.
+- `ai_documentation/58-network-discovery-coverage-plan-review.md`: closed Phase
+  45 readiness audit and binding decisions.
+- `ai_documentation/59-phase-45-report.md`: evidence schema, adapters,
+  authority, boundary tests, and verification record.
+- `ai_documentation/60-phases-46-58-implementation-report.md`: completed Phase
+  46–57 implementation, Phase 58 local audit, adversarial fixes, verification,
+  and the remaining native AArch64 publication gate.
+- `ai_documentation/61-phases-46-57-adversarial-repair-report.md`: reopened
+  Phase 46–57 findings, product-hardening repairs, targeted regressions, and
+  retained release boundaries.
+- `ai_documentation/62-udp-probe-coverage-expansion-plan.md`: accepted Phase
+  59–69 clean-room UDP comparison, admission, prioritized protocol-family,
+  threat-exclusion, verification, and release contract.
+- `ai_documentation/63-udp-coverage-plan-readiness-review.md`: closed Phase 59
+  readiness audit, existing-capability reconciliation, additive catalogue,
+  candidate admission/no-go, resource, provenance, and verification decisions.
+- `ai_documentation/64-phases-59-69-implementation-report.md`: initial Phase
+  59–69 implementation, disposition, and local verification record.
+- `ai_documentation/65-phases-59-69-adversarial-review.md`: reopened RIPv1,
+  Quake, correlation, executable-contract, provenance, and public-risk findings;
+  current repair order and release blockers.

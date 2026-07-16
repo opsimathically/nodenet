@@ -21,13 +21,16 @@ mod link;
 mod ndp;
 mod network;
 mod parse;
+mod passive;
 mod quoted;
+mod service;
 mod tcp;
 mod template;
 mod types;
 mod udp;
 mod udp_capability;
 mod udp_catalogue;
+mod udp_coverage;
 mod udp_extended;
 mod udp_request;
 mod udp_safe;
@@ -72,14 +75,16 @@ pub use discovery_registry::{
     discovery_operation_registry_sha256_hex, validate_discovery_operation_registry,
 };
 pub use discovery_targeted::{
-    MAX_QUIC_ADVERTISED_VERSIONS, MAX_SQL_BROWSER_FIELDS, MAX_SQL_BROWSER_INSTANCES,
-    MAX_SQL_BROWSER_RESPONSE_BYTES, MAX_SQL_BROWSER_TEXT_BYTES, MAX_TFTP_DISCOVERY_RESPONSE_BYTES,
-    NatPmpExternalAddressResponse, QUIC_VERSION_NEGOTIATION_REQUEST_BYTES,
-    QuicVersionNegotiationRequest, QuicVersionNegotiationResponse, SqlBrowserInstance,
+    MAX_QUIC_ADVERTISED_VERSIONS, MAX_RIPV1_RESPONSE_BYTES, MAX_RIPV1_ROUTES_PER_DATAGRAM,
+    MAX_SQL_BROWSER_FIELDS, MAX_SQL_BROWSER_INSTANCES, MAX_SQL_BROWSER_RESPONSE_BYTES,
+    MAX_SQL_BROWSER_TEXT_BYTES, MAX_TFTP_DISCOVERY_RESPONSE_BYTES, NatPmpExternalAddressResponse,
+    QUIC_VERSION_NEGOTIATION_REQUEST_BYTES, QuicVersionNegotiationRequest,
+    QuicVersionNegotiationResponse, RIPV1_TABLE_REQUEST_BYTES, RipV1Route, SqlBrowserInstance,
     TargetedDiscoveryError, TftpDiscoveryResponse, build_nat_pmp_external_address_request,
-    build_quic_version_negotiation_request, build_rpcbind_getaddr_request,
-    build_sql_browser_enumeration_request, build_tftp_discovery_rrq, build_tftp_termination_error,
-    parse_nat_pmp_external_address_response, parse_quic_version_negotiation_response,
+    build_quic_version_negotiation_request, build_ripv1_table_request,
+    build_rpcbind_getaddr_request, build_sql_browser_enumeration_request, build_tftp_discovery_rrq,
+    build_tftp_termination_error, parse_nat_pmp_external_address_response,
+    parse_quic_version_negotiation_response, parse_ripv1_table_response,
     parse_rpcbind_getaddr_response, parse_rpcbind_universal_address, parse_sql_browser_response,
     parse_tftp_discovery_response,
 };
@@ -115,7 +120,17 @@ pub use ndp::{
 };
 pub use network::{FragmentState, UpperLayerState};
 pub use parse::{PacketStart, ParseStatus, inspect_packet};
+pub use passive::{
+    MAX_LLDP_TLVS, MAX_PASSIVE_FIELD_BYTES, MAX_PASSIVE_FIELDS, MAX_RA_OPTIONS, PassiveField,
+    PassivePacketMetadata, PassiveProtocol, decode_passive_frame,
+    decode_passive_frame_with_checksum_policy, parse_router_advertisement_metadata,
+};
 pub use quoted::{QuotedIpPacket, QuotedTransport, parse_quoted_ip_packet};
+pub use service::{
+    MAX_SERVICE_FIELDS, MAX_SERVICE_RESPONSE_BYTES, MAX_SERVICE_TEXT_BYTES, SERVICE_REGISTRY,
+    SERVICE_REGISTRY_VERSION, ServiceCodecError, ServiceDescriptor, ServiceDisposition,
+    ServiceIdentity, ServiceRisk, parse_service_response,
+};
 pub use tcp::{
     ParsedTcpOption, ParsedTcpOptions, ParsedTcpSackBlocks, ParsedTcpSegment, TcpConformance,
     TcpFlags, TcpOption, TcpSackBlock, TcpSegment, parse_tcp_segment,
@@ -141,6 +156,13 @@ pub use udp_catalogue::{
     UdpProbeRisk, UdpProbeRiskSet, UdpResponseEndpointPolicy, UdpServiceFamilyId,
     UdpSourcePortConstraint, udp_probe_catalogue_sha256, udp_probe_catalogue_sha256_hex,
     validate_udp_probe_catalogue,
+};
+pub use udp_coverage::{
+    MAX_UDP_COVERAGE_CANDIDATES, UDP_COVERAGE_REGISTRY, UDP_COVERAGE_REGISTRY_VERSION,
+    UDP_COVERAGE_RESOURCE_CONTRACT, UdpCoverageDimension, UdpCoverageDimensionSet,
+    UdpCoverageDisposition, UdpCoverageEntry, UdpCoverageExecutionModel, UdpCoveragePolicy,
+    UdpCoverageRegistryError, UdpCoverageResourceContract, UdpCoverageRisk, UdpCoverageRiskSet,
+    validate_udp_coverage_registry,
 };
 pub use udp_extended::{
     UdpCatalogueProbe, UdpProbeBuildContext, build_udp_catalogue_request,

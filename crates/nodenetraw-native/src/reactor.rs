@@ -1229,6 +1229,12 @@ impl ReactorHandle {
         }
     }
 
+    #[cfg(test)]
+    fn inject_fatal_failure(&self) {
+        self.submit_control(Command::InjectFatalFailure, Operation::StartReactor)
+            .unwrap();
+    }
+
     fn reserve_socket(&self) -> Result<(), NativeError> {
         reserve_bounded(
             &self.socket_count,
@@ -1315,6 +1321,8 @@ enum AdvancedAction {
 }
 
 enum Command {
+    #[cfg(test)]
+    InjectFatalFailure,
     Register {
         socket_id: u64,
         core: SocketCore,
@@ -1554,24 +1562,62 @@ fn run_reactor(
     };
     let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
 
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reactor_loop(
+            &mut state,
+            &mut events,
+            &wake_descriptor,
+            &command_receiver,
+            &accepting,
+        )
+    }));
+    let terminal_error = match outcome {
+        Ok(error) => error,
+        Err(_) => Some(NativeError::internal(
+            Operation::StartReactor,
+            "native I/O reactor panicked",
+        )),
+    };
+    accepting.store(false, Ordering::Release);
+
+    if let Some(error) = terminal_error {
+        ReactorState::fail_queued_commands(&command_receiver, &error);
+        state.fail_all_operations(&error);
+    }
+    for entry in state.sockets.values() {
+        clear_completion_sink(&entry.sink);
+    }
+    state.sockets.clear();
+    state.socket_count.store(0, Ordering::Release);
+}
+
+fn reactor_loop(
+    state: &mut ReactorState,
+    events: &mut Vec<epoll::Event>,
+    wake_descriptor: &OwnedFd,
+    command_receiver: &Receiver<Command>,
+    accepting: &AtomicBool,
+) -> Option<NativeError> {
     while accepting.load(Ordering::Acquire) {
         events.clear();
-        match epoll::wait(&state.epoll_descriptor, spare_capacity(&mut events), None) {
+        match epoll::wait(&state.epoll_descriptor, spare_capacity(events), None) {
             Ok(_) => {}
             Err(Errno::INTR) => continue,
-            Err(_) => break,
+            Err(error) => {
+                return Some(NativeError::system(Operation::StartReactor, error));
+            }
         }
 
         if !accepting.load(Ordering::Acquire) {
-            break;
+            return None;
         }
 
         for event in events.drain(..) {
             let token = event.data.u64();
             if token == WAKE_TOKEN {
-                drain_eventfd(&wake_descriptor);
-                if state.drain_commands(&command_receiver) {
-                    wake_eventfd(&wake_descriptor);
+                drain_eventfd(wake_descriptor);
+                if state.drain_commands(command_receiver) {
+                    wake_eventfd(wake_descriptor);
                 }
                 state.cancel_requested_operations();
                 state.close_requested_sockets();
@@ -1581,12 +1627,7 @@ fn run_reactor(
         }
         state.close_requested_sockets();
     }
-
-    for entry in state.sockets.values() {
-        clear_completion_sink(&entry.sink);
-    }
-    state.sockets.clear();
-    state.socket_count.store(0, Ordering::Release);
+    None
 }
 
 impl ReactorState {
@@ -1595,6 +1636,10 @@ impl ReactorState {
             let Ok(command) = receiver.try_recv() else {
                 return false;
             };
+            #[cfg(test)]
+            if matches!(command, Command::InjectFatalFailure) {
+                panic!("injected reactor failure");
+            }
             self.process_command(command);
         }
         true
@@ -1606,6 +1651,10 @@ impl ReactorState {
     )]
     fn process_command(&mut self, command: Command) {
         match command {
+            #[cfg(test)]
+            Command::InjectFatalFailure => {
+                unreachable!("injected failure is consumed by drain_commands")
+            }
             Command::Register {
                 socket_id,
                 core,
@@ -2920,6 +2969,37 @@ impl ReactorState {
         }
     }
 
+    fn fail_queued_commands(receiver: &Receiver<Command>, error: &NativeError) {
+        while let Ok(command) = receiver.try_recv() {
+            fail_queued_command(command, error);
+        }
+    }
+
+    fn fail_all_operations(&mut self, error: &NativeError) {
+        let socket_ids: Vec<u64> = self.sockets.keys().copied().collect();
+        for socket_id in socket_ids {
+            let Some(mut entry) = self.sockets.remove(&socket_id) else {
+                continue;
+            };
+            self.fail_entry_operations(&mut entry, error);
+            let close_operation = entry
+                .close_operation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(operation_id) = close_operation {
+                deliver_completion(
+                    &entry.sink,
+                    Completion {
+                        operation_id,
+                        result: Err(error_for_operation(error, Operation::CloseSocket)),
+                    },
+                );
+            }
+            clear_completion_sink(&entry.sink);
+        }
+    }
+
     #[allow(clippy::unused_self, reason = "keeps reactor state operations grouped")]
     fn fail_entry_operations(&self, entry: &mut SocketEntry, error: &NativeError) {
         while let Some(operation) = entry.sends.pop_front() {
@@ -3052,6 +3132,155 @@ impl ReactorState {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "every command owns one completion path"
+)]
+fn fail_queued_command(command: Command, error: &NativeError) {
+    match command {
+        #[cfg(test)]
+        Command::InjectFatalFailure => {}
+        Command::Register { sink, .. } => {
+            deliver_completion(
+                &sink,
+                Completion {
+                    operation_id: 0,
+                    result: Err(error_for_operation(error, Operation::RegisterSocket)),
+                },
+            );
+            clear_completion_sink(&sink);
+        }
+        Command::Bind {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::BindIpv6 {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::BindPacket {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::ConnectIpv6 {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::ConnectIpv4 {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::Disconnect {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::GetLocalAddress {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::GetOption {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::SetOption {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::GetIpv6Option {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::SetIpv6Option {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::GetDevice {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::SetDevice {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::Advanced {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::Send {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::SendBatch {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::Receive {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::ReceiveBatch {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::ConfigurePacketRing {
+            operation_id,
+            sink,
+            admission,
+            ..
+        }
+        | Command::ReceiveRingFrame {
+            operation_id,
+            sink,
+            admission,
+            ..
+        } => {
+            deliver_completion(
+                &sink,
+                Completion {
+                    operation_id,
+                    result: Err(error_for_operation(error, admission.operation)),
+                },
+            );
+        }
+    }
+}
+
 fn deliver_completion(sink: &SharedCompletionSink, completion: Completion) {
     let owned_sink = sink
         .lock()
@@ -3163,7 +3392,7 @@ mod tests {
         Completion, CompletionSink, CompletionValue, MAX_PENDING_RECEIVES_PER_SOCKET, ReactorHandle,
     };
     use crate::conversion::PacketBufferLength;
-    use crate::error::ErrorKind;
+    use crate::error::{ErrorKind, Operation};
     use crate::lifecycle::SocketCore;
 
     struct ChannelSink(Sender<Completion>);
@@ -3242,6 +3471,21 @@ mod tests {
             receive_completion(&receiver, 2).result,
             Ok(CompletionValue::Closed)
         ));
+        reactor.shutdown_and_join();
+    }
+
+    #[test]
+    fn fatal_reactor_failure_settles_admitted_operations() {
+        let (reactor, socket, receiver, _peer, _socket_address) = registered_udp_socket();
+        socket
+            .receive(41, PacketBufferLength::try_from(64).unwrap())
+            .unwrap();
+
+        reactor.inject_fatal_failure();
+        let completion = receive_completion(&receiver, 41);
+        let error = completion.result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(error.operation(), Operation::Receive);
         reactor.shutdown_and_join();
     }
 

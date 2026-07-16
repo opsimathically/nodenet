@@ -34,7 +34,8 @@ pub(crate) enum Command {
         scanner_id: u32,
         reply: Reply<()>,
     },
-    ReserveExternalDiscovery {
+    ReserveExternalSession {
+        operation: &'static str,
         reply: Reply<()>,
     },
     Start {
@@ -231,14 +232,15 @@ impl RuntimeHandle {
             .map_err(|_| ScannerError::environment_closed("cancel result pull"))?
     }
 
-    pub(crate) fn admit_external_discovery(
+    pub(crate) fn admit_external_session(
         &self,
         maximum_metadata_bytes: usize,
+        operation: &'static str,
     ) -> Result<ExternalSessionPermit, ScannerError> {
-        self.request(|reply| Command::ReserveExternalDiscovery { reply })?;
+        self.request(|reply| Command::ReserveExternalSession { operation, reply })?;
         if self
             .metadata_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(maximum_metadata_bytes)
                     .filter(|next| *next <= MAX_ENVIRONMENT_METADATA_BYTES)
@@ -247,8 +249,8 @@ impl RuntimeHandle {
         {
             self.external_sessions.fetch_sub(1, Ordering::AcqRel);
             return Err(ScannerError::resource(
-                "start discovery session",
-                "discovery metadata reservation exceeds the 64 MiB environment limit",
+                operation,
+                "metadata reservation exceeds the 64 MiB environment limit",
             ));
         }
         Ok(ExternalSessionPermit {
@@ -499,7 +501,7 @@ impl WorkerState {
                 };
                 complete(reply, result);
             }
-            Command::ReserveExternalDiscovery { reply } => {
+            Command::ReserveExternalSession { operation, reply } => {
                 let active = self
                     .sessions
                     .values()
@@ -510,8 +512,8 @@ impl WorkerState {
                     complete(
                         reply,
                         Err(ScannerError::resource(
-                            "start discovery session",
-                            "at most four scan and discovery sessions may run in one Node environment",
+                            operation,
+                            "at most four scan, discovery, observation, path, or service sessions may run in one Node environment",
                         )),
                     );
                 } else {

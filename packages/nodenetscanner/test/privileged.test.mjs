@@ -1,10 +1,222 @@
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import { createScanner } from "../dist/index.js";
+import { createScanner, inspectNetworkContext } from "../dist/index.js";
 
 const enabled = process.env.NODENETSCANNER_PRIVILEGED_TESTS === "1";
 const matrix = process.env.NODENETSCANNER_NAMESPACE_MATRIX === "1";
+
+test(
+  "native path tracing reaches loopback over ICMP, UDP, and TCP modes",
+  { skip: !enabled },
+  async () => {
+    const scanner = await createScanner();
+    for (const plan of [
+      { target: "127.0.0.1", mode: "icmpEcho", deadlineMs: 1_000 },
+      { target: "127.0.0.1", mode: "udp", port: 9, deadlineMs: 1_000 },
+      { target: "127.0.0.1", mode: "tcpSyn", port: 9, deadlineMs: 1_000 },
+    ]) {
+      const run = await scanner.tracePath({
+        ...plan,
+        firstHop: 1,
+        maximumHop: 1,
+        attemptsPerHop: 1,
+      });
+      assert.equal(run.destinationReached, true, formatValue(run));
+      assert.equal(run.attempts.length, 1);
+      assert.equal(run.attempts[0].outcome, "destinationReached");
+    }
+    await scanner.close();
+  },
+);
+
+test(
+  "native path tracing correlates routed IPv4 and IPv6 hops",
+  { skip: !enabled || !matrix },
+  async () => {
+    const scanner = await createScanner();
+    for (const plan of [
+      { target: "198.18.0.6", mode: "icmpEcho" },
+      { target: "198.18.0.6", mode: "udp", port: 33434 },
+      { target: "198.18.0.6", mode: "tcpSyn", port: 9 },
+      { target: "2001:db8:49:2::2", mode: "icmpEcho" },
+      { target: "2001:db8:49:2::2", mode: "udp", port: 33434 },
+    ]) {
+      const run = await scanner.tracePath({
+        ...plan,
+        firstHop: 1,
+        maximumHop: 4,
+        attemptsPerHop: 1,
+        deadlineMs: 5_000,
+      });
+      assert.equal(run.destinationReached, true, formatValue(run));
+      assert.equal(run.attempts[0].outcome, "hopResponse", formatValue(run));
+      assert.equal(
+        run.attempts.at(-1)?.outcome,
+        "destinationReached",
+        formatValue(run),
+      );
+      assert.ok(run.attempts[0].icmp !== undefined);
+      assert.equal(
+        run.attempts[0].responder,
+        plan.target.includes(":") ? "2001:db8:49:1::2" : "198.18.0.2",
+      );
+    }
+    await scanner.close();
+  },
+);
+
+test(
+  "native path tracing cancellation settles promptly and releases its session",
+  { skip: !enabled || !matrix },
+  async () => {
+    const scanner = await createScanner();
+    const controller = new globalThis.AbortController();
+    const started = performance.now();
+    const running = scanner.tracePath(
+      {
+        target: "2001:db8:49:1::dead",
+        mode: "udp",
+        port: 33434,
+        firstHop: 1,
+        maximumHop: 64,
+        attemptsPerHop: 8,
+        deadlineMs: 30_000,
+      },
+      { signal: controller.signal },
+    );
+    globalThis.setTimeout(() => controller.abort(), 25);
+    const run = await running;
+    assert.equal(run.state, "cancelled", formatValue(run));
+    assert.equal(run.destinationReached, false);
+    assert.ok(performance.now() - started < 1_000);
+    await scanner.close();
+  },
+);
+
+test(
+  "active Router Solicitation accepts only validated link-local advertisements",
+  { skip: !enabled || !matrix },
+  async () => {
+    const scanner = await createScanner();
+    const run = await scanner.solicitRouters({
+      interface: "scan0",
+      deadlineMs: 1_000,
+      maxResults: 4,
+      allowRisks: ["linkMulticast"],
+    });
+    assert.equal(run.transmitted, 1);
+    assert.equal(run.advertisements.length, 1);
+    assert.match(run.advertisements[0].responder, /^fe80:/);
+    assert.ok(
+      run.advertisements[0].metadata.some(
+        (field) => field.key === "prefixValidLifetime",
+      ),
+    );
+    await scanner.close();
+  },
+);
+
+test(
+  "switched passive capture attributes interfaces and suppresses outgoing packets",
+  { skip: !enabled || !matrix },
+  async () => {
+    const context = await inspectNetworkContext();
+    const interfaceIndex = context.interfaces.find(
+      (item) => item.name === "scan0",
+    )?.index;
+    assert.ok(interfaceIndex !== undefined);
+    const scanner = await createScanner();
+    const observation = await scanner.startObservation({
+      interfaces: ["scan0"],
+      protocols: ["ipv6", "controlPlane"],
+      durationMs: 500,
+      maxResults: 64,
+      includeOutgoing: false,
+      allowRisks: ["passiveMetadata"],
+    });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+    await scanner.solicitRouters({
+      interface: "scan0",
+      deadlineMs: 250,
+      maxResults: 1,
+      allowRisks: ["linkMulticast"],
+    });
+    const rows = [];
+    for (;;) {
+      const batch = await observation.nextBatch({ maxResults: 64 });
+      if (batch === null) break;
+      rows.push(...batch.materialize());
+    }
+    const summary = await observation.summary();
+    assert.ok(
+      rows.some((row) => row.protocol === "routerAdvertisement"),
+      formatValue(rows),
+    );
+    assert.ok(rows.every((row) => row.interfaceIndex === interfaceIndex));
+    assert.ok(rows.every((row) => row.direction === "incoming"));
+    assert.ok(summary.progress.kernelDropped >= 0n);
+    assert.ok(summary.progress.retentionDropped >= 0n);
+    await observation.close();
+
+    const promiscuous = await scanner.startObservation({
+      interfaces: ["scan0"],
+      protocols: ["arp"],
+      durationMs: 25,
+      maxResults: 1,
+      promiscuous: true,
+      allowRisks: ["passiveMetadata", "promiscuousCapture"],
+    });
+    assert.equal((await promiscuous.summary()).promiscuous, true);
+    await promiscuous.close();
+    await scanner.close();
+  },
+);
+
+test(
+  "finite passive observation captures metadata without frame payloads",
+  { skip: !enabled },
+  async () => {
+    const scanner = await createScanner();
+    const observation = await scanner.startObservation({
+      interfaces: ["lo"],
+      protocols: ["ipv4"],
+      durationMs: 250,
+      snapLength: 256,
+      maxResults: 64,
+      maxMetadataBytes: 64 * 1_024,
+      includeOutgoing: true,
+      allowRisks: ["passiveMetadata"],
+    });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 25));
+    const active = await scanner.start({
+      targets: [{ cidr: "127.0.0.1/32" }],
+      probes: [{ kind: "icmpEcho", family: "ipv4" }],
+      deadlineMs: 2_000,
+      timing: { timeoutMs: 250, retries: 0 },
+    });
+    await drain(active);
+    await active.close();
+    const rows = [];
+    for (;;) {
+      const batch = await observation.nextBatch({ maxResults: 16 });
+      if (batch === null) break;
+      rows.push(...batch.materialize());
+    }
+    const summary = await observation.summary();
+    assert.equal(summary.state, "completed");
+    assert.deepEqual(summary.protocols, ["ipv4"]);
+    assert.ok(summary.progress.inspected >= 1n);
+    assert.equal(BigInt(rows.length), summary.progress.accepted);
+    for (const row of rows) {
+      assert.equal("data" in row, false);
+      assert.ok(row.capturedLength <= 256);
+    }
+    await observation.close();
+    await scanner.close();
+  },
+);
 
 test(
   "portable engine scans IPv4 loopback with ICMP and TCP",
@@ -118,6 +330,51 @@ test(
 );
 
 test(
+  "RIPv1 discovery retains typed routes across multiple datagrams",
+  { skip: !matrix },
+  async () => {
+    const scanner = await createScanner();
+    const session = await scanner.startDiscovery({
+      scope: {
+        kind: "targets",
+        targets: [{ cidr: "192.0.2.2/32" }],
+        families: ["ipv4"],
+      },
+      operations: [{ operation: "ripv1RoutingTable" }],
+      allowRisks: ["highAmplification", "sensitiveRead"],
+      deadlineMs: 3_500,
+    });
+    const results = [];
+    for (;;) {
+      const batch = await session.nextBatch({ maxResults: 1 });
+      if (batch === null) break;
+      results.push(...batch);
+    }
+    assert.equal(results.length, 2);
+    assert.deepEqual(
+      results.map((row) => [
+        row.kind,
+        row.responder,
+        row.addresses[0],
+        row.metadata.find((field) => field.key === "metric")?.text,
+      ]),
+      [
+        ["route", "192.0.2.2", "192.0.2.0", "1"],
+        ["route", "192.0.2.2", "198.51.100.0", "2"],
+      ],
+    );
+    assert.ok(results.every((row) => row.interfaceIndex !== undefined));
+    assert.ok(results.every((row) => row.outcome === "complete"));
+    const summary = await session.summary();
+    assert.equal(summary.progress.sent, 1n);
+    assert.equal(summary.progress.received, 2n);
+    assert.equal(summary.progress.accepted, 2n);
+    await session.close();
+    await scanner.close();
+  },
+);
+
+test(
   "discovery executes bounded dual-stack rpcbind-derived NFS child work",
   { skip: !matrix },
   async () => {
@@ -172,6 +429,15 @@ test(
   { skip: !matrix },
   async () => {
     const scanner = await createScanner();
+    const observation = await scanner.startObservation({
+      interfaces: ["scan0"],
+      protocols: ["ipv4", "ipv6"],
+      durationMs: 5_250,
+      maxResults: 256,
+      includeOutgoing: false,
+      allowRisks: ["passiveMetadata"],
+    });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 25));
     const session = await scanner.startDiscovery({
       scope: {
         kind: "links",
@@ -228,6 +494,25 @@ test(
     assert.equal(summary.progress.duplicate, 8n);
     assert.deepEqual(summary.receiveModes, ["legacyUnicast"]);
     await session.close();
+    const passive = [];
+    for (;;) {
+      const batch = await observation.nextBatch({ maxResults: 64 });
+      if (batch === null) break;
+      passive.push(...batch.materialize());
+    }
+    for (const protocol of ["mdns", "wsDiscovery", "llmnr"])
+      assert.ok(
+        passive.some((row) => row.protocol === protocol),
+        `missing passive ${protocol} evidence; observed ${JSON.stringify(
+          passive.map((row) => row.protocol),
+        )}`,
+      );
+    assert.ok(
+      passive
+        .filter((row) => row.protocol === "mdns")
+        .some((row) => row.metadata.some((field) => field.key === "dnsTtl")),
+    );
+    await observation.close();
     await scanner.close();
   },
 );
@@ -401,6 +686,79 @@ test(
 );
 
 test(
+  "Phase 59 UDP admissions produce typed evidence from project responders",
+  { skip: !matrix },
+  async () => {
+    const probes = new Map([
+      [520, [34, 34, 2]],
+      [27_910, [35, 35, 2]],
+      [27_960, [36, 36, 3]],
+      [64_738, [37, 37, 3]],
+    ]);
+    const scanner = await createScanner();
+    const session = await scanner.start({
+      targets: [{ cidr: "192.0.2.2/32" }, { cidr: "2001:db8:22::2/128" }],
+      probes: [
+        {
+          kind: "udp",
+          ports: [...probes.keys()],
+          policy: {
+            mode: "protocol",
+            profile: "legacy",
+            intensity: 8,
+            strategy: "exhaustive",
+            emptyFallback: "never",
+            allowRisks: ["highAmplification", "sensitiveRead"],
+          },
+        },
+      ],
+      deadlineMs: 10_000,
+      timing: { timeoutMs: 1_000, retries: 0 },
+      rate: { packetsPerSecond: 500, burst: 8, maxOutstanding: 8 },
+    });
+    const found = new Map();
+    for (;;) {
+      const batch = await session.nextBatch({ maxResults: 16 });
+      if (batch === null) break;
+      const ids = new DataView(
+        batch.columns.terminalUdpProbeIds.buffer,
+        batch.columns.terminalUdpProbeIds.byteOffset,
+        batch.columns.terminalUdpProbeIds.byteLength,
+      );
+      const families = new DataView(
+        batch.columns.udpServiceFamilies.buffer,
+        batch.columns.udpServiceFamilies.byteOffset,
+        batch.columns.udpServiceFamilies.byteLength,
+      );
+      for (let row = 0; row < batch.length; row += 1) {
+        const result = batch.results[row];
+        found.set(`${result.target}/${String(result.port)}`, [
+          ids.getUint16(row * 2, true),
+          families.getUint16(row * 2, true),
+          batch.columns.udpServiceConfidences[row],
+          result.state,
+        ]);
+      }
+    }
+    for (const [port, evidence] of probes) {
+      assert.deepEqual(found.get(`192.0.2.2/${String(port)}`), [
+        ...evidence,
+        "open",
+      ]);
+      assert.deepEqual(
+        found.get(`2001:db8:22::2/${String(port)}`),
+        port === 520 ? [0, 0, 0, "open|filtered"] : [...evidence, "open"],
+      );
+    }
+    const summary = await session.summary();
+    assert.equal(summary.udp.catalogue.version, "1.4.1");
+    assert.equal(summary.error, undefined);
+    await session.close();
+    await scanner.close();
+  },
+);
+
+test(
   "adaptive UDP preserves DNS service recall while reducing physical requests",
   { skip: !matrix },
   async () => {
@@ -445,7 +803,7 @@ test(
         assert.equal(results[0].transmissions, results[1].transmissions);
         const summary = await session.summary();
         assert.equal(summary.udp.policy.strategy, strategy);
-        assert.equal(summary.udp.catalogue.version, "1.3.0");
+        assert.equal(summary.udp.catalogue.version, "1.4.1");
         assert.ok(summary.progress.sent >= BigInt(results[0].transmissions));
         samples[strategy].push(results[0].transmissions);
         await session.close();

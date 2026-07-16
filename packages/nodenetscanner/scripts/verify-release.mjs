@@ -39,11 +39,19 @@ requireCondition(
   "result batch schema policy drift",
 );
 requireCondition(
-  policy.udpProbeCatalogue?.version === "1.3.0" &&
-    policy.udpProbeCatalogue?.protocolVariants === 33 &&
+  policy.udpProbeCatalogue?.version === "1.4.1" &&
+    policy.udpProbeCatalogue?.protocolVariants === 37 &&
     policy.udpProbeCatalogue?.safeVariants === 9 &&
     policy.udpProbeCatalogue?.blockedCapabilities === 13,
   "UDP catalogue policy drift",
+);
+requireCondition(
+  policy.udpCoverageRegistry?.version === "1.1.0" &&
+    policy.udpCoverageRegistry?.candidates === 41 &&
+    policy.udpCoverageRegistry?.implemented === 5 &&
+    policy.udpCoverageRegistry?.noGo === 32 &&
+    policy.udpCoverageRegistry?.excluded === 4,
+  "UDP coverage registry policy drift",
 );
 const nativeCargo = readFileSync(manifests[0], "utf8");
 requireCondition(

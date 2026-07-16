@@ -10,12 +10,12 @@ suite=${2:-privileged}
 case "$mode" in
   root|namespace) ;;
   *)
-    echo "usage: sh test/run-privileged.sh root|namespace [privileged|event-stress|traceroute-stress|phase17-protocol]" >&2
+    echo "usage: sh test/run-privileged.sh root|namespace [privileged|ring-stress|event-stress|traceroute-stress|phase17-protocol]" >&2
     exit 2
     ;;
 esac
 case "$suite" in
-  privileged|event-stress|traceroute-stress|phase17-protocol) ;;
+  privileged|ring-stress|event-stress|traceroute-stress|phase17-protocol) ;;
   *)
     echo "unknown privileged test suite: $suite" >&2
     exit 2

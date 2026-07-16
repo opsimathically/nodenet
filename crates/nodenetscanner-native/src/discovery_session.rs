@@ -14,15 +14,17 @@ use nix::sys::socket::{ControlMessageOwned, MsgFlags, SockaddrStorage, recvmsg, 
 use nodenet_linux_context::{NetworkSnapshot, RouteContext, RouteQuery};
 use nodenet_protocols::{
     DISCOVERY_OPERATION_REGISTRY, DISCOVERY_OPERATION_REGISTRY_VERSION, DiscoveryDnsRecordData,
-    DiscoveryOperationId, TftpDiscoveryResponse, UdpCatalogueProbe, UdpProbeBuildContext,
-    build_discovery_dns_query, build_llmnr_query, build_mdns_service_enumeration_query,
-    build_nat_pmp_external_address_request, build_quic_version_negotiation_request,
+    DiscoveryOperationId, TftpDiscoveryResponse, UDP_COVERAGE_RESOURCE_CONTRACT, UdpCatalogueProbe,
+    UdpProbeBuildContext, build_discovery_dns_query, build_llmnr_query,
+    build_mdns_service_enumeration_query, build_nat_pmp_external_address_request,
+    build_quic_version_negotiation_request, build_ripv1_table_request,
     build_rpcbind_getaddr_request, build_sql_browser_enumeration_request, build_tftp_discovery_rrq,
     build_tftp_termination_error, build_udp_catalogue_request, build_ws_discovery_probe,
     discovery_operation_registry_sha256_hex, parse_discovery_dns_message, parse_llmnr_response,
     parse_nat_pmp_external_address_response, parse_quic_version_negotiation_response,
-    parse_rpcbind_getaddr_response, parse_rpcbind_universal_address, parse_sql_browser_response,
-    parse_tftp_discovery_response, parse_udp_catalogue_response, parse_ws_discovery_probe_matches,
+    parse_ripv1_table_response, parse_rpcbind_getaddr_response, parse_rpcbind_universal_address,
+    parse_sql_browser_response, parse_tftp_discovery_response, parse_udp_catalogue_response,
+    parse_ws_discovery_probe_matches,
 };
 use nodenetscanner_engine::{DiscoveryBudget, DiscoveryQueryLease, TargetEndpoint};
 
@@ -32,13 +34,14 @@ use crate::model::{
     to_protocol_address,
 };
 
-const MAX_NATIVE_DISCOVERY_QUERIES: usize = 1_024;
 const MAX_NATIVE_DISCOVERY_SOCKETS: usize = 256;
 const MAX_MDNS_QUERIES_PER_SCOPE_MEMBER: usize = 256;
 const MAX_RECEIVED_DATAGRAMS: usize = 65_536;
 const MAX_RECEIVED_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_METADATA_FIELDS_PER_ROW: usize = 128;
 const MAX_METADATA_BYTES_PER_ROW: usize = 16 * 1_024;
+const MAX_RIPV1_DATAGRAMS_PER_QUERY: u8 = 10;
+const MAX_RIPV1_BYTES_PER_QUERY: usize = 10 * 504;
 
 const RUNNING: u8 = 1;
 const PAUSED: u8 = 3;
@@ -215,6 +218,11 @@ enum QueryContext {
         pinned_port: Option<u16>,
     },
     Quic(nodenet_protocols::QuicVersionNegotiationRequest),
+    RipV1 {
+        received_datagrams: u8,
+        received_bytes: usize,
+        exhausted: bool,
+    },
 }
 
 struct MdnsContext {
@@ -427,7 +435,7 @@ pub(crate) fn run_discovery(
         .ok_or_else(|| {
             ScannerError::resource("start discovery", "physical query count overflow")
         })?;
-    if possible_queries > MAX_NATIVE_DISCOVERY_QUERIES {
+    if possible_queries > usize::from(UDP_COVERAGE_RESOURCE_CONTRACT.maximum_physical_queries) {
         return Err(ScannerError::resource(
             "start discovery",
             "one native discovery session may contain at most 1024 physical queries",
@@ -503,7 +511,8 @@ pub(crate) fn run_discovery(
             }
             if query.pending_outbound.as_ref().is_some_and(|outbound| {
                 matches!(outbound.kind, OutboundKind::AdaptiveQuery)
-                    && counters.queries >= MAX_NATIVE_DISCOVERY_QUERIES as u64
+                    && counters.queries
+                        >= u64::from(UDP_COVERAGE_RESOURCE_CONTRACT.maximum_physical_queries)
             }) {
                 query.pending_outbound = None;
                 counters.truncated += 1;
@@ -602,6 +611,12 @@ pub(crate) fn run_discovery(
                             counters.rejected += 1;
                             continue;
                         }
+                        let Some(budget_reached) = charge_query_response(query, length) else {
+                            mark_query_rows_truncated(&mut rows, query, source.ip());
+                            counters.truncated += 1;
+                            query.response_deadline = None;
+                            break;
+                        };
                         let parsed = parse_rows(
                             query,
                             source,
@@ -744,6 +759,12 @@ pub(crate) fn run_discovery(
                                 }
                             }
                             Err(()) => counters.rejected += 1,
+                        }
+                        if budget_reached {
+                            mark_query_rows_truncated(&mut rows, query, source.ip());
+                            counters.truncated += 1;
+                            query.response_deadline = None;
+                            break;
                         }
                     }
                     Ok(None) => break,
@@ -1303,6 +1324,11 @@ fn prepare_query(
                     ScannerError::invalid("build QUIC discovery", error.to_string())
                 })?,
         ),
+        10 => QueryContext::RipV1 {
+            received_datagrams: 0,
+            received_bytes: 0,
+            exhausted: false,
+        },
         _ => {
             return Err(ScannerError::invalid(
                 "start discovery",
@@ -1438,6 +1464,7 @@ fn request_bytes(query: &Query) -> Result<Vec<u8>, ScannerError> {
         .map_err(|error| ScannerError::invalid("build rpcbind query", error.to_string())),
         QueryContext::Tftp { entropy, .. } => Ok(build_tftp_discovery_rrq(*entropy)),
         QueryContext::Quic(request) => Ok(request.bytes.clone()),
+        QueryContext::RipV1 { .. } => Ok(build_ripv1_table_request().to_vec()),
     }
 }
 
@@ -1870,6 +1897,72 @@ fn parse_rows(
                 None,
             ))
         }
+        QueryContext::RipV1 { .. } => {
+            let routes = parse_ripv1_table_response(bytes).map_err(|_| ())?;
+            let mut rows = Vec::with_capacity(routes.len());
+            for route in routes {
+                let mut identity = route.destination.octets().to_vec();
+                identity.extend_from_slice(&route.metric.to_be_bytes());
+                let mut row = base(
+                    identity,
+                    "route",
+                    vec![
+                        field_text("router", &source.ip().to_string()),
+                        field_text("destination", &route.destination.to_string()),
+                        field_text("addressSemantics", "classful"),
+                        field_text("metric", &route.metric.to_string()),
+                        field_text("protocolVersion", "1"),
+                        field_text(
+                            "evidenceLifetimeMs",
+                            &descriptor.response_window_ms.to_string(),
+                        ),
+                    ],
+                )?;
+                row.addresses = vec![route.destination.to_string()];
+                rows.push(row);
+            }
+            Ok((rows, None))
+        }
+    }
+}
+
+/// Charges tuple-valid responses before parsing so malformed target traffic
+/// cannot evade the operation-specific packet and byte ceilings. The boolean
+/// marks the final admitted datagram; `None` means the query is already full.
+fn charge_query_response(query: &mut Query, length: usize) -> Option<bool> {
+    let QueryContext::RipV1 {
+        received_datagrams,
+        received_bytes,
+        exhausted,
+    } = &mut query.context
+    else {
+        return Some(false);
+    };
+    if *exhausted
+        || *received_datagrams >= MAX_RIPV1_DATAGRAMS_PER_QUERY
+        || received_bytes
+            .checked_add(length)
+            .is_none_or(|value| value > MAX_RIPV1_BYTES_PER_QUERY)
+    {
+        *exhausted = true;
+        return None;
+    }
+    *received_datagrams += 1;
+    *received_bytes += length;
+    let reached = *received_datagrams == MAX_RIPV1_DATAGRAMS_PER_QUERY
+        || *received_bytes == MAX_RIPV1_BYTES_PER_QUERY;
+    *exhausted = reached;
+    Some(reached)
+}
+
+fn mark_query_rows_truncated(rows: &mut [NativeDiscoveryRow], query: &Query, responder: IpAddr) {
+    for row in rows.iter_mut().filter(|row| {
+        row.operation_id == u32::from(query.operation.id.get())
+            && row.responder == responder.to_string()
+            && (query.interface_index.is_none() || row.interface_index == query.interface_index)
+    }) {
+        row.truncated = true;
+        row.outcome = "truncatedByPolicy".into();
     }
 }
 
@@ -2162,5 +2255,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ripv1_tuple_valid_datagrams_exhaust_the_query_budget_before_parsing() {
+        let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut query = Query {
+            operation: ValidatedDiscoveryOperation {
+                id: DiscoveryOperationId::new(10).unwrap(),
+                query: None,
+                follow_up: false,
+            },
+            interface_index: None,
+            expected_target: Some(target),
+            destination: SocketAddr::new(target, 520),
+            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(),
+            context: QueryContext::RipV1 {
+                received_datagrams: 0,
+                received_bytes: 0,
+                exhausted: false,
+            },
+            pending_outbound: None,
+            response_deadline: Some(Instant::now() + Duration::from_secs(1)),
+            retained_entities: 0,
+            retained_metadata_bytes: 0,
+            lease: None,
+            settled: false,
+        };
+
+        // Charging happens before the parser. Consequently even malformed
+        // tuple-valid traffic cannot keep a response window alive indefinitely.
+        for _ in 0..MAX_RIPV1_DATAGRAMS_PER_QUERY - 1 {
+            assert_eq!(charge_query_response(&mut query, 1), Some(false));
+        }
+        assert_eq!(charge_query_response(&mut query, 1), Some(true));
+        assert_eq!(charge_query_response(&mut query, 1), None);
+        assert!(matches!(
+            query.context,
+            QueryContext::RipV1 {
+                received_datagrams: MAX_RIPV1_DATAGRAMS_PER_QUERY,
+                received_bytes: 10,
+                exhausted: true,
+            }
+        ));
     }
 }

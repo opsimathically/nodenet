@@ -1210,6 +1210,244 @@ ring-event work remains separately undecided.
   isolated native transport exit gates. See
   `54-advanced-udp-discovery-plan-review.md`.
 
+### D-051 — Ship bounded ordinary-UDP discovery operations and record unsupported families as no-go
+
+- Date: 2026-07-14
+- Status: accepted
+- Decision: add registry `1.0.0` and discovery schema 1 with legacy-unicast
+  mDNS/DNS-SD, WS-Discovery, explicit-name LLMNR, NAT-PMP external-address, SQL
+  Browser, rpcbind GETADDR evidence, TFTP sentinel discovery, and QUIC Version
+  Negotiation. Use ordinary nonblocking UDP and shared scan/discovery
+  session/metadata admission. Retain fixed-port mDNS browse, Kerberos, IKE,
+  DTLS, host-namespace DHCP, and specialized Phase 43 candidates as explicit
+  no-go outcomes. Do not advance the release version while rpcbind child
+  execution, the new namespace matrix, or native AArch64 execution remains.
+- Rationale: these eight operations have independently owned bounded codecs and
+  useful non-mutating evidence. The no-go families did not close their
+  coexistence, identity, cryptographic dependency, or authoritative fixture
+  gates, and malformed approximations would weaken the project.
+- Consequences: `DISCOVERY_CAPABILITIES` exposes exact implemented operations,
+  ceilings, risks, registry identity, and no-go families. Rpcbind child work is
+  a single typed same-target NFSv3 NULL exchange, can be disabled per operation,
+  and carries parent/derivation identity in discovery schema 1. Phase 44's
+  external release gates remain open as recorded in report 55.
+
+### D-052 — Evidence-driven active, passive, topology, and longitudinal discovery
+
+- Status: accepted planning direction; Phase 45 readiness review required
+- Date: 2026-07-15
+- Decision: evolve `@opsimathically/nodenetscanner` through Phases 45–58 around
+  one additive provenance-preserving evidence model and one re-authorized
+  derived-work policy. Add separate finite metadata-only passive observation,
+  link/IPv6 topology and path discovery, a bounded ordinary-TCP conversation
+  engine and independently risked service packs, governed cross-protocol
+  enrichment, explainable asset reconciliation, longitudinal/local context,
+  optional specialized packs, and transport-neutral multi-vantage evidence. Keep
+  one native scanner addon with modular internal Rust crates/registries and
+  distinct session/result schemas. Retain existing scan schemas 1/2, UDP
+  catalogue `1.3.0`, discovery schema 1, and discovery registry `1.0.0`.
+- Rationale: the scanner already has broad active UDP and finite discovery
+  coverage. Its largest remaining blind spots are silent devices observable only
+  through ambient traffic, application identity behind open TCP ports, routers
+  and paths, disconnected evidence that could safely authorize narrow
+  follow-ups, identity/change over time, and links outside one broadcast domain.
+  A common evidence and authority foundation prevents those features from
+  becoming unrelated one-off probes or an uncontrolled crawler.
+- Consequences: Phase 45 is the only next implementation phase and transmits no
+  traffic. Passive capture defaults to non-promiscuous typed metadata and never
+  claims completeness. Received URLs, DNS data, ports, names, routes, and
+  identities never grant authority. Authentication attempts, credentials,
+  configuration changes, vulnerability payloads, general packet recording,
+  mandatory persistence, and a built-in remote sensor server remain out of
+  scope. Applications own sensor transport security and authorization. Every
+  optional protocol/provider can independently record no-go. The still-open
+  Phase 44 native AArch64 and release-hardening gates remain mandatory. See
+  `57-network-discovery-coverage-plan.md`.
+
+### D-053 — Structured evidence origins and re-authorized derived work
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: evidence schema 1 identifies a source record by source kind, source
+  schema, bounded opaque run ID, and run-local record ID. It retains immutable
+  typed entity/field/relation evidence, monotonic observation/expiry, optional
+  wall context, confidence, and disposition under the Phase 45 bounds. Exact
+  duplicates coalesce and conflicts remain; device merging is deferred to
+  Phase 54. Generalized derived work is admitted only through a stable
+  registered derivation/operation pair that rechecks same-address target scope,
+  exclusions, risk consent, depth, fan-out, duplicates, and capacity before I/O.
+- Rationale: current scan rows and discovery entity IDs are intentionally
+  run-local, and correlation strength does not grant network authority.
+  Structured origins avoid collision-prone hashes while preserving source
+  provenance; separating evidence retention from asset merging prevents weak
+  names or shared traits from becoming false identity.
+- Consequences: current scan/discovery schemas and rpcbind behavior remain
+  compatible. Phase 45 adds no I/O or dependency. Authentication attempts and
+  target mutation are not admissible derived risks. Phase 46 and later producers
+  must emit schema-1 evidence or an explicitly versioned successor and share the
+  same lifetime limits. See `58-network-discovery-coverage-plan-review.md` and
+  `59-phase-45-report.md`.
+
+### D-054 — Finite filtered observation descriptors and honest partial phase status
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: Phase 46 uses at most four per-session AF_PACKET descriptors over
+  explicit interfaces, within the combined four-session environment ceiling.
+  Every descriptor is bound, nonblocking/CLOEXEC, classic-BPF filtered, and
+  userspace guarded. Capture defaults to incoming, non-promiscuous metadata;
+  promiscuous membership is independent consent. Later roadmap phases record
+  foundation, no-go, and live-exit status separately.
+- Rationale: the finite descriptor design has a hard 16-descriptor environment
+  maximum and avoids adding an uncontrolled capture hub before measured demand.
+  Keeping phase status exact prevents a codec or policy validator from being
+  mistaken for a live path/TCP/enrichment engine.
+- Consequences: one interface can have up to four capture descriptors under
+  maximum concurrent sessions. This ceiling must be included in fd/RSS stress. A
+  future shared hub requires a measured replacement decision. Native AArch64
+  remains open; the unpublished version does not advance.
+
+### D-055 — Admit bounded live discovery slices and retain independent no-go candidates
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: complete Phases 47–57 with append-only passive lifetime semantics,
+  explicit Router Solicitation, dedicated bounded native path and ordinary-TCP
+  workers, credential-free service conversations, semantic DNS-SD enrichment,
+  scoped strong-identifier reconciliation, bounded inventory, and hostile sensor
+  fusion. Admit SSH/FTP/SMTP/POP3/IMAP/MySQL greetings, HTTP HEAD, PostgreSQL
+  SSLRequest, and Redis PING. Retain TLS, SMB, RDP, MongoDB, LDAP, active
+  description crawling, optional host providers, and specialized candidates as
+  executable no-go entries until their independent gates close.
+- Rationale: each admitted operation has canonical internally generated bytes,
+  finite parser/network work, explicit risk, project-owned tests, prompt
+  cancellation, and no authentication. A native worker avoids event-loop and
+  libuv-worker blocking while exact shared admission bounds concurrency.
+  Network-scoped strong identifiers and re-provenanced sensor data prevent
+  cross-site identity corruption.
+- Consequences: `tracePath`, `identifyService`, and `solicitRouters` are public
+  finite operations. Service results are syntactic unauthenticated evidence, not
+  identity proof. Optional no-go entries do not imply partial support. Phase 58
+  passes all locally available x86-64, namespace, fuzz, stress, artifact,
+  clean-consumer, and reproducibility gates; native AArch64 execution remains
+  mandatory before publication.
+
+### D-056 — Reopen and harden the Phase 46–57 implementation contracts
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: retain the admitted Phase 46–57 feature scope while repairing
+  passive parser strictness, evidence lifetime/identity semantics, sensor
+  interchange bounds and provenance, owned-thread cancellation, randomized path
+  correlation, incremental service parsing, and native/TypeScript registry
+  parity. Add bounded path pacing and optional sensor capability/visibility
+  context because both were already required by the accepted phase contracts.
+- Rationale: the second adversarial review found several cases where a valid
+  outer envelope could lend meaning to malformed inner traffic, stale evidence
+  could influence current assets, imported provenance could collide, or two
+  public registry sources could drift. These are correctness and trust-boundary
+  defects, not reasons to broaden protocol scope.
+- Consequences: report 61 supersedes report 60 on repaired implementation
+  details. Phase 56 no-go outcomes, transport-neutral sensor ownership, and the
+  native AArch64 publication gate remain unchanged.
+
+### D-057 — Expand UDP coverage through gated protocol families, not payload count
+
+- Status: accepted and implemented by D-058
+- Date: 2026-07-15
+- Decision: sequence Phases 59–69 around a checked multidimensional coverage
+  matrix and append-only candidate-admission harness, then address RMCP/IPMI and
+  remote management, enterprise databases, routing/industrial discovery, game
+  and master servers, voice/media, additional DHTs, sensitive legacy enterprise
+  protocols, and a current-source review of cryptographic/authentication
+  blockers. Keep threat/backdoor active signatures in a distinct enforced
+  exclusion boundary. Continue independently authoring requests, parsers,
+  fixtures, and responders from primary sources; use pinned Nmap source only for
+  human-reviewed black-box behavioral comparison.
+- Rationale: the present catalogue provides broad protocol-aware UDP discovery
+  but lacks several high-value infrastructure and legacy families found in Nmap.
+  Simply copying magic payloads would weaken licensing provenance, correlation,
+  safety, typed evidence, and support honesty. Ordering reusable
+  admission/accounting architecture before protocols and higher-risk stateful
+  families after safer infrastructure work expands real coverage without
+  converting the scanner into an unbounded crawler, authenticator, or malware
+  scanner.
+- Consequences: Phase 59 was the only next implementation phase and added no
+  wire traffic. Existing catalogue/discovery IDs and default behavior remain
+  stable. Every candidate may independently finish as no-go when a stable
+  primary contract, non-mutating request, useful typed response, safe
+  resource/impact envelope, or project responder is unavailable. Returned
+  endpoints and routes remain evidence rather than authority. Request,
+  correlation, typed parsing, live responder, fingerprint, and policy dimensions
+  must be reported separately. Native AArch64 and inherited release gates remain
+  mandatory. See `62-udp-probe-coverage-expansion-plan.md`. D-058 records the
+  final admission and implementation results.
+
+### D-058 — Close UDP coverage candidates through evidence-gated admission
+
+- Status: accepted; implementation corrected and superseded by D-059
+- Date: 2026-07-15
+- Decision: release additive catalogue `1.4.0` with exact probes 34–37 for
+  RIPv1, Quake II, challenge-correlated Quake III, and timestamp-correlated
+  Mumble; credit existing ASF/RMCP probe 7; and freeze coverage registry `1.0.0`
+  with 5 implemented, 32 no-go, and 4 threat-excluded candidates. Keep all new
+  probes out of the safe profile and expose the registry through native-owned,
+  TypeScript-validated immutable capabilities.
+- Rationale: these five families satisfy the primary-contract, correlation,
+  typed-evidence, bounded-parser, policy, and project-responder gates. Every
+  other candidate either lacks a stable independent contract/responder, crosses
+  authentication or mutation boundaries, cannot justify network participation,
+  or is an active threat signature.
+- Consequences: IDs 1–33 and safe defaults remain stable; no-go and excluded
+  rows cannot schedule work; public claims report separate evidence dimensions.
+  All available x86-64 and namespace gates pass, but native AArch64 execution
+  remains mandatory before publication. See
+  `64-phases-59-69-implementation-report.md`.
+
+### D-059 — Repair UDP coverage claims through executable implementation joins
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: retain all catalogue IDs and candidate dispositions while releasing
+  corrective catalogue `1.4.1`, discovery registry `1.1.0`, and coverage
+  registry `1.1.0`. Credit RIPv1 route discovery to new discovery operation 10;
+  retain probe 34 only as a single-reply compatibility probe. Cross-validate
+  implemented coverage rows against actual descriptor resources, parsers, risks,
+  and project responders, and export exact runtime `requiredConsents`.
+- Rationale: adversarial review 65 demonstrated that structurally present IDs
+  and self-declared dimension bits did not prove multi-datagram topology,
+  authoritative protocol envelopes, correlation parity, or enforceable resource
+  and consent claims. The corrective versions make those relationships
+  executable without broadening network behavior or changing safe defaults.
+- Consequences: RIPv1 discovery is finite at one request, ten response
+  datagrams, 5,040 response bytes, 250 routes, and 3,000 ms per target. Quake II
+  and III use family-specific authoritative bounds; Quake III and Mumble publish
+  64-bit transaction strength. Provenance checks exact shipped data, owned
+  fixtures, and staged artifacts. All available x86-64, namespace, fuzz,
+  sanitizer, Miri, stress, artifact, consumer, and reproducibility gates pass.
+  Native AArch64 execution remains mandatory before publication. See
+  `66-phases-59-69-adversarial-repair-report.md`.
+
+### D-060 — Fail closed across release identity and fatal native ownership boundaries
+
+- Status: accepted and implemented
+- Date: 2026-07-15
+- Decision: stage releases only from a clean, verified Git `HEAD`; exchange
+  TPACKET block ownership with acquire/release atomics; settle every
+  discoverable queued or registered reactor operation before discarding
+  completion sinks; and make high-level observation ID removal the single
+  close-ownership decision.
+- Rationale: unchecked provenance, compiler-only packet-ring ordering, and
+  teardown paths that discard completion or handle ownership can produce output
+  that appears valid while no longer corresponding to its source or caller
+  lifecycle. These boundaries must fail visibly and deterministically.
+- Consequences: maintainers must commit or intentionally discard changes before
+  release assembly. Reactor terminal failures reject admitted work under its
+  original operation, observation close races cannot double-close an ID, and
+  privileged raw gates run in scheduled and release CI. Native AArch64 execution
+  remains a separate mandatory publication gate. See
+  `67-project-wide-adversarial-repair-report.md`.
+
 ## Research references
 
 Compatibility facts were verified on 2026-07-12 against primary project
@@ -1267,25 +1505,3 @@ documentation:
 - Consequences: ...
 - Supersedes/Superseded by: ... (when applicable)
 ```
-
-# D-051: Ship bounded ordinary-UDP discovery operations and record unsupported families as no-go
-
-- Date: 2026-07-14
-- Status: accepted
-- Decision: add registry `1.0.0` and discovery schema 1 with legacy-unicast
-  mDNS/DNS-SD, WS-Discovery, explicit-name LLMNR, NAT-PMP external-address, SQL
-  Browser, rpcbind GETADDR evidence, TFTP sentinel discovery, and QUIC Version
-  Negotiation. Use ordinary nonblocking UDP and shared scan/discovery
-  session/metadata admission. Retain fixed-port mDNS browse, Kerberos, IKE,
-  DTLS, host-namespace DHCP, and specialized Phase 43 candidates as explicit
-  no-go outcomes. Do not advance the release version while rpcbind child
-  execution, the new namespace matrix, or native AArch64 execution remains.
-- Rationale: these eight operations have independently owned bounded codecs and
-  useful non-mutating evidence. The no-go families did not close their
-  coexistence, identity, cryptographic dependency, or authoritative fixture
-  gates, and malformed approximations would weaken the project.
-- Consequences: `DISCOVERY_CAPABILITIES` exposes exact implemented operations,
-  ceilings, risks, registry identity, and no-go families. Rpcbind child work is
-  a single typed same-target NFSv3 NULL exchange, can be disabled per operation,
-  and carries parent/derivation identity in discovery schema 1. Phase 44's
-  external release gates remain open as recorded in report 55.

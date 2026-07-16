@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{UdpAddressFamilies, UdpProbeRisk, UdpProbeRiskSet, UdpSourcePortConstraint};
 
-pub const DISCOVERY_OPERATION_REGISTRY_VERSION: &str = "1.0.0";
+pub const DISCOVERY_OPERATION_REGISTRY_VERSION: &str = "1.1.0";
 pub const MAX_DISCOVERY_OPERATIONS: usize = 64;
 pub const MAX_DISCOVERY_REQUEST_BYTES: usize = 4_096;
 pub const MAX_DISCOVERY_RESPONSE_BYTES: usize = 65_507;
@@ -62,6 +62,7 @@ pub enum DiscoveryEntityKind {
     Gateway,
     DatabaseInstance,
     AuthenticationService,
+    Route,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -375,6 +376,29 @@ pub static DISCOVERY_OPERATION_REGISTRY: &[DiscoveryOperationDescriptor] = &[
         "https://www.rfc-editor.org/rfc/rfc9000",
         "RFC 9000 and RFC 8999"
     ),
+    operation!(
+        10,
+        "ripv1-routing-table",
+        Targets,
+        Ipv4,
+        UdpEphemeral,
+        UdpSourcePortConstraint::Ephemeral,
+        520,
+        None,
+        None,
+        HIGH_AMPLIFICATION_SENSITIVE,
+        QueryRelated,
+        Route,
+        24,
+        504,
+        250,
+        32_768,
+        3_000,
+        false,
+        "RFC Editor",
+        "https://www.rfc-editor.org/rfc/rfc1058",
+        "RFC 1058 sections 3.4 and 3.4.1; ten-datagram collection ceiling"
+    ),
 ];
 
 /// Validates ordering, IDs, destinations, resource bounds, risks, and
@@ -523,7 +547,7 @@ mod tests {
     #[test]
     fn production_registry_is_bounded_ordered_and_independently_sourced() {
         validate_discovery_operation_registry(DISCOVERY_OPERATION_REGISTRY).unwrap();
-        assert_eq!(DISCOVERY_OPERATION_REGISTRY.len(), 8);
+        assert_eq!(DISCOVERY_OPERATION_REGISTRY.len(), 9);
         assert_eq!(
             discovery_operation_registry_sha256_hex(DISCOVERY_OPERATION_REGISTRY).len(),
             64

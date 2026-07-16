@@ -2,10 +2,101 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  Scanner,
   ScannerError,
   createScanner,
   inspectNetworkContext,
 } from "../dist/index.js";
+
+test("concurrent observation and scanner closure releases an id exactly once", async () => {
+  const closed = [];
+  let finishNativeClose = () => undefined;
+  const run = {
+    state: "completed",
+    interfaces: ["lo"],
+    protocols: ["arp"],
+    promiscuous: false,
+    includeOutgoing: false,
+    progress: {
+      framesSeen: 0,
+      framesAccepted: 0,
+      resultsRetained: 0,
+      resultsDropped: 0,
+      metadataBytes: 0,
+    },
+  };
+  const handle = {
+    observe(_plan, _id, callback) {
+      void Promise.resolve().then(() => callback({ run }));
+    },
+    readyObservation() {
+      return Promise.resolve();
+    },
+    closeObservation(id) {
+      closed.push(id);
+    },
+    close() {
+      return new Promise((resolve) => {
+        finishNativeClose = resolve;
+      });
+    },
+  };
+  const scanner = new Scanner(handle);
+  const observation = await scanner.startObservation({
+    interfaces: ["lo"],
+    protocols: ["arp"],
+    durationMs: 1,
+    allowRisks: ["passiveMetadata"],
+  });
+
+  const scannerClose = scanner.close();
+  const observationClose = observation.close();
+  finishNativeClose();
+  await Promise.all([scannerClose, observationClose]);
+  assert.deepEqual(closed, [1]);
+});
+
+test("observation readiness failure releases scanner ownership", async () => {
+  const closed = [];
+  const expected = new Error("readiness failed");
+  const handle = {
+    observe(_plan, _id, callback) {
+      callback({
+        run: {
+          state: "completed",
+          interfaces: ["lo"],
+          protocols: ["arp"],
+          promiscuous: false,
+          includeOutgoing: false,
+          progress: {},
+        },
+      });
+    },
+    readyObservation() {
+      return Promise.reject(expected);
+    },
+    closeObservation(id) {
+      closed.push(id);
+    },
+    close() {
+      return Promise.resolve();
+    },
+  };
+  const scanner = new Scanner(handle);
+
+  await assert.rejects(
+    scanner.startObservation({
+      interfaces: ["lo"],
+      protocols: ["arp"],
+      durationMs: 1,
+      allowRisks: ["passiveMetadata"],
+    }),
+    (error) =>
+      error instanceof ScannerError && error.message === expected.message,
+  );
+  await scanner.close();
+  assert.deepEqual(closed, [1]);
+});
 
 test("read-only context inspection works without raw-socket setup", async () => {
   const snapshot = await inspectNetworkContext();
@@ -22,6 +113,23 @@ test("createScanner is capability-free and invalid plans fail before raw sockets
   const scanner = await createScanner();
   await assert.rejects(
     scanner.start({ targets: [], probes: [], deadlineMs: 1_000 }),
+    (error) => error instanceof ScannerError && error.kind === "invalidPlan",
+  );
+  await assert.rejects(
+    scanner.solicitRouters({
+      interface: "lo",
+      deadlineMs: 1,
+      allowRisks: [],
+    }),
+    (error) => error instanceof ScannerError && error.kind === "invalidPlan",
+  );
+  await assert.rejects(
+    scanner.tracePath({
+      target: "not-an-address",
+      mode: "udp",
+      port: 33434,
+      deadlineMs: 1_000,
+    }),
     (error) => error instanceof ScannerError && error.kind === "invalidPlan",
   );
   await scanner.close();

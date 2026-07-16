@@ -6,10 +6,50 @@ import {
   SCANNER_LIMITS,
   SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS,
   SUPPORTED_SCAN_PROBES,
+  UDP_COVERAGE_CAPABILITIES,
   UDP_PROBE_CATALOGUE,
   ScannerError,
   createScanner,
 } from "../dist/index.js";
+
+test("observation plans snapshot hostile properties once before native admission", async () => {
+  const scanner = await createScanner();
+  const reads = new Map();
+  const once = (name, value) => ({
+    enumerable: true,
+    get() {
+      reads.set(name, (reads.get(name) ?? 0) + 1);
+      return value;
+    },
+  });
+  const plan = Object.defineProperties(
+    {},
+    {
+      interfaces: once("interfaces", ["lo"]),
+      protocols: once("protocols", ["ipv4"]),
+      durationMs: once("durationMs", 1),
+      snapLength: once("snapLength", 64),
+      maxResults: once("maxResults", 1),
+      maxMetadataBytes: once("maxMetadataBytes", 1),
+      includeOutgoing: once("includeOutgoing", false),
+      promiscuous: once("promiscuous", true),
+      allowRisks: once("allowRisks", ["passiveMetadata"]),
+    },
+  );
+  await assert.rejects(scanner.startObservation(plan), /promiscuous/i);
+  assert.deepEqual(Object.fromEntries(reads), {
+    interfaces: 1,
+    protocols: 1,
+    allowRisks: 1,
+    promiscuous: 1,
+    includeOutgoing: 1,
+    durationMs: 1,
+    snapLength: 1,
+    maxResults: 1,
+    maxMetadataBytes: 1,
+  });
+  await scanner.close();
+});
 
 test("release capability and bound declarations are immutable", () => {
   assert.equal(RESULT_BATCH_SCHEMA_VERSION, 2);
@@ -27,12 +67,22 @@ test("release capability and bound declarations are immutable", () => {
   assert.equal(SCANNER_LIMITS.udpPayloadBytes, 65_491);
   assert.deepEqual(SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS, [1, 2]);
   assert.equal(Object.isFrozen(SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS), true);
-  assert.equal(UDP_PROBE_CATALOGUE.version, "1.3.0");
-  assert.equal(UDP_PROBE_CATALOGUE.variants, 33);
+  assert.equal(UDP_PROBE_CATALOGUE.version, "1.4.1");
+  assert.equal(UDP_PROBE_CATALOGUE.variants, 37);
   assert.equal(UDP_PROBE_CATALOGUE.sha256.length, 64);
   assert.equal(UDP_PROBE_CATALOGUE.protocolModeAvailable, true);
   assert.equal(Object.isFrozen(UDP_PROBE_CATALOGUE), true);
   assert.equal(Object.isFrozen(UDP_PROBE_CATALOGUE.supportedProfiles), true);
+  assert.equal(UDP_COVERAGE_CAPABILITIES.version, "1.1.0");
+  assert.equal(UDP_COVERAGE_CAPABILITIES.entries.length, 41);
+  assert.equal(Object.isFrozen(UDP_COVERAGE_CAPABILITIES), true);
+  assert.equal(Object.isFrozen(UDP_COVERAGE_CAPABILITIES.resources), true);
+  assert.equal(Object.isFrozen(UDP_COVERAGE_CAPABILITIES.entries), true);
+  assert.ok(
+    UDP_COVERAGE_CAPABILITIES.entries.every(
+      (entry) => Object.isFrozen(entry) && Object.isFrozen(entry.risks),
+    ),
+  );
 });
 
 test("hostile JavaScript plan values fail as controlled scanner errors", async () => {

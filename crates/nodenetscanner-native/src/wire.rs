@@ -1455,7 +1455,7 @@ fn protocol_strength(probe_id: Option<u16>) -> EvidenceStrength {
     match probe_id {
         Some(1 | 6 | 7 | 8 | 10 | 14 | 16) => EvidenceStrength::ProtocolTransaction16,
         Some(3 | 4 | 11 | 15) => EvidenceStrength::ProtocolTransaction32,
-        Some(2 | 5 | 12) => EvidenceStrength::ProtocolTransaction64,
+        Some(2 | 5 | 12 | 36 | 37) => EvidenceStrength::ProtocolTransaction64,
         _ => EvidenceStrength::TupleCorrelatedUnauthenticated,
     }
 }
@@ -1494,6 +1494,18 @@ mod tests {
         assert_eq!(
             compose_udp_request_payload(&request, &[0xaa; 16]),
             request.payload
+        );
+    }
+
+    #[test]
+    fn phase_59_transactional_probes_publish_protocol_strength() {
+        assert_eq!(
+            protocol_strength(Some(36)),
+            EvidenceStrength::ProtocolTransaction64
+        );
+        assert_eq!(
+            protocol_strength(Some(37)),
+            EvidenceStrength::ProtocolTransaction64
         );
     }
 

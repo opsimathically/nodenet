@@ -10,7 +10,11 @@ libraries implemented with TypeScript, Rust, and Node-API.
 - [`@opsimathically/nodenetscanner`](packages/nodenetscanner/README.md) is an
   unpublished `0.2.0-rc.1` bounded native scanner. Its TypeScript API drives
   live ARP/NDP, ICMPv4/v6 Echo, TCP SYN, protocol-aware UDP scans, and bounded
-  link/target UDP discovery through a Rust-owned portable Linux data plane.
+  link/target UDP discovery through a Rust-owned portable Linux data plane. It
+  also includes finite passive AF_PACKET metadata observation, strict passive
+  and service codecs, live bounded path/router/TCP service identification,
+  evidence/authority primitives, conservative asset and inventory views, and
+  transport-neutral scope-preserving sensor envelopes.
 
 The public packages remain independently versioned. Performance-sensitive Rust
 code can be shared as compile-time workspace crates, while each Node package
@@ -42,7 +46,7 @@ portable release hardening in the
 [Phase 24 report](ai_documentation/41-phase-24-report.md), and the measured
 extreme-backend `no-go` in the
 [Phase 25 report](ai_documentation/42-phase-25-report.md). Phase 26 is closed.
-The independently authored UDP catalogue and adaptive service-aware evolution
+The independently authored UDP catalogue and adaptive service-aware foundation
 through Phase 33 are recorded in the
 [UDP plan](ai_documentation/43-udp-probe-parity-plan.md) and
 [Phase 33 report](ai_documentation/51-phase-33-report.md). All available x86-64
@@ -56,6 +60,20 @@ admission/no-go decisions are tracked in the
 The implementation, no-go dispositions, and remaining external release gates are
 recorded in the
 [Phases 34–44 implementation report](ai_documentation/55-phase-34-44-implementation-report.md).
+The evidence-driven discovery platform implemented in Phases 45–57 and its local
+Phase 58 adversarial/release verification are recorded in the
+[Phases 46–58 implementation report](ai_documentation/60-phases-46-58-implementation-report.md).
+All available x86-64 gates pass; native ARM64/AArch64 execution remains untested
+and mandatory before publication.
+
+The Phase 59–69 UDP coverage program advances the independently authored
+catalogue to `1.4.1` with 37 variants. Its separate public decision registry
+records all 41 researched candidates as 5 implemented, 32 no-go, or 4
+threat-excluded. New opt-in RIPv1, Quake II, Quake III, and Mumble support does
+not change the nine-probe safe default. RIPv1 route discovery now collects a
+bounded multi-datagram response window and retains typed routes; catalogue probe
+34 remains a single-reply compatibility probe. See the
+[repair report](ai_documentation/66-phases-59-69-adversarial-repair-report.md).
 
 ## Development
 

@@ -14,11 +14,13 @@ import {
 
 test("discovery capabilities expose the checked registry and no-go ledger", () => {
   assert.equal(DISCOVERY_CAPABILITIES.schemaVersion, 1);
-  assert.equal(DISCOVERY_CAPABILITIES.operations.length, 8);
+  assert.equal(DISCOVERY_CAPABILITIES.registryVersion, "1.1.0");
+  assert.equal(DISCOVERY_CAPABILITIES.operations.length, 9);
   assert.equal(DISCOVERY_CAPABILITIES.maxSockets, 256);
   assert.equal(DISCOVERY_CAPABILITIES.maxPhysicalQueries, 1_024);
   assert.equal(DISCOVERY_OPERATIONS.mdnsDnsSdLegacy, 1);
   assert.equal(DISCOVERY_OPERATIONS.quicVersionNegotiation, 9);
+  assert.equal(DISCOVERY_OPERATIONS.ripv1RoutingTable, 10);
   assert.equal(
     DISCOVERY_CAPABILITIES.operations.find((operation) => operation.id === 7)
       ?.supportsFollowUp,

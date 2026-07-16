@@ -1,8 +1,4 @@
 #!/bin/sh
 set -eu
 
-exec unshare --user --map-root-user --net sh -c '
-  set -eu
-  ip link set lo up
-  exec node test/phase9-stress.mjs
-'
+exec sh "$(dirname "$0")/run-privileged.sh" namespace ring-stress

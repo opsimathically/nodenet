@@ -1,6 +1,6 @@
 # Planning index
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## Current state
 
@@ -164,6 +164,45 @@ Implemented operations, accepted no-go outcomes, verification evidence, and the
 remaining Phase 37/AArch64 gates are in the
 [Phases 34–44 implementation report](55-phase-34-44-implementation-report.md).
 
+Phases 45 through 58 are the accepted next planning direction for broader
+network discovery. D-052 makes a provenance-preserving evidence model and
+re-authorized derived-work policy the foundation, then sequences finite passive
+AF_PACKET observation, passive host/service decoders, IPv6/link topology,
+scanner-native path discovery, a bounded ordinary-TCP conversation engine,
+low-impact and opt-in TCP identity packs, governed cross-protocol enrichment,
+explainable asset reconciliation, longitudinal/local context, specialized packs,
+transport-neutral multi-vantage evidence, and an integrated audit. The roadmap
+keeps one Rust scanner engine with modular registries and distinct
+session/result semantics; it does not add a packet recorder, credential tester,
+vulnerability scanner, management controller, built-in sensor server, or
+mandatory persistence layer. Phases 45–57 are complete, all locally available
+Phase 58 x86-64 gates pass, and native AArch64 remains an external publication
+gate. See the
+[network discovery coverage expansion plan](57-network-discovery-coverage-plan.md)
+and the authoritative
+[adversarial repair report](61-phases-46-57-adversarial-repair-report.md).
+
+Phases 59 through 69 are the accepted next planning direction for UDP coverage
+gaps identified by a clean-room behavioral comparison with pinned Nmap source.
+D-057 first makes coverage dimensions, candidate admission, risk, identity,
+resource accounting, project responders, and provenance executable. It then
+prioritizes RMCP/IPMI and remote management, enterprise databases, routing and
+industrial discovery, game and master servers, voice/media, additional DHTs,
+sensitive legacy enterprise protocols, a fresh cryptographic/authentication
+blocker review, and an enforceable exclusion for threat/backdoor probes before
+the integrated audit. Unsupported candidates can close as explicit no-go
+outcomes; payload count is never a substitute for a stable primary contract and
+live typed evidence. Phases 59–68 are implementation-complete with 5 exact
+implementations, 32 no-go decisions, and 4 threat exclusions. All available
+Phase 69 x86-64 gates pass; native AArch64 remains an external publication gate.
+See the
+[UDP probe coverage expansion plan](62-udp-probe-coverage-expansion-plan.md) and
+[adversarial repair report](66-phases-59-69-adversarial-repair-report.md). The
+subsequent whole-project repair pass hardens release provenance, TPACKET
+ownership ordering, raw-reactor fatal settlement, sudo stress execution,
+observation ownership, and namespace oracle stability; see the
+[project-wide adversarial repair report](67-project-wide-adversarial-repair-report.md).
+
 ## Documents
 
 1. [Scope and requirements](01-scope-and-requirements.md)
@@ -222,6 +261,17 @@ remaining Phase 37/AArch64 gates are in the
 54. [Advanced UDP discovery plan review](54-advanced-udp-discovery-plan-review.md)
 55. [Phases 34–44 implementation report](55-phase-34-44-implementation-report.md)
 56. [Phases 34–44 product-hardening report](56-phase-34-44-hardening-report.md)
+57. [Network discovery coverage expansion plan](57-network-discovery-coverage-plan.md)
+58. [Network discovery coverage plan review](58-network-discovery-coverage-plan-review.md)
+59. [Phase 45 completion report](59-phase-45-report.md)
+60. [Phases 46–58 implementation and adversarial status](60-phases-46-58-implementation-report.md)
+61. [Phases 46–57 adversarial repair report](61-phases-46-57-adversarial-repair-report.md)
+62. [UDP probe coverage expansion plan](62-udp-probe-coverage-expansion-plan.md)
+63. [UDP coverage expansion readiness review](63-udp-coverage-plan-readiness-review.md)
+64. [Phases 59–69 implementation and audit report](64-phases-59-69-implementation-report.md)
+65. [Phases 59–69 adversarial implementation review](65-phases-59-69-adversarial-review.md)
+66. [Phases 59–69 adversarial repair report](66-phases-59-69-adversarial-repair-report.md)
+67. [Project-wide adversarial repair report](67-project-wide-adversarial-repair-report.md)
 
 `AGENTS.md` is the compact operational context. These documents contain the
 rationale and phase details. If they disagree, resolve the discrepancy and
@@ -256,6 +306,18 @@ update both rather than choosing silently.
   same-target derived ports and alternate response ports require registered
   state machines, exact provenance, independent risk consent, and explicit
   result/resource accounting.
+- The accepted coverage expansion uses an additive provenance-preserving
+  evidence model across retained result schemas, a separate finite metadata-only
+  passive observation session, ordinary bounded TCP service conversations, and
+  re-authorized derived work. Passive visibility, inferred identity, and
+  unauthenticated service evidence must never be presented as complete or
+  certain.
+- The accepted UDP coverage expansion separates request elicitation,
+  correlation, typed evidence, responder validation, fingerprinting, and policy
+  support. Every new family is independently authored from primary sources,
+  receives explicit risk/resource admission, and may finish as executable no-go.
+  Returned endpoints never grant authority, and threat/backdoor signatures are
+  excluded from ordinary active profiles.
 
 ## Accepted Phase 1 choices
 
@@ -301,6 +363,23 @@ The adversarial runtime/protocol corrections and current release gates are in
 `56-phase-34-44-hardening-report.md` and supersede the initial assumptions where
 they differ. Phase 37 now executes its single bounded, transaction-correlated,
 same-target NFSv3 child probe and exposes parent/derivation identity. The
-privileged namespace matrix is green after hardening. The next action is the
-remaining Phase 44 AArch64, gated stress/fuzz/sanitizer, and refreshed artifact/
-reproducibility matrix. Native AArch64 remains mandatory before publication.
+privileged namespace matrix is green after hardening. Phase 45 readiness and
+implementation are complete in `58-network-discovery-coverage-plan-review.md`
+and `59-phase-45-report.md`. Phases 46–57 are implementation-complete: passive
+observation and semantic expiry, active Router Solicitation, native path and
+bounded TCP service work, governed enrichment, conservative asset/inventory
+views, and scope-preserving sensor interchange have passed their available
+gates. Independently rejected optional candidates are executable no-go entries.
+The initial status and verification are in
+`60-phases-46-58-implementation-report.md`; the reopened audit corrections that
+supersede it are in `61-phases-46-57-adversarial-repair-report.md`. All
+available Phase 58 x86-64, namespace, stress, fuzz, artifact, consumer, and
+reproducibility gates pass. Native AArch64 execution remains mandatory before
+publication and is not waived. Adversarial review 65 reopened Phases 59, 62, 63,
+64, and 69. Report 66 closes all seven findings: RIPv1 is now bounded
+multi-datagram typed route discovery, Quake envelopes and transaction strength
+are corrected, coverage resources and consents are executable cross-registry
+contracts, and provenance covers owned fixtures plus staged artifacts. Catalogue
+`1.4.1` retains 37 variants; coverage registry `1.1.0` retains the 41 final
+dispositions. All available x86-64 gates pass again, leaving native AArch64
+execution as the external publication gate.

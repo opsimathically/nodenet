@@ -12,6 +12,238 @@ pub const MAX_DERIVED_ENDPOINTS_PER_TARGET: usize = 256;
 #[repr(u8)]
 pub enum DerivationKind {
     RpcbindGetAddress = 1,
+    AdvertisedTcpService = 2,
+    SsdpLocation = 3,
+    WsDiscoveryXaddr = 4,
+    DnsService = 5,
+    CoapResource = 6,
+    UpnpDescription = 7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum DerivedOperation {
+    NfsNull = 1,
+    TcpServiceConversation = 2,
+    HttpDescription = 3,
+    DnsQuery = 4,
+    CoapResourceDiscovery = 5,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AuthorityRiskSet(u16);
+
+impl AuthorityRiskSet {
+    pub const PASSIVE_METADATA: Self = Self(1 << 0);
+    pub const PROMISCUOUS_CAPTURE: Self = Self(1 << 1);
+    pub const LINK_MULTICAST: Self = Self(1 << 2);
+    pub const SERVER_FIRST: Self = Self(1 << 3);
+    pub const CLIENT_NEGOTIATION: Self = Self(1 << 4);
+    pub const STATEFUL_HANDSHAKE: Self = Self(1 << 5);
+    pub const SENSITIVE_READ: Self = Self(1 << 6);
+    pub const AUTHENTICATION_ATTEMPT: Self = Self(1 << 7);
+    pub const TARGET_MUTATION: Self = Self(1 << 8);
+
+    #[must_use]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    #[must_use]
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DerivedAuthorityRule {
+    pub derivation: DerivationKind,
+    pub operation: DerivedOperation,
+    pub required_risks: AuthorityRiskSet,
+    pub same_address_only: bool,
+}
+
+pub const DERIVED_AUTHORITY_REGISTRY: [DerivedAuthorityRule; 7] = [
+    DerivedAuthorityRule {
+        derivation: DerivationKind::RpcbindGetAddress,
+        operation: DerivedOperation::NfsNull,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::AdvertisedTcpService,
+        operation: DerivedOperation::TcpServiceConversation,
+        required_risks: AuthorityRiskSet::CLIENT_NEGOTIATION,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::SsdpLocation,
+        operation: DerivedOperation::HttpDescription,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::WsDiscoveryXaddr,
+        operation: DerivedOperation::HttpDescription,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::DnsService,
+        operation: DerivedOperation::DnsQuery,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::CoapResource,
+        operation: DerivedOperation::CoapResourceDiscovery,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+    DerivedAuthorityRule {
+        derivation: DerivationKind::UpnpDescription,
+        operation: DerivedOperation::HttpDescription,
+        required_risks: AuthorityRiskSet::SENSITIVE_READ,
+        same_address_only: true,
+    },
+];
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DerivedWorkRequest {
+    pub source_address: IpAddr,
+    pub destination_address: IpAddr,
+    pub port: u16,
+    pub parent_result_id: u64,
+    pub derivation: DerivationKind,
+    pub operation: DerivedOperation,
+    pub depth: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DerivedAuthorityError {
+    AddressOutsideOriginalScope,
+    ExcludedAddress,
+    CrossAddressNotAuthorized,
+    InvalidPort,
+    DepthExceeded,
+    UnregisteredEdge,
+    MissingRiskConsent,
+    ForbiddenRisk,
+    ParentFanOutExceeded,
+    TargetFanOutExceeded,
+    TotalFanOutExceeded,
+    Duplicate,
+}
+
+#[derive(Clone, Debug)]
+pub struct DerivedWorkAuthority {
+    allowed_targets: BTreeSet<IpAddr>,
+    excluded_targets: BTreeSet<IpAddr>,
+    allow_risks: AuthorityRiskSet,
+    admitted: BTreeSet<DerivedWorkRequest>,
+    maximum_total: usize,
+}
+
+impl DerivedWorkAuthority {
+    #[must_use]
+    pub fn new(
+        allowed_targets: impl IntoIterator<Item = IpAddr>,
+        excluded_targets: impl IntoIterator<Item = IpAddr>,
+        allow_risks: AuthorityRiskSet,
+        maximum_total: usize,
+    ) -> Self {
+        Self {
+            allowed_targets: allowed_targets.into_iter().collect(),
+            excluded_targets: excluded_targets.into_iter().collect(),
+            allow_risks,
+            admitted: BTreeSet::new(),
+            maximum_total: maximum_total.min(MAX_DERIVED_ENDPOINTS_PER_TARGET),
+        }
+    }
+
+    /// Re-authorizes one evidence-derived child before any I/O.
+    ///
+    /// # Errors
+    ///
+    /// Rejects scope/exclusion escape, unregistered transitions, forbidden or
+    /// missing risk consent, duplicates, and every graph ceiling.
+    pub fn authorize(&mut self, request: DerivedWorkRequest) -> Result<(), DerivedAuthorityError> {
+        if !self.allowed_targets.contains(&request.destination_address) {
+            return Err(DerivedAuthorityError::AddressOutsideOriginalScope);
+        }
+        if self.excluded_targets.contains(&request.destination_address) {
+            return Err(DerivedAuthorityError::ExcludedAddress);
+        }
+        if request.port == 0 {
+            return Err(DerivedAuthorityError::InvalidPort);
+        }
+        if request.depth == 0 || request.depth > MAX_DERIVATION_DEPTH {
+            return Err(DerivedAuthorityError::DepthExceeded);
+        }
+        let rule = DERIVED_AUTHORITY_REGISTRY
+            .iter()
+            .find(|rule| {
+                rule.derivation == request.derivation && rule.operation == request.operation
+            })
+            .ok_or(DerivedAuthorityError::UnregisteredEdge)?;
+        if rule.same_address_only && request.source_address != request.destination_address {
+            return Err(DerivedAuthorityError::CrossAddressNotAuthorized);
+        }
+        let forbidden =
+            AuthorityRiskSet::AUTHENTICATION_ATTEMPT.union(AuthorityRiskSet::TARGET_MUTATION);
+        if rule.required_risks.bits() & forbidden.bits() != 0 {
+            return Err(DerivedAuthorityError::ForbiddenRisk);
+        }
+        if !self.allow_risks.contains(rule.required_risks) {
+            return Err(DerivedAuthorityError::MissingRiskConsent);
+        }
+        if self.admitted.contains(&request) {
+            return Err(DerivedAuthorityError::Duplicate);
+        }
+        if self.admitted.len() >= self.maximum_total {
+            return Err(DerivedAuthorityError::TotalFanOutExceeded);
+        }
+        if self
+            .admitted
+            .iter()
+            .filter(|edge| edge.parent_result_id == request.parent_result_id)
+            .count()
+            >= MAX_DERIVED_PORTS_PER_PARENT
+        {
+            return Err(DerivedAuthorityError::ParentFanOutExceeded);
+        }
+        if self
+            .admitted
+            .iter()
+            .filter(|edge| edge.destination_address == request.destination_address)
+            .count()
+            >= MAX_DERIVED_ENDPOINTS_PER_TARGET
+        {
+            return Err(DerivedAuthorityError::TargetFanOutExceeded);
+        }
+        self.admitted.insert(request);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.admitted.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.admitted.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -223,6 +455,52 @@ mod tests {
         assert_eq!(
             correlation.accept_structured(target, 40_000, Some(2)),
             Err(AlternateEndpointError::Retired)
+        );
+    }
+
+    #[test]
+    fn generalized_authority_rechecks_scope_risk_and_registered_edges() {
+        let target: IpAddr = "192.0.2.1".parse().unwrap();
+        let other: IpAddr = "192.0.2.2".parse().unwrap();
+        let request = DerivedWorkRequest {
+            source_address: target,
+            destination_address: target,
+            port: 443,
+            parent_result_id: 9,
+            derivation: DerivationKind::AdvertisedTcpService,
+            operation: DerivedOperation::TcpServiceConversation,
+            depth: 1,
+        };
+        let mut denied = DerivedWorkAuthority::new([target], [], AuthorityRiskSet::default(), 8);
+        assert_eq!(
+            denied.authorize(request.clone()),
+            Err(DerivedAuthorityError::MissingRiskConsent)
+        );
+        let mut authority =
+            DerivedWorkAuthority::new([target], [], AuthorityRiskSet::CLIENT_NEGOTIATION, 8);
+        authority.authorize(request.clone()).unwrap();
+        assert_eq!(
+            authority.authorize(request.clone()),
+            Err(DerivedAuthorityError::Duplicate)
+        );
+        let mut cross_address = request;
+        cross_address.source_address = other;
+        assert_eq!(
+            authority.authorize(cross_address),
+            Err(DerivedAuthorityError::CrossAddressNotAuthorized)
+        );
+        let outside = DerivedWorkRequest {
+            source_address: other,
+            destination_address: other,
+            port: 443,
+            parent_result_id: 10,
+            derivation: DerivationKind::AdvertisedTcpService,
+            operation: DerivedOperation::TcpServiceConversation,
+            depth: 1,
+        };
+        assert_eq!(
+            authority.authorize(outside),
+            Err(DerivedAuthorityError::AddressOutsideOriginalScope)
         );
     }
 }

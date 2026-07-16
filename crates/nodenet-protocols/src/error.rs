@@ -38,6 +38,7 @@ pub enum Field {
     FragmentOffset,
     HardwareType,
     HeaderLength,
+    HopLimit,
     Operation,
     OptionKind,
     OptionLength,

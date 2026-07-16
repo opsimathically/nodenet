@@ -94,6 +94,24 @@ jobs:
           cache: npm
       - run: npm ci
       - run: sudo apt-get update && sudo apt-get install --yes iproute2
+      - name: Run raw socket privileged matrix
+        run: >-
+          sudo env NODENETRAW_NODE="$(command -v node)" PATH="$(dirname
+          "$(command -v
+          node)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          npm run test:privileged
+      - name: Run raw event stress
+        run: >-
+          sudo env NODENETRAW_NODE="$(command -v node)" PATH="$(dirname
+          "$(command -v
+          node)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          npm run test:phase11:stress
+      - name: Run raw traceroute stress
+        run: >-
+          sudo env NODENETRAW_NODE="$(command -v node)" PATH="$(dirname
+          "$(command -v
+          node)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          npm run test:phase15:stress
       - run: npm run hardening:stress
       - run: npm run test:phase17:namespace
       - run: npm run test:phase19:namespace

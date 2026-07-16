@@ -74,12 +74,20 @@ if [ "${NODENETSCANNER_IN_NAMESPACE:-0}" = "1" ]; then
   ip link set lo up
   unshare --net sh -c 'ip link set lo up; exec sleep 300' &
   target_pid=$!
+  unshare --net sh -c 'ip link set lo up; exec sleep 300' &
+  path_router_pid=$!
+  unshare --net sh -c 'ip link set lo up; exec sleep 300' &
+  path_target_pid=$!
   target_server=
   ready_file=
   cleanup() {
     [ -z "$target_server" ] || kill "$target_server" 2>/dev/null || true
     kill "$target_pid" 2>/dev/null || true
+    kill "$path_router_pid" 2>/dev/null || true
+    kill "$path_target_pid" 2>/dev/null || true
     wait "$target_pid" 2>/dev/null || true
+    wait "$path_router_pid" 2>/dev/null || true
+    wait "$path_target_pid" 2>/dev/null || true
     [ -z "$ready_file" ] || rm -f "$ready_file"
   }
   trap cleanup EXIT INT TERM
@@ -90,6 +98,9 @@ if [ "${NODENETSCANNER_IN_NAMESPACE:-0}" = "1" ]; then
   ip -6 address add 2001:db8:22::1/64 dev scan0 nodad
   ip address add 198.51.100.1/24 dev scan0
   ip link set scan0 up
+  # The scanner must observe fixture RAs without letting the isolated test
+  # kernel mutate its own route table and invalidate unrelated scan sessions.
+  sysctl -q -w net.ipv6.conf.scan0.accept_ra=0
   if [ "${NODENETSCANNER_PHASE25_BENCHMARK:-0}" = "1" ]; then
     ip link add bench0 type veth peer name bench1
     ip link set dev bench0 address 02:00:00:00:25:01
@@ -118,9 +129,45 @@ if [ "${NODENETSCANNER_IN_NAMESPACE:-0}" = "1" ]; then
   nsenter -t "$target_pid" -n ip address add 192.0.2.2/24 dev target0
   nsenter -t "$target_pid" -n ip -6 address add 2001:db8:22::2/64 dev target0 nodad
   nsenter -t "$target_pid" -n ip link set target0 up
+  nsenter -t "$target_pid" -n sysctl -q -w net.ipv6.conf.target0.accept_ra=0
   nsenter -t "$target_pid" -n ip link add link target0 name target0.42 type vlan id 42
   nsenter -t "$target_pid" -n ip address add 198.51.100.2/24 dev target0.42
   nsenter -t "$target_pid" -n ip link set target0.42 up
+
+  ip link add path0 type veth peer name pathr0
+  ip link set pathr0 netns "$path_router_pid"
+  nsenter -t "$path_router_pid" -n ip link add pathr1 type veth peer name path1
+  nsenter -t "$path_router_pid" -n ip link set path1 netns "$path_target_pid"
+  ip address add 198.18.0.1/30 dev path0
+  ip -6 address add 2001:db8:49:1::1/64 dev path0 nodad
+  ip link set path0 up
+  nsenter -t "$path_router_pid" -n ip address add 198.18.0.2/30 dev pathr0
+  nsenter -t "$path_router_pid" -n ip -6 address add 2001:db8:49:1::2/64 dev pathr0 nodad
+  nsenter -t "$path_router_pid" -n ip address add 198.18.0.5/30 dev pathr1
+  nsenter -t "$path_router_pid" -n ip -6 address add 2001:db8:49:2::1/64 dev pathr1 nodad
+  nsenter -t "$path_router_pid" -n ip link set pathr0 up
+  nsenter -t "$path_router_pid" -n ip link set pathr1 up
+  nsenter -t "$path_router_pid" -n sysctl -q -w net.ipv4.ip_forward=1
+  nsenter -t "$path_router_pid" -n sysctl -q -w net.ipv6.conf.all.forwarding=1
+  nsenter -t "$path_target_pid" -n ip address add 198.18.0.6/30 dev path1
+  nsenter -t "$path_target_pid" -n ip -6 address add 2001:db8:49:2::2/64 dev path1 nodad
+  nsenter -t "$path_target_pid" -n ip link set path1 up
+  ip route add 198.18.0.4/30 via 198.18.0.2 dev path0
+  ip -6 route add 2001:db8:49:2::/64 via 2001:db8:49:1::2 dev path0
+  nsenter -t "$path_target_pid" -n ip route add default via 198.18.0.5 dev path1
+  nsenter -t "$path_target_pid" -n ip -6 route add default via 2001:db8:49:2::1 dev path1
+  target_stable=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! nsenter -t "$target_pid" -n ip -6 address show dev target0 tentative | grep -q tentative; then
+      target_stable=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$target_stable" -ne 1 ]; then
+    echo "target0 IPv6 addresses did not leave tentative state" >&2
+    exit 1
+  fi
 
   ready_file=$(mktemp)
   nsenter -t "$target_pid" -n "$NODENETSCANNER_NODE" \
@@ -182,15 +229,15 @@ if [ "$(id -u)" -eq 0 ]; then
     owner_home=$(getent passwd "$owner" | cut -d: -f6)
     node=$(find_node "$owner_home")
     build_as_owner "$owner" "$owner_home" "$node" @opsimathically/nodenetscanner
+    build_as_owner "$owner" "$owner_home" "$node" @opsimathically/nodenetraw
     if [ "${NODENETSCANNER_PHASE25_BENCHMARK:-0}" = "1" ]; then
-      build_as_owner "$owner" "$owner_home" "$node" @opsimathically/nodenetraw
       build_phase25_lab_as_owner "$owner" "$owner_home" "$node"
     fi
   else
     node=$(find_node "${HOME:-/root}")
     npm run build --workspace=@opsimathically/nodenetscanner
+    npm run build --workspace=@opsimathically/nodenetraw
     if [ "${NODENETSCANNER_PHASE25_BENCHMARK:-0}" = "1" ]; then
-      npm run build --workspace=@opsimathically/nodenetraw
       cargo build -p nodenetscanner-native --example phase25_backend_lab --locked
     fi
   fi
@@ -218,8 +265,8 @@ if ! is_supported_node "$node"; then
   exit 1
 fi
 npm run build --workspace=@opsimathically/nodenetscanner
+npm run build --workspace=@opsimathically/nodenetraw
 if [ "${NODENETSCANNER_PHASE25_BENCHMARK:-0}" = "1" ]; then
-  npm run build --workspace=@opsimathically/nodenetraw
   cargo build -p nodenetscanner-native --example phase25_backend_lab --locked
   host_inventory=$("$node" packages/nodenetscanner/test/phase25-benchmark.mjs --inventory | base64 -w 0)
 else

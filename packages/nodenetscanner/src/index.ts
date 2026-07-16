@@ -1,6 +1,23 @@
 import { Buffer } from "node:buffer";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
+import { isIP } from "node:net";
+
+import {
+  DISCOVERY_PLATFORM_VERSIONS,
+  SERVICE_CAPABILITIES,
+} from "./platform.js";
+import type {
+  PathAttempt,
+  PathPlan,
+  PathTraceOptions,
+  PathTraceRun,
+  ServiceIdentificationOptions,
+  ServiceIdentificationPlan,
+  ServiceIdentificationRun,
+} from "./platform.js";
+
+export * from "./platform.js";
 
 export type ScanTarget =
   { readonly cidr: string } | { readonly start: string; readonly end: string };
@@ -123,6 +140,7 @@ export const DISCOVERY_OPERATIONS = Object.freeze({
   rpcbindGetAddress: 7,
   tftpSentinelRead: 8,
   quicVersionNegotiation: 9,
+  ripv1RoutingTable: 10,
 } as const);
 
 export type DiscoveryOperationName = keyof typeof DISCOVERY_OPERATIONS;
@@ -185,6 +203,156 @@ export interface DiscoveryPlan {
     readonly burst?: number;
   };
   readonly allowRisks?: readonly UdpProbeRisk[];
+}
+
+export type ObservationRisk = "passiveMetadata" | "promiscuousCapture";
+export type ObservationProtocol =
+  "arp" | "ipv4" | "ipv6" | "lldp" | "controlPlane";
+
+export const OBSERVATION_CAPABILITIES = Object.freeze({
+  schemaVersion: 1 as const,
+  maxSessionsPerEnvironment: 4,
+  maxInterfaces: 4,
+  maxDurationMs: 300_000,
+  maxSnapLength: 16_384,
+  maxInspectedFrames: 1_000_000,
+  maxCapturedBytes: 64 * 1_024 * 1_024,
+  maxResults: 8_192,
+  maxMetadataBytes: 16 * 1_024 * 1_024,
+  protocols: Object.freeze([
+    "arp",
+    "ipv4",
+    "ipv6",
+    "lldp",
+    "controlPlane",
+  ] as const),
+  promiscuousByDefault: false,
+  includesOutgoingByDefault: false,
+  retainsFramePayloads: false,
+});
+
+/** Finite, receive-only AF_PACKET metadata observation. */
+export interface ObservationPlan {
+  /** One through four explicit Linux interface names. */
+  readonly interfaces: readonly string[];
+  /** Explicit kernel-filtered link protocol groups. */
+  readonly protocols: readonly ObservationProtocol[];
+  /** Defaults to 30 seconds; maximum five minutes. */
+  readonly durationMs?: number;
+  /** Per-frame inspection ceiling; payload bytes are never returned. */
+  readonly snapLength?: number;
+  readonly maxResults?: number;
+  readonly maxMetadataBytes?: number;
+  /** Disabled by default and additionally suppressed in the kernel. */
+  readonly includeOutgoing?: boolean;
+  /** Disabled by default and requires `promiscuousCapture` consent. */
+  readonly promiscuous?: boolean;
+  readonly allowRisks?: readonly ObservationRisk[];
+}
+
+export interface RouterSolicitationPlan {
+  /** The one Linux link on which `ff02::2` will be solicited. */
+  readonly interface: string;
+  /** Defaults to three seconds; maximum ten seconds. */
+  readonly deadlineMs?: number;
+  /** Defaults to 16; maximum 64 unique link-local responders. */
+  readonly maxResults?: number;
+  /** Active link multicast is never implicit. */
+  readonly allowRisks: readonly ["linkMulticast"];
+}
+
+export interface RouterAdvertisementResult {
+  readonly responder: string;
+  readonly interfaceIndex: number;
+  readonly roundTripMicroseconds: bigint;
+  readonly metadata: readonly Readonly<{
+    key: string;
+    value: Uint8Array;
+  }>[];
+}
+
+export interface RouterSolicitationRun {
+  readonly schemaVersion: 1;
+  readonly state: "completed" | "cancelled";
+  readonly interface: string;
+  readonly interfaceIndex: number;
+  readonly transmitted: number;
+  readonly received: number;
+  readonly rejected: number;
+  readonly advertisements: readonly Readonly<RouterAdvertisementResult>[];
+}
+
+export interface RouterSolicitationOptions {
+  readonly signal?: AbortSignal;
+}
+
+export type ObservationSessionState =
+  | "running"
+  | "paused"
+  | "cancelling"
+  | "cancelled"
+  | "completed"
+  | "failed"
+  | "closed";
+
+export interface ObservationResult {
+  readonly sequence: bigint;
+  readonly interfaceIndex: number;
+  readonly timestampNanoseconds: bigint;
+  readonly wallTimeMilliseconds?: bigint;
+  readonly originalLength: number;
+  readonly capturedLength: number;
+  readonly packetType: number;
+  readonly direction: "incoming" | "outgoing";
+  readonly protocol: string;
+  readonly sourceMac: Uint8Array;
+  readonly destinationMac: Uint8Array;
+  readonly etherType: number;
+  readonly vlanIds: readonly number[];
+  readonly sourceAddress?: string;
+  readonly destinationAddress?: string;
+  readonly sourcePort?: number;
+  readonly destinationPort?: number;
+  readonly metadata: readonly {
+    readonly key: string;
+    readonly value: Uint8Array;
+  }[];
+  readonly truncated: boolean;
+}
+
+export interface ObservationProgress {
+  readonly inspected: bigint;
+  readonly capturedBytes: bigint;
+  readonly accepted: bigint;
+  readonly dropped: bigint;
+  /** Packets the Linux packet socket reported losing before userspace. */
+  readonly kernelDropped: bigint;
+  /** Parsed rows omitted solely because immutable retention limits were full. */
+  readonly retentionDropped: bigint;
+  readonly filtered: bigint;
+  readonly truncated: bigint;
+}
+
+export interface ObservationSummary {
+  readonly schemaVersion: 1;
+  readonly state: "completed" | "cancelled" | "failed";
+  readonly interfaces: readonly string[];
+  readonly protocols: readonly ObservationProtocol[];
+  readonly promiscuous: boolean;
+  readonly includeOutgoing: boolean;
+  readonly progress: ObservationProgress;
+  readonly error?: ScannerError;
+}
+
+export interface ObservationBatchEventEmitterOptions {
+  readonly maxResults?: number;
+}
+
+export interface ObservationBatchEventMap {
+  batch: [batch: ObservationResultBatch];
+  end: [];
+  error: [error: Error];
+  close: [];
 }
 
 export type DiscoverySessionState =
@@ -263,6 +431,96 @@ export interface DiscoveryBatchEventMap {
   error: [error: Error];
   close: [];
 }
+
+export type EvidenceSourceKind =
+  | "scanResult"
+  | "discoveryResult"
+  | "passiveObservation"
+  | "pathObservation"
+  | "serviceConversation"
+  | "localContext"
+  | "importedSensor";
+
+export type EvidenceEntityKind =
+  | "deviceCandidate"
+  | "interface"
+  | "address"
+  | "name"
+  | "service"
+  | "router"
+  | "prefix"
+  | "path"
+  | "hop"
+  | "adjacency"
+  | "classification";
+
+export type EvidenceRelationKind =
+  | "hasAddress"
+  | "hasName"
+  | "offersService"
+  | "attachedToInterface"
+  | "routesPrefix"
+  | "nextHop"
+  | "advertisedBy"
+  | "derivedFrom"
+  | "classifiedAs";
+
+export type EvidenceConfidence =
+  "weak" | "structural" | "transactionCorrelated" | "strongCorrelated";
+
+export type EvidenceDisposition =
+  "observed" | "inferred" | "expired" | "withdrawn" | "conflict";
+
+export interface EvidenceOrigin {
+  readonly source: EvidenceSourceKind;
+  readonly sourceSchema: number;
+  readonly runId: Uint8Array;
+  readonly recordId: bigint;
+}
+
+export interface EvidenceEntityKey {
+  readonly kind: EvidenceEntityKind;
+  readonly canonical: Uint8Array;
+}
+
+export interface EvidenceField {
+  readonly key: string;
+  readonly value: Uint8Array;
+}
+
+export interface EvidenceRelation {
+  readonly kind: EvidenceRelationKind;
+  readonly target: EvidenceEntityKey;
+}
+
+export interface EvidenceRecord {
+  readonly schemaVersion: 1;
+  readonly origin: EvidenceOrigin;
+  readonly entity: EvidenceEntityKey;
+  readonly confidence: EvidenceConfidence;
+  readonly disposition: EvidenceDisposition;
+  readonly observedAtNanoseconds: bigint;
+  readonly expiresAtNanoseconds?: bigint;
+  readonly wallTimeMilliseconds?: bigint;
+  readonly fields: readonly EvidenceField[];
+  readonly relations: readonly EvidenceRelation[];
+}
+
+export interface EvidenceAdapterOptions {
+  readonly runId: Uint8Array;
+  readonly recordId: bigint;
+  readonly sourceSchema: 1 | 2;
+  readonly wallTimeMilliseconds?: bigint;
+}
+
+export interface EvidenceLedgerCounters {
+  readonly accepted: bigint;
+  readonly duplicates: bigint;
+  readonly conflicts: bigint;
+  readonly rejectedCapacity: bigint;
+}
+
+export type EvidenceRetainOutcome = "accepted" | "duplicate" | "conflict";
 
 export type ScanSessionState =
   | "created"
@@ -492,12 +750,41 @@ export interface NetworkRoute {
   readonly routeType: number;
 }
 
+export interface NetworkRule {
+  readonly family: 2 | 10;
+  readonly destination?: string;
+  readonly destinationPrefixLength: number;
+  readonly source?: string;
+  readonly sourcePrefixLength: number;
+  readonly table: number;
+  readonly action: number;
+  readonly priority?: number;
+  readonly inputInterface?: string;
+  readonly outputInterface?: string;
+  readonly firewallMark?: number;
+  readonly firewallMask?: number;
+  readonly ipProtocol?: number;
+}
+
+export interface NetworkNeighbor {
+  readonly family: 2 | 10;
+  readonly interfaceIndex: number;
+  readonly destination?: string;
+  readonly state: number;
+  readonly flags: number;
+  readonly neighborType: number;
+  readonly linkLayerAddress: Uint8Array;
+  readonly probes?: number;
+}
+
 export interface NetworkContextSnapshot {
   readonly generation: bigint;
   readonly netnsCookie?: bigint;
   readonly interfaces: readonly NetworkInterface[];
   readonly addresses: readonly NetworkAddress[];
   readonly routes: readonly NetworkRoute[];
+  readonly rules: readonly NetworkRule[];
+  readonly neighbors: readonly NetworkNeighbor[];
   readonly ruleCount: number;
   readonly neighborCount: number;
 }
@@ -546,9 +833,9 @@ export const SUPPORTED_RESULT_BATCH_SCHEMA_VERSIONS = Object.freeze([
 
 /** Immutable provenance identity for the independently authored UDP catalogue. */
 export const UDP_PROBE_CATALOGUE = Object.freeze({
-  version: "1.3.0",
-  sha256: "427cdc09881907c610bbea8f6bc8cffa18e2819e3f7f04626adcf264e598b976",
-  variants: 33,
+  version: "1.4.1",
+  sha256: "90c1589cd264385c6931cd6ed9efdc216f352239790a9026830bfe98cffe5e56",
+  variants: 37,
   supportedProfiles: Object.freeze([
     "safe",
     "comprehensive",
@@ -556,6 +843,43 @@ export const UDP_PROBE_CATALOGUE = Object.freeze({
   ] as const),
   protocolModeAvailable: true,
 } as const);
+
+export type UdpCoverageDisposition = "implemented" | "noGo" | "excluded";
+export type UdpCoverageExecutionModel =
+  "none" | "targetPort" | "discovery" | "conversation";
+export type UdpCoveragePolicy = "safe" | "optIn" | "excluded";
+export type UdpCoverageRisk =
+  | "managementDisclosure"
+  | "topologyDisclosure"
+  | "amplification"
+  | "statefulParticipation"
+  | "legacyFragility"
+  | "threatSignature";
+export type UdpCoverageDimension =
+  | "request"
+  | "correlation"
+  | "typedEvidence"
+  | "projectResponder"
+  | "productFingerprint";
+
+export interface UdpCoverageEntry {
+  readonly id: number;
+  readonly projectId: string;
+  readonly phase: number;
+  readonly family: string;
+  readonly disposition: UdpCoverageDisposition;
+  readonly executionModel: UdpCoverageExecutionModel;
+  readonly policy: UdpCoveragePolicy;
+  readonly risks: readonly UdpCoverageRisk[];
+  /** Exact `allowRisks` values required by the resolved runtime implementation. */
+  readonly requiredConsents: readonly UdpProbeRisk[];
+  readonly dimensions: readonly UdpCoverageDimension[];
+  readonly implementation:
+    | { readonly kind: "udpProbe" | "discoveryOperation"; readonly id: number }
+    | undefined;
+  readonly primarySourceUrl: string;
+  readonly rationale: string;
+}
 
 /** Probe kinds implemented by the portable scanner engine. */
 export const SUPPORTED_SCAN_PROBES = Object.freeze([
@@ -579,10 +903,22 @@ export const SCANNER_LIMITS = Object.freeze({
   defaultBatchResults: 512,
 } as const);
 
+export const EVIDENCE_SCHEMA_VERSION = 1 as const;
+
+export const EVIDENCE_LIMITS = Object.freeze({
+  records: 8_192,
+  fieldsPerRecord: 128,
+  relationsPerRecord: 64,
+  itemBytes: 1_024,
+  recordBytes: 16 * 1_024,
+  batchBytes: 16 * 1_024 * 1_024,
+} as const);
+
 const MAX_BATCH_RESULTS = SCANNER_LIMITS.batchResults;
 const MAX_BATCH_METADATA_BYTES = 4 * 1_024 * 1_024;
 const MISSING_U64 = 0xffff_ffff_ffff_ffffn;
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+const textEncoder = new TextEncoder();
 
 /** One lazy row view over sealed, Node-owned compact batch storage. */
 export class ScanResultView implements ScanResult {
@@ -1691,6 +2027,163 @@ interface NativeDiscoveryCompletion {
   error?: NativeFailure;
 }
 
+interface NativeObservationPlan {
+  interfaces: string[];
+  protocols: ObservationProtocol[];
+  durationMs?: number;
+  snapLength?: number;
+  maxResults?: number;
+  maxMetadataBytes?: number;
+  includeOutgoing?: boolean;
+  promiscuous?: boolean;
+  allowRisks?: ObservationRisk[];
+}
+
+interface NativeRouterSolicitationPlan {
+  interface: string;
+  deadlineMs?: number;
+  maxResults?: number;
+  allowRisks: string[];
+}
+
+interface NativeRouterSolicitationRun {
+  schemaVersion: number;
+  state: string;
+  interface: string;
+  interfaceIndex: number;
+  transmitted: number;
+  received: number;
+  rejected: number;
+  advertisements: {
+    responder: string;
+    interfaceIndex: number;
+    roundTripMicroseconds: string;
+    metadata: { key: string; value: number[] }[];
+  }[];
+}
+
+interface NativeRouterSolicitationCompletion {
+  run?: unknown;
+  error?: NativeFailure;
+}
+
+interface NativePathPlan {
+  target: string;
+  mode: string;
+  port?: number;
+  firstHop?: number;
+  maximumHop?: number;
+  attemptsPerHop?: number;
+  pacingMs?: number;
+  deadlineMs: number;
+}
+
+interface NativePathRun {
+  schemaVersion: number;
+  target: string;
+  mode: string;
+  state: string;
+  destinationReached: boolean;
+  truncated: boolean;
+  attempts: {
+    hop: number;
+    attempt: number;
+    responder?: string;
+    roundTripMicroseconds?: string;
+    outcome: string;
+    correlation: string;
+    icmpFamily?: number;
+    icmpType?: number;
+    icmpCode?: number;
+  }[];
+}
+
+interface NativePathCompletion {
+  run?: NativePathRun;
+  error?: NativeFailure;
+}
+
+interface NativeServiceIdentificationPlan {
+  capabilityId: string;
+  target: string;
+  port: number;
+  deadlineMs: number;
+  allowRisks: string[];
+}
+
+interface NativeServiceIdentificationRun {
+  schemaVersion: number;
+  capabilityId: string;
+  target: string;
+  port: number;
+  state: string;
+  outcome: string;
+  protocol?: string;
+  confidence?: string;
+  fields: { key: string; value: number[] }[];
+  requestBytes: number;
+  responseBytes: number;
+}
+
+interface NativeServiceCompletion {
+  run?: NativeServiceIdentificationRun;
+  error?: NativeFailure;
+}
+
+interface NativeObservationRow {
+  sequence: string;
+  interfaceIndex: number;
+  timestampNanoseconds: string;
+  wallTimeMilliseconds?: string;
+  originalLength: number;
+  capturedLength: number;
+  packetType: number;
+  direction: "incoming" | "outgoing";
+  protocol: string;
+  sourceMac: number[];
+  destinationMac: number[];
+  etherType: number;
+  vlanIds: number[];
+  sourceAddress?: string;
+  destinationAddress?: string;
+  sourcePort?: number;
+  destinationPort?: number;
+  metadata: { key: string; value: number[] }[];
+  truncated: boolean;
+}
+
+interface NativeObservationProgress {
+  inspected: string;
+  capturedBytes: string;
+  accepted: string;
+  dropped: string;
+  kernelDropped: string;
+  retentionDropped: string;
+  filtered: string;
+  truncated: string;
+}
+
+interface NativeObservationBatch {
+  state: "running" | "paused" | "cancelling" | "completed" | "failed";
+  rows: NativeObservationRow[];
+  progress: NativeObservationProgress;
+}
+
+interface NativeObservationRun {
+  schemaVersion: number;
+  state: "completed" | "cancelled";
+  interfaces: string[];
+  protocols: ObservationProtocol[];
+  promiscuous: boolean;
+  includeOutgoing: boolean;
+  progress: NativeObservationProgress;
+}
+
+interface NativeObservationCompletion {
+  run?: NativeObservationRun;
+  error?: NativeFailure;
+}
+
 type NativeBatch = EncodedScanResultBatch;
 
 interface NativePullResult {
@@ -1762,12 +2255,34 @@ interface NativeSnapshot {
   })[];
   addresses: NetworkAddress[];
   routes: NetworkRoute[];
+  rules: NetworkRule[];
+  neighbors: (Omit<NetworkNeighbor, "linkLayerAddress"> & {
+    linkLayerAddress: number[];
+  })[];
   ruleCount: number;
   neighborCount: number;
 }
 
 interface NativeScannerHandle {
   ready(): Promise<unknown>;
+  solicitRouters(
+    plan: NativeRouterSolicitationPlan,
+    solicitationId: number,
+    callback: (completion: NativeRouterSolicitationCompletion) => void,
+  ): void;
+  cancelRouterSolicitation(solicitationId: number): void;
+  tracePath(
+    plan: NativePathPlan,
+    pathId: number,
+    callback: (completion: NativePathCompletion) => void,
+  ): void;
+  cancelPath(pathId: number): void;
+  identifyService(
+    plan: NativeServiceIdentificationPlan,
+    serviceId: number,
+    callback: (completion: NativeServiceCompletion) => void,
+  ): void;
+  cancelService(serviceId: number): void;
   start(plan: NativePlan): Promise<unknown>;
   discover(
     plan: NativeDiscoveryPlan,
@@ -1779,6 +2294,21 @@ interface NativeScannerHandle {
   cancelDiscovery(discoveryId: number): void;
   discoveryState(discoveryId: number): string;
   discoveryProgress(discoveryId: number): NativeDiscoveryRun["progress"];
+  observe(
+    plan: NativeObservationPlan,
+    observationId: number,
+    callback: (completion: NativeObservationCompletion) => void,
+  ): void;
+  readyObservation(observationId: number): Promise<unknown>;
+  pauseObservation(observationId: number): void;
+  resumeObservation(observationId: number): void;
+  cancelObservation(observationId: number): void;
+  observationBatch(
+    observationId: number,
+    maximum?: number,
+  ): NativeObservationBatch;
+  observationProgress(observationId: number): NativeObservationProgress;
+  closeObservation(observationId: number): void;
   pause(sessionId: number): Promise<unknown>;
   resume(sessionId: number): Promise<unknown>;
   cancel(sessionId: number): Promise<unknown>;
@@ -1802,6 +2332,43 @@ interface NativeBinding {
     version: string;
     sha256: string;
     variants: number;
+  };
+  udpCoverageCapabilities(): {
+    version: string;
+    maximumCandidates: number;
+    maximumCompiledVariants: number;
+    maximumPhysicalQueries: number;
+    maximumResponseBytes: number;
+    maximumMetadataBytes: number;
+    maximumReturnedEndpoints: number;
+    maximumStateLifetimeMs: number;
+    entries: {
+      id: number;
+      projectId: string;
+      phase: number;
+      family: string;
+      disposition: string;
+      executionModel: string;
+      policy: string;
+      risks: string[];
+      requiredConsents: string[];
+      dimensions: string[];
+      implementationKind?: string;
+      implementationId?: number;
+      primarySourceUrl: string;
+      rationale: string;
+    }[];
+  };
+  serviceRegistryCapabilities(): {
+    version: string;
+    entries: {
+      id: string;
+      ports: number[];
+      disposition: string;
+      risk: string;
+      maximumRequestBytes: number;
+      maximumResponseBytes: number;
+    }[];
   };
   discoveryCapabilities(): {
     registryVersion: string;
@@ -1841,7 +2408,220 @@ if (
 ) {
   throw new Error("native and TypeScript UDP probe catalogue metadata differ");
 }
+const nativeUdpCoverage = native.udpCoverageCapabilities();
+
+const UDP_COVERAGE_DISPOSITIONS = new Set<UdpCoverageDisposition>([
+  "implemented",
+  "noGo",
+  "excluded",
+]);
+const UDP_COVERAGE_EXECUTION_MODELS = new Set<UdpCoverageExecutionModel>([
+  "none",
+  "targetPort",
+  "discovery",
+  "conversation",
+]);
+const UDP_COVERAGE_POLICIES = new Set<UdpCoveragePolicy>([
+  "safe",
+  "optIn",
+  "excluded",
+]);
+const UDP_COVERAGE_RISKS = new Set<UdpCoverageRisk>([
+  "managementDisclosure",
+  "topologyDisclosure",
+  "amplification",
+  "statefulParticipation",
+  "legacyFragility",
+  "threatSignature",
+]);
+const UDP_COVERAGE_RUNTIME_CONSENTS = new Set<UdpProbeRisk>([
+  "highAmplification",
+  "statefulHandshake",
+  "authenticationAttempt",
+  "multicastOrBroadcast",
+  "sensitiveRead",
+]);
+const UDP_COVERAGE_DIMENSIONS = new Set<UdpCoverageDimension>([
+  "request",
+  "correlation",
+  "typedEvidence",
+  "projectResponder",
+  "productFingerprint",
+]);
+const DISCOVERY_OPERATION_IDS = new Set<number>(
+  Object.values(DISCOVERY_OPERATIONS),
+);
+
+function checkedUdpCoverageEntry(
+  entry: ReturnType<
+    NativeBinding["udpCoverageCapabilities"]
+  >["entries"][number],
+  index: number,
+): UdpCoverageEntry {
+  const disposition = entry.disposition as UdpCoverageDisposition;
+  const executionModel = entry.executionModel as UdpCoverageExecutionModel;
+  const policy = entry.policy as UdpCoveragePolicy;
+  const risks = entry.risks as UdpCoverageRisk[];
+  const requiredConsents = entry.requiredConsents as UdpProbeRisk[];
+  const dimensions = entry.dimensions as UdpCoverageDimension[];
+  const implementationPairPresent =
+    entry.implementationKind !== undefined &&
+    entry.implementationId !== undefined;
+  if (
+    entry.id !== index + 1 ||
+    entry.id < 1 ||
+    entry.phase < 60 ||
+    entry.phase > 68 ||
+    entry.projectId.length === 0 ||
+    entry.family.length === 0 ||
+    entry.rationale.length === 0 ||
+    !entry.primarySourceUrl.startsWith("https://") ||
+    !UDP_COVERAGE_DISPOSITIONS.has(disposition) ||
+    !UDP_COVERAGE_EXECUTION_MODELS.has(executionModel) ||
+    !UDP_COVERAGE_POLICIES.has(policy) ||
+    risks.some((risk) => !UDP_COVERAGE_RISKS.has(risk)) ||
+    requiredConsents.some(
+      (consent) => !UDP_COVERAGE_RUNTIME_CONSENTS.has(consent),
+    ) ||
+    new Set(requiredConsents).size !== requiredConsents.length ||
+    dimensions.some((dimension) => !UDP_COVERAGE_DIMENSIONS.has(dimension)) ||
+    (entry.implementationKind !== undefined) !==
+      (entry.implementationId !== undefined) ||
+    (entry.implementationId !== undefined &&
+      (!Number.isInteger(entry.implementationId) ||
+        entry.implementationId < 1)) ||
+    (implementationPairPresent &&
+      entry.implementationKind !== "udpProbe" &&
+      entry.implementationKind !== "discoveryOperation") ||
+    (entry.implementationKind === "udpProbe" &&
+      entry.implementationId !== undefined &&
+      entry.implementationId > UDP_PROBE_CATALOGUE.variants) ||
+    (entry.implementationKind === "discoveryOperation" &&
+      entry.implementationId !== undefined &&
+      !DISCOVERY_OPERATION_IDS.has(entry.implementationId))
+  ) {
+    throw new Error(`invalid native UDP coverage entry ${String(index + 1)}`);
+  }
+  const requiredDimensions: readonly UdpCoverageDimension[] = [
+    "request",
+    "correlation",
+    "typedEvidence",
+    "projectResponder",
+  ];
+  if (
+    (disposition === "implemented") !== implementationPairPresent ||
+    (disposition === "implemented" &&
+      (executionModel === "none" ||
+        policy === "excluded" ||
+        requiredDimensions.some(
+          (dimension) => !dimensions.includes(dimension),
+        ))) ||
+    (disposition !== "implemented" &&
+      (executionModel !== "none" ||
+        policy !== "excluded" ||
+        dimensions.length !== 0 ||
+        requiredConsents.length !== 0)) ||
+    (disposition === "excluded" && !risks.includes("threatSignature"))
+  ) {
+    throw new Error(
+      `inconsistent native UDP coverage entry ${String(index + 1)}`,
+    );
+  }
+  const implementation =
+    entry.implementationKind !== undefined &&
+    entry.implementationId !== undefined
+      ? Object.freeze({
+          kind: entry.implementationKind as "udpProbe" | "discoveryOperation",
+          id: entry.implementationId,
+        })
+      : undefined;
+  return Object.freeze({
+    id: entry.id,
+    projectId: entry.projectId,
+    phase: entry.phase,
+    family: entry.family,
+    disposition,
+    executionModel,
+    policy,
+    risks: Object.freeze([...risks]),
+    requiredConsents: Object.freeze([...requiredConsents]),
+    dimensions: Object.freeze([...dimensions]),
+    implementation,
+    primarySourceUrl: entry.primarySourceUrl,
+    rationale: entry.rationale,
+  });
+}
+
+if (
+  nativeUdpCoverage.version !== "1.1.0" ||
+  nativeUdpCoverage.entries.length === 0 ||
+  nativeUdpCoverage.entries.length > nativeUdpCoverage.maximumCandidates ||
+  nativeUdpCoverage.maximumCandidates !== 64 ||
+  nativeUdpCoverage.maximumCompiledVariants !== 256 ||
+  nativeUdpCoverage.maximumPhysicalQueries !== 1_024 ||
+  nativeUdpCoverage.maximumResponseBytes !== 4_096 ||
+  nativeUdpCoverage.maximumMetadataBytes !== 65_536 ||
+  nativeUdpCoverage.maximumReturnedEndpoints !== 1_024 ||
+  nativeUdpCoverage.maximumStateLifetimeMs !== 60_000
+) {
+  throw new Error("invalid native UDP coverage registry contract");
+}
+
+/** Final Phase 59–68 candidate decisions, support dimensions, and hard ceilings. */
+const checkedUdpCoverageEntries = nativeUdpCoverage.entries.map(
+  checkedUdpCoverageEntry,
+);
+if (
+  checkedUdpCoverageEntries.length !== 41 ||
+  new Set(checkedUdpCoverageEntries.map((entry) => entry.projectId)).size !==
+    checkedUdpCoverageEntries.length ||
+  checkedUdpCoverageEntries.filter(
+    (entry) => entry.disposition === "implemented",
+  ).length !== 5 ||
+  checkedUdpCoverageEntries.filter((entry) => entry.disposition === "noGo")
+    .length !== 32 ||
+  checkedUdpCoverageEntries.filter((entry) => entry.disposition === "excluded")
+    .length !== 4
+) {
+  throw new Error("native UDP coverage registry membership differs");
+}
+
+export const UDP_COVERAGE_CAPABILITIES = Object.freeze({
+  version: "1.1.0" as const,
+  resources: Object.freeze({
+    maximumCandidates: nativeUdpCoverage.maximumCandidates,
+    maximumCompiledVariants: nativeUdpCoverage.maximumCompiledVariants,
+    maximumPhysicalQueries: nativeUdpCoverage.maximumPhysicalQueries,
+    maximumResponseBytes: nativeUdpCoverage.maximumResponseBytes,
+    maximumMetadataBytes: nativeUdpCoverage.maximumMetadataBytes,
+    maximumReturnedEndpoints: nativeUdpCoverage.maximumReturnedEndpoints,
+    maximumStateLifetimeMs: nativeUdpCoverage.maximumStateLifetimeMs,
+  }),
+  entries: Object.freeze(checkedUdpCoverageEntries),
+});
 const nativeDiscoveryCapabilities = native.discoveryCapabilities();
+const nativeServiceRegistry = native.serviceRegistryCapabilities();
+if (
+  nativeServiceRegistry.version !==
+    DISCOVERY_PLATFORM_VERSIONS.serviceRegistry ||
+  nativeServiceRegistry.entries.length !== SERVICE_CAPABILITIES.length ||
+  nativeServiceRegistry.entries.some((entry, index) => {
+    const typescript = SERVICE_CAPABILITIES[index];
+    return (
+      entry.id !== typescript?.id ||
+      entry.disposition !== typescript.disposition ||
+      entry.risk !== typescript.risk ||
+      entry.maximumRequestBytes !== typescript.maximumRequestBytes ||
+      entry.maximumResponseBytes !== typescript.maximumResponseBytes ||
+      entry.ports.length !== typescript.ports.length ||
+      entry.ports.some(
+        (port, portIndex) => port !== typescript.ports[portIndex],
+      )
+    );
+  })
+) {
+  throw new Error("native and TypeScript service registries differ");
+}
 
 /** Runtime discovery registry, resource ceilings, and explicit no-go families. */
 export const DISCOVERY_CAPABILITIES = Object.freeze({
@@ -1866,6 +2646,540 @@ export const DISCOVERY_CAPABILITIES = Object.freeze({
   noGo: Object.freeze([...nativeDiscoveryCapabilities.noGo]),
 } as const);
 
+/** Copy and validate one immutable evidence record at the public boundary. */
+export function createEvidenceRecord(record: EvidenceRecord): EvidenceRecord {
+  if (
+    (record as { readonly schemaVersion: unknown }).schemaVersion !==
+    EVIDENCE_SCHEMA_VERSION
+  )
+    throw new RangeError("unsupported evidence schema version");
+  if (
+    !Number.isInteger(record.origin.sourceSchema) ||
+    record.origin.sourceSchema <= 0
+  )
+    throw new RangeError("evidence source schema must be a positive integer");
+  if (record.origin.recordId < 0n)
+    throw new RangeError("evidence record identifier must be non-negative");
+  if (record.observedAtNanoseconds < 0n)
+    throw new RangeError("evidence observation time must be non-negative");
+  if (
+    record.expiresAtNanoseconds !== undefined &&
+    record.expiresAtNanoseconds < record.observedAtNanoseconds
+  )
+    throw new RangeError("evidence expiry precedes its observation");
+  if (record.fields.length > EVIDENCE_LIMITS.fieldsPerRecord)
+    throw new RangeError("evidence field ceiling exceeded");
+  if (record.relations.length > EVIDENCE_LIMITS.relationsPerRecord)
+    throw new RangeError("evidence relation ceiling exceeded");
+  assertEvidenceEnum(
+    record.origin.source,
+    EVIDENCE_SOURCE_KINDS,
+    "evidence source kind",
+  );
+  assertEvidenceEnum(
+    record.entity.kind,
+    EVIDENCE_ENTITY_KINDS,
+    "evidence entity kind",
+  );
+  assertEvidenceEnum(
+    record.confidence,
+    EVIDENCE_CONFIDENCES,
+    "evidence confidence",
+  );
+  assertEvidenceEnum(
+    record.disposition,
+    EVIDENCE_DISPOSITIONS,
+    "evidence disposition",
+  );
+  const runId = evidenceBytes(
+    record.origin.runId,
+    "evidence run identifier",
+    true,
+  );
+  const canonical = evidenceBytes(
+    record.entity.canonical,
+    "evidence canonical key",
+    true,
+  );
+  const fields = record.fields.map((field) => {
+    if (typeof field.key !== "string" || field.key.length === 0)
+      throw new TypeError("evidence field key must be a non-empty string");
+    if (textEncoder.encode(field.key).byteLength > EVIDENCE_LIMITS.itemBytes)
+      throw new RangeError("evidence field key ceiling exceeded");
+    return Object.freeze({
+      key: field.key,
+      value: evidenceBytes(field.value, "evidence field value", false),
+    });
+  });
+  fields.sort(compareEvidenceFields);
+  const dedupedFields = fields.filter((field, index) => {
+    if (index === 0) return true;
+    const previous = fields.at(index - 1);
+    return (
+      previous === undefined || compareEvidenceFields(field, previous) !== 0
+    );
+  });
+  const relations = record.relations.map((relation) => {
+    assertEvidenceEnum(
+      relation.kind,
+      EVIDENCE_RELATION_KINDS,
+      "evidence relation kind",
+    );
+    assertEvidenceEnum(
+      relation.target.kind,
+      EVIDENCE_ENTITY_KINDS,
+      "evidence relation entity kind",
+    );
+    return Object.freeze({
+      kind: relation.kind,
+      target: Object.freeze({
+        kind: relation.target.kind,
+        canonical: evidenceBytes(
+          relation.target.canonical,
+          "evidence relation canonical key",
+          true,
+        ),
+      }),
+    });
+  });
+  relations.sort(compareEvidenceRelations);
+  const dedupedRelations = relations.filter((relation, index) => {
+    if (index === 0) return true;
+    const previous = relations.at(index - 1);
+    return (
+      previous === undefined ||
+      compareEvidenceRelations(relation, previous) !== 0
+    );
+  });
+  const variableBytes = dedupedFields.reduce(
+    (total, field) =>
+      checkedEvidenceBytes(
+        checkedEvidenceBytes(total, textEncoder.encode(field.key).byteLength),
+        field.value.byteLength,
+      ),
+    checkedEvidenceBytes(runId.byteLength, canonical.byteLength),
+  );
+  const withRelations = dedupedRelations.reduce(
+    (total, relation) =>
+      checkedEvidenceBytes(total, relation.target.canonical.byteLength),
+    variableBytes,
+  );
+  if (withRelations > EVIDENCE_LIMITS.recordBytes)
+    throw new RangeError("evidence record byte ceiling exceeded");
+  return Object.freeze({
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    origin: Object.freeze({
+      source: record.origin.source,
+      sourceSchema: record.origin.sourceSchema,
+      runId,
+      recordId: record.origin.recordId,
+    }),
+    entity: Object.freeze({ kind: record.entity.kind, canonical }),
+    confidence: record.confidence,
+    disposition: record.disposition,
+    observedAtNanoseconds: record.observedAtNanoseconds,
+    ...(record.expiresAtNanoseconds === undefined
+      ? {}
+      : { expiresAtNanoseconds: record.expiresAtNanoseconds }),
+    ...(record.wallTimeMilliseconds === undefined
+      ? {}
+      : { wallTimeMilliseconds: record.wallTimeMilliseconds }),
+    fields: Object.freeze(dedupedFields),
+    relations: Object.freeze(dedupedRelations),
+  });
+}
+
+/** Losslessly project one decoded scan result into additive address evidence. */
+export function evidenceFromScanResult(
+  result: ScanResult,
+  options: EvidenceAdapterOptions,
+): EvidenceRecord {
+  const sourceSchema = (options as { readonly sourceSchema: unknown })
+    .sourceSchema;
+  if (sourceSchema !== 1 && sourceSchema !== 2)
+    throw new RangeError("scan evidence source schema must be 1 or 2");
+  const fields: EvidenceField[] = [
+    evidenceTextField("scan.probe", result.probe),
+    evidenceTextField("scan.outcome", result.outcome),
+    evidenceTextField("scan.reason", result.reason),
+  ];
+  if (result.state !== undefined)
+    fields.push(evidenceTextField("scan.networkState", result.state));
+  if (result.port !== undefined)
+    fields.push(evidenceTextField("scan.port", String(result.port)));
+  if (result.evidence !== undefined)
+    fields.push(evidenceTextField("scan.correlation", result.evidence));
+  if (result.udpService !== undefined) {
+    fields.push(
+      evidenceTextField("scan.udp.product", result.udpService.product),
+    );
+    if (result.udpService.version !== undefined)
+      fields.push(
+        evidenceTextField("scan.udp.version", result.udpService.version),
+      );
+  }
+  return createEvidenceRecord({
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    origin: {
+      source: "scanResult",
+      sourceSchema: options.sourceSchema,
+      runId: options.runId,
+      recordId: options.recordId,
+    },
+    entity: {
+      kind: "address",
+      canonical: textEncoder.encode(result.target),
+    },
+    confidence: scanEvidenceConfidence(result.evidence),
+    disposition: "observed",
+    observedAtNanoseconds: result.timestampNanoseconds,
+    ...(options.wallTimeMilliseconds === undefined
+      ? {}
+      : { wallTimeMilliseconds: options.wallTimeMilliseconds }),
+    fields,
+    relations: [],
+  });
+}
+
+/** Losslessly project one discovery entity into additive typed evidence. */
+export function evidenceFromDiscoveryResult(
+  result: DiscoveryResult,
+  options: EvidenceAdapterOptions,
+): EvidenceRecord {
+  if (options.sourceSchema !== 1)
+    throw new RangeError("discovery evidence source schema must be 1");
+  const fields: EvidenceField[] = [
+    evidenceTextField("discovery.protocol", result.protocol),
+    evidenceTextField("discovery.kind", result.kind),
+    evidenceTextField("discovery.outcome", result.outcome),
+    evidenceTextField("discovery.responder", result.responder),
+    evidenceTextField("discovery.responderPort", String(result.responderPort)),
+    evidenceTextField("discovery.operation", String(result.operationId)),
+  ];
+  fields.push(
+    ...result.metadata.map((field) => ({ key: field.key, value: field.value })),
+  );
+  const relations: EvidenceRelation[] = [];
+  if (result.parentEntityId !== undefined) {
+    relations.push({
+      kind: "derivedFrom",
+      target: {
+        kind: "service",
+        canonical: textEncoder.encode(
+          `${bytesHex(options.runId)}:${result.parentEntityId.toString(10)}`,
+        ),
+      },
+    });
+  }
+  return createEvidenceRecord({
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    origin: {
+      source: "discoveryResult",
+      sourceSchema: 1,
+      runId: options.runId,
+      recordId: options.recordId,
+    },
+    entity: {
+      kind: discoveryEvidenceEntityKind(result.kind),
+      canonical: result.identity,
+    },
+    confidence:
+      result.evidence === "TransactionCorrelated"
+        ? "transactionCorrelated"
+        : result.evidence === "Parsed"
+          ? "structural"
+          : "weak",
+    disposition: result.truncated ? "conflict" : "observed",
+    observedAtNanoseconds: 0n,
+    ...(options.wallTimeMilliseconds === undefined
+      ? {}
+      : { wallTimeMilliseconds: options.wallTimeMilliseconds }),
+    fields,
+    relations,
+  });
+}
+
+/** Deterministic bounded retention without device-identity merging. */
+export class EvidenceLedger {
+  readonly #maximumRecords: number;
+  readonly #maximumBytes: number;
+  readonly #records = new Map<string, Map<string, EvidenceRecord>>();
+  #recordCount = 0;
+  #variableBytes = 0;
+  #accepted = 0n;
+  #duplicates = 0n;
+  #conflicts = 0n;
+  #rejectedCapacity = 0n;
+
+  constructor(options?: {
+    readonly maxRecords?: number;
+    readonly maxBytes?: number;
+  }) {
+    this.#maximumRecords = boundedEvidenceInteger(
+      options?.maxRecords ?? EVIDENCE_LIMITS.records,
+      1,
+      EVIDENCE_LIMITS.records,
+      "evidence record capacity",
+    );
+    this.#maximumBytes = boundedEvidenceInteger(
+      options?.maxBytes ?? EVIDENCE_LIMITS.batchBytes,
+      1,
+      EVIDENCE_LIMITS.batchBytes,
+      "evidence byte capacity",
+    );
+  }
+
+  retain(input: EvidenceRecord): EvidenceRetainOutcome {
+    const record = createEvidenceRecord(input);
+    const entityKey = `${record.entity.kind}:${bytesHex(record.entity.canonical)}`;
+    const fingerprint = evidenceFingerprint(record);
+    const records = this.#records.get(entityKey);
+    if (records?.has(fingerprint) === true) {
+      this.#duplicates += 1n;
+      return "duplicate";
+    }
+    const bytes = evidenceVariableBytes(record);
+    if (
+      this.#recordCount >= this.#maximumRecords ||
+      this.#variableBytes + bytes > this.#maximumBytes
+    ) {
+      this.#rejectedCapacity += 1n;
+      throw new RangeError("evidence ledger capacity exceeded");
+    }
+    const conflict = records !== undefined;
+    const destination = records ?? new Map<string, EvidenceRecord>();
+    destination.set(fingerprint, record);
+    if (!conflict) this.#records.set(entityKey, destination);
+    this.#recordCount += 1;
+    this.#variableBytes += bytes;
+    if (conflict) {
+      this.#conflicts += 1n;
+      return "conflict";
+    }
+    this.#accepted += 1n;
+    return "accepted";
+  }
+
+  get size(): number {
+    return this.#recordCount;
+  }
+
+  get variableBytes(): number {
+    return this.#variableBytes;
+  }
+
+  counters(): EvidenceLedgerCounters {
+    return Object.freeze({
+      accepted: this.#accepted,
+      duplicates: this.#duplicates,
+      conflicts: this.#conflicts,
+      rejectedCapacity: this.#rejectedCapacity,
+    });
+  }
+
+  materialize(): EvidenceRecord[] {
+    return [...this.#records.values()]
+      .flatMap((records) => [...records.values()])
+      .sort(compareEvidenceRecords);
+  }
+}
+
+const EVIDENCE_SOURCE_KINDS = new Set<EvidenceSourceKind>([
+  "scanResult",
+  "discoveryResult",
+  "passiveObservation",
+  "pathObservation",
+  "serviceConversation",
+  "localContext",
+  "importedSensor",
+]);
+const EVIDENCE_ENTITY_KINDS = new Set<EvidenceEntityKind>([
+  "deviceCandidate",
+  "interface",
+  "address",
+  "name",
+  "service",
+  "router",
+  "prefix",
+  "path",
+  "hop",
+  "adjacency",
+  "classification",
+]);
+const EVIDENCE_RELATION_KINDS = new Set<EvidenceRelationKind>([
+  "hasAddress",
+  "hasName",
+  "offersService",
+  "attachedToInterface",
+  "routesPrefix",
+  "nextHop",
+  "advertisedBy",
+  "derivedFrom",
+  "classifiedAs",
+]);
+const EVIDENCE_CONFIDENCES = new Set<EvidenceConfidence>([
+  "weak",
+  "structural",
+  "transactionCorrelated",
+  "strongCorrelated",
+]);
+const EVIDENCE_DISPOSITIONS = new Set<EvidenceDisposition>([
+  "observed",
+  "inferred",
+  "expired",
+  "withdrawn",
+  "conflict",
+]);
+
+function assertEvidenceEnum<T extends string>(
+  value: T,
+  allowed: ReadonlySet<T>,
+  label: string,
+): void {
+  if (!allowed.has(value)) throw new TypeError(`${label} is invalid`);
+}
+
+function evidenceBytes(
+  value: Uint8Array,
+  label: string,
+  nonempty: boolean,
+): Uint8Array {
+  if (!(value instanceof Uint8Array))
+    throw new TypeError(`${label} must be Uint8Array`);
+  if (nonempty && value.byteLength === 0)
+    throw new RangeError(`${label} is empty`);
+  if (value.byteLength > EVIDENCE_LIMITS.itemBytes)
+    throw new RangeError(`${label} ceiling exceeded`);
+  return Uint8Array.from(value);
+}
+
+function checkedEvidenceBytes(left: number, right: number): number {
+  const value = left + right;
+  if (!Number.isSafeInteger(value))
+    throw new RangeError("evidence byte count overflow");
+  return value;
+}
+
+function boundedEvidenceInteger(
+  value: number,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
+    throw new RangeError(`${label} is outside its supported range`);
+  return value;
+}
+
+function bytesHex(value: Uint8Array): string {
+  return Buffer.from(value).toString("hex");
+}
+
+function evidenceTextField(key: string, value: string): EvidenceField {
+  return { key, value: textEncoder.encode(value) };
+}
+
+function compareEvidenceFields(
+  left: EvidenceField,
+  right: EvidenceField,
+): number {
+  return (
+    compareEvidenceText(left.key, right.key) ||
+    compareEvidenceText(bytesHex(left.value), bytesHex(right.value))
+  );
+}
+
+function compareEvidenceRelations(
+  left: EvidenceRelation,
+  right: EvidenceRelation,
+): number {
+  return (
+    compareEvidenceText(left.kind, right.kind) ||
+    compareEvidenceText(left.target.kind, right.target.kind) ||
+    compareEvidenceText(
+      bytesHex(left.target.canonical),
+      bytesHex(right.target.canonical),
+    )
+  );
+}
+
+function evidenceVariableBytes(record: EvidenceRecord): number {
+  let total = checkedEvidenceBytes(
+    record.origin.runId.byteLength,
+    record.entity.canonical.byteLength,
+  );
+  for (const field of record.fields) {
+    total = checkedEvidenceBytes(
+      total,
+      textEncoder.encode(field.key).byteLength,
+    );
+    total = checkedEvidenceBytes(total, field.value.byteLength);
+  }
+  for (const relation of record.relations)
+    total = checkedEvidenceBytes(total, relation.target.canonical.byteLength);
+  return total;
+}
+
+function evidenceFingerprint(record: EvidenceRecord): string {
+  return [
+    record.origin.source,
+    String(record.origin.sourceSchema),
+    bytesHex(record.origin.runId),
+    record.origin.recordId.toString(10),
+    record.confidence,
+    record.disposition,
+    record.observedAtNanoseconds.toString(10),
+    record.expiresAtNanoseconds?.toString(10) ?? "",
+    record.wallTimeMilliseconds?.toString(10) ?? "",
+    ...record.fields.map((field) => `${field.key}=${bytesHex(field.value)}`),
+    ...record.relations.map(
+      (relation) =>
+        `${relation.kind}:${relation.target.kind}:${bytesHex(relation.target.canonical)}`,
+    ),
+  ].join("\u0000");
+}
+
+function compareEvidenceRecords(
+  left: EvidenceRecord,
+  right: EvidenceRecord,
+): number {
+  return (
+    compareEvidenceText(left.entity.kind, right.entity.kind) ||
+    compareEvidenceText(
+      bytesHex(left.entity.canonical),
+      bytesHex(right.entity.canonical),
+    ) ||
+    compareEvidenceText(evidenceFingerprint(left), evidenceFingerprint(right))
+  );
+}
+
+function compareEvidenceText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function scanEvidenceConfidence(
+  value: ScanResult["evidence"],
+): EvidenceConfidence {
+  if (value === "tcpSequence32" || value === "payload128")
+    return "strongCorrelated";
+  if (
+    value === "transaction16" ||
+    value === "transaction32" ||
+    value === "transaction64" ||
+    value === "alternateEndpoint"
+  )
+    return "transactionCorrelated";
+  return "weak";
+}
+
+function discoveryEvidenceEntityKind(kind: string): EvidenceEntityKind {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes("name")) return "name";
+  if (normalized.includes("gateway")) return "router";
+  if (normalized.includes("device")) return "deviceCandidate";
+  return "service";
+}
+
 /** One environment-owned scanner control object. */
 export class Scanner {
   readonly #handle: NativeScannerHandle;
@@ -1873,6 +3187,17 @@ export class Scanner {
   #closed = false;
   #nextDiscoveryId = 1;
   readonly #discoveryRuns = new Set<Promise<NativeDiscoveryRun>>();
+  #nextObservationId = 1;
+  readonly #observationRuns = new Set<Promise<NativeObservationRun>>();
+  readonly #observationIds = new Set<number>();
+  #nextRouterSolicitationId = 1;
+  readonly #routerSolicitationRuns = new Set<
+    Promise<NativeRouterSolicitationRun>
+  >();
+  #nextPathId = 1;
+  readonly #pathRuns = new Set<Promise<NativePathRun>>();
+  #nextServiceId = 1;
+  readonly #serviceRuns = new Set<Promise<NativeServiceIdentificationRun>>();
 
   constructor(handle: NativeScannerHandle) {
     this.#handle = handle;
@@ -1891,6 +3216,227 @@ export class Scanner {
     try {
       const id = (await this.#handle.start(nativePlan(plan))) as number;
       return new ScanSession(this.#handle, id);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async solicitRouters(
+    plan: RouterSolicitationPlan,
+    options: RouterSolicitationOptions = {},
+  ): Promise<RouterSolicitationRun> {
+    const signal = options.signal;
+    if (this.#closed)
+      throw new ScannerError(
+        "lifecycle",
+        "ERR_INVALID_STATE",
+        "start router solicitation",
+        undefined,
+        "scanner is closed",
+      );
+    if (signal?.aborted === true) throw abortError(signal);
+    try {
+      const snapshot = nativeRouterSolicitationPlan(plan);
+      if (this.#nextRouterSolicitationId > 0xffff_ffff)
+        throw new ScannerError(
+          "resourceLimit",
+          "ERR_ROUTER_SOLICITATION_ID_EXHAUSTED",
+          "start router solicitation",
+          undefined,
+          "router solicitation identifier space exhausted",
+        );
+      const id = this.#nextRouterSolicitationId++;
+      let resolveRun: (value: NativeRouterSolicitationRun) => void = () =>
+        undefined;
+      let rejectRun: (reason: unknown) => void = () => undefined;
+      const running = new Promise<NativeRouterSolicitationRun>(
+        (resolve, reject) => {
+          resolveRun = resolve;
+          rejectRun = reject;
+        },
+      );
+      this.#handle.solicitRouters(snapshot, id, (completion) => {
+        try {
+          if (!isRecord(completion)) {
+            rejectRun(
+              batchDataError(
+                "native router solicitation completion is invalid",
+              ),
+            );
+          } else if (completion.error !== undefined) {
+            rejectRun(publicNativeFailure(completion.error));
+          } else if (!isRecord(completion.run)) {
+            rejectRun(
+              batchDataError("native router solicitation run is invalid"),
+            );
+          } else {
+            resolveRun(
+              completion.run as unknown as NativeRouterSolicitationRun,
+            );
+          }
+        } catch (error) {
+          rejectRun(normalizeError(error));
+        }
+      });
+      this.#routerSolicitationRuns.add(running);
+      const abort = (): void => {
+        try {
+          this.#handle.cancelRouterSolicitation(id);
+        } catch {
+          // Completion may win the race with cancellation.
+        }
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (abortSignalIsAborted(signal)) abort();
+      try {
+        return publicRouterSolicitationRun(await running);
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.#routerSolicitationRuns.delete(running);
+      }
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async tracePath(
+    plan: PathPlan,
+    options: PathTraceOptions = {},
+  ): Promise<PathTraceRun> {
+    const signal = options.signal;
+    if (this.#closed)
+      throw new ScannerError(
+        "lifecycle",
+        "ERR_INVALID_STATE",
+        "start path trace",
+        undefined,
+        "scanner is closed",
+      );
+    if (signal?.aborted === true) throw abortError(signal);
+    try {
+      const snapshot = nativePathPlan(plan);
+      if (this.#nextPathId > 0xffff_ffff)
+        throw new ScannerError(
+          "resourceLimit",
+          "ERR_PATH_ID_EXHAUSTED",
+          "start path trace",
+          undefined,
+          "path identifier space exhausted",
+        );
+      const id = this.#nextPathId++;
+      let resolveRun: (value: NativePathRun) => void = () => undefined;
+      let rejectRun: (reason: unknown) => void = () => undefined;
+      const running = new Promise<NativePathRun>((resolve, reject) => {
+        resolveRun = resolve;
+        rejectRun = reject;
+      });
+      this.#handle.tracePath(snapshot, id, (completion) => {
+        try {
+          if (!isRecord(completion)) {
+            rejectRun(batchDataError("native path completion is invalid"));
+          } else if (completion.error !== undefined) {
+            rejectRun(publicNativeFailure(completion.error));
+          } else if (completion.run === undefined) {
+            rejectRun(
+              batchDataError("native path completion is missing its run"),
+            );
+          } else if (!isRecord(completion.run)) {
+            rejectRun(batchDataError("native path run is invalid"));
+          } else {
+            resolveRun(completion.run as unknown as NativePathRun);
+          }
+        } catch (error) {
+          rejectRun(normalizeError(error));
+        }
+      });
+      this.#pathRuns.add(running);
+      const abort = (): void => {
+        try {
+          this.#handle.cancelPath(id);
+        } catch {
+          // Completion may win the race with cancellation.
+        }
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (abortSignalIsAborted(signal)) abort();
+      try {
+        return publicPathRun(await running);
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.#pathRuns.delete(running);
+      }
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async identifyService(
+    plan: ServiceIdentificationPlan,
+    options: ServiceIdentificationOptions = {},
+  ): Promise<ServiceIdentificationRun> {
+    const signal = options.signal;
+    if (this.#closed)
+      throw new ScannerError(
+        "lifecycle",
+        "ERR_INVALID_STATE",
+        "start service identification",
+        undefined,
+        "scanner is closed",
+      );
+    if (signal?.aborted === true) throw abortError(signal);
+    try {
+      const snapshot = nativeServiceIdentificationPlan(plan);
+      if (this.#nextServiceId > 0xffff_ffff)
+        throw new ScannerError(
+          "resourceLimit",
+          "ERR_SERVICE_ID_EXHAUSTED",
+          "start service identification",
+          undefined,
+          "service identifier space exhausted",
+        );
+      const id = this.#nextServiceId++;
+      let resolveRun: (value: NativeServiceIdentificationRun) => void = () =>
+        undefined;
+      let rejectRun: (reason: unknown) => void = () => undefined;
+      const running = new Promise<NativeServiceIdentificationRun>(
+        (resolve, reject) => {
+          resolveRun = resolve;
+          rejectRun = reject;
+        },
+      );
+      this.#handle.identifyService(snapshot, id, (completion) => {
+        try {
+          if (!isRecord(completion)) {
+            rejectRun(batchDataError("native service completion is invalid"));
+          } else if (completion.error !== undefined) {
+            rejectRun(publicNativeFailure(completion.error));
+          } else if (!isRecord(completion.run)) {
+            rejectRun(batchDataError("native service run is invalid"));
+          } else {
+            resolveRun(
+              completion.run as unknown as NativeServiceIdentificationRun,
+            );
+          }
+        } catch (error) {
+          rejectRun(normalizeError(error));
+        }
+      });
+      this.#serviceRuns.add(running);
+      const abort = (): void => {
+        try {
+          this.#handle.cancelService(id);
+        } catch {
+          // Completion may win the race with cancellation.
+        }
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (abortSignalIsAborted(signal)) abort();
+      try {
+        return publicServiceIdentificationRun(await running);
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.#serviceRuns.delete(running);
+      }
     } catch (error) {
       throw normalizeError(error);
     }
@@ -1949,10 +3495,83 @@ export class Scanner {
     }
   }
 
+  startObservation(plan: ObservationPlan): Promise<ObservationSession> {
+    try {
+      if (this.#closed)
+        throw new ScannerError(
+          "lifecycle",
+          "ERR_INVALID_STATE",
+          "start observation session",
+          undefined,
+          "scanner is closed",
+        );
+      const snapshot = nativeObservationPlan(plan);
+      if (this.#nextObservationId > 0xffff_ffff)
+        throw new ScannerError(
+          "resourceLimit",
+          "ERR_OBSERVATION_ID_EXHAUSTED",
+          "start observation session",
+          undefined,
+          "observation identifier space exhausted",
+        );
+      const id = this.#nextObservationId++;
+      let resolveRun: (value: NativeObservationRun) => void = () => undefined;
+      let rejectRun: (reason: unknown) => void = () => undefined;
+      const running = new Promise<NativeObservationRun>((resolve, reject) => {
+        resolveRun = resolve;
+        rejectRun = reject;
+      });
+      this.#handle.observe(snapshot, id, (completion) => {
+        if (completion.error !== undefined) {
+          rejectRun(publicNativeFailure(completion.error));
+        } else if (completion.run === undefined) {
+          rejectRun(batchDataError("native observation completion is invalid"));
+        } else {
+          resolveRun(completion.run);
+        }
+      });
+      this.#observationRuns.add(running);
+      this.#observationIds.add(id);
+      void running.then(
+        () => this.#observationRuns.delete(running),
+        () => this.#observationRuns.delete(running),
+      );
+      const releaseObservation = (): void => {
+        this.#observationIds.delete(id);
+      };
+      const session = new ObservationSession(
+        this.#handle,
+        id,
+        running,
+        releaseObservation,
+      );
+      return this.#handle.readyObservation(id).then(
+        () => session,
+        (error: unknown) => {
+          try {
+            this.#handle.closeObservation(id);
+          } catch {
+            // Readiness failure may race native teardown.
+          } finally {
+            releaseObservation();
+          }
+          throw normalizeError(error);
+        },
+      );
+    } catch (error) {
+      return Promise.reject(normalizeError(error));
+    }
+  }
+
   close(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
     this.#closed = true;
     const runs = [...this.#discoveryRuns];
+    const observationRuns = [...this.#observationRuns];
+    const observationIds = [...this.#observationIds];
+    const routerSolicitationRuns = [...this.#routerSolicitationRuns];
+    const pathRuns = [...this.#pathRuns];
+    const serviceRuns = [...this.#serviceRuns];
     const nativeClose = this.#handle.close().then(
       () => undefined,
       (error: unknown) => Promise.reject(normalizeError(error)),
@@ -1965,8 +3584,306 @@ export class Scanner {
           () => undefined,
         ),
       ),
-    ]).then(() => undefined);
+      ...observationRuns.map((run) =>
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+      ...routerSolicitationRuns.map((run) =>
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+      ...pathRuns.map((run) =>
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+      ...serviceRuns.map((run) =>
+        run.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+    ]).then(() => {
+      for (const id of observationIds) {
+        if (!this.#observationIds.delete(id)) continue;
+        try {
+          this.#handle.closeObservation(id);
+        } catch {
+          // The environment may already have released the native handle.
+        }
+      }
+    });
     return this.#closePromise;
+  }
+}
+
+/** One immutable passive-metadata batch. */
+export class ObservationResultBatch implements Iterable<ObservationResult> {
+  readonly schemaVersion = 1 as const;
+  readonly #rows: readonly ObservationResult[];
+
+  constructor(rows: readonly ObservationResult[]) {
+    this.#rows = Object.freeze([...rows]);
+  }
+
+  get length(): number {
+    return this.#rows.length;
+  }
+
+  at(index: number): ObservationResult | undefined {
+    return this.#rows.at(index);
+  }
+
+  materialize(): ObservationResult[] {
+    return [...this.#rows];
+  }
+
+  [Symbol.iterator](): Iterator<ObservationResult> {
+    return this.#rows[Symbol.iterator]();
+  }
+}
+
+/** A finite already-running, receive-only Linux link observation. */
+export class ObservationSession {
+  readonly #handle: NativeScannerHandle;
+  readonly #id: number;
+  readonly #run: Promise<NativeObservationRun>;
+  readonly #releaseObservation: () => void;
+  #state: ObservationSessionState = "running";
+  #pullPending = false;
+  #closed = false;
+  #cancelled = false;
+  #summaryPromise: Promise<ObservationSummary> | undefined;
+
+  constructor(
+    handle: NativeScannerHandle,
+    id: number,
+    run: Promise<NativeObservationRun>,
+    releaseObservation: () => void = () => undefined,
+  ) {
+    this.#handle = handle;
+    this.#id = id;
+    this.#releaseObservation = releaseObservation;
+    this.#run = run.then(
+      (value) => {
+        if (!this.#closed) this.#state = value.state;
+        return value;
+      },
+      (error: unknown) => {
+        if (!this.#closed) this.#state = "failed";
+        throw normalizeError(error);
+      },
+    );
+  }
+
+  get state(): ObservationSessionState {
+    return this.#closed ? "closed" : this.#state;
+  }
+
+  pause(): Promise<void> {
+    if (this.#closed || this.#state !== "running")
+      throw discoveryStateError("pause observation", this.#state);
+    try {
+      this.#handle.pauseObservation(this.#id);
+      this.#state = "paused";
+      return Promise.resolve();
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  resume(): Promise<void> {
+    if (this.#closed || this.#state !== "paused")
+      throw discoveryStateError("resume observation", this.#state);
+    try {
+      this.#handle.resumeObservation(this.#id);
+      this.#state = "running";
+      return Promise.resolve();
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  cancel(reason?: string): Promise<ObservationSummary> {
+    void reason;
+    if (!this.#cancelled && !this.#closed) {
+      try {
+        this.#handle.cancelObservation(this.#id);
+      } catch {
+        // Completion can race this idempotent terminal control.
+      }
+      this.#cancelled = true;
+      this.#state = "cancelling";
+    }
+    return this.summary();
+  }
+
+  async nextBatch(
+    options: NextBatchOptions = {},
+  ): Promise<ObservationResultBatch | null> {
+    validateBatchMaximum(options.maxResults);
+    if (this.#closed) return null;
+    if (options.signal?.aborted === true) throw abortError(options.signal);
+    if (this.#pullPending)
+      throw new ScannerError(
+        "resourceLimit",
+        "ERR_PENDING_PULL",
+        "pull observation batch",
+        undefined,
+        "only one observation nextBatch operation may be pending",
+      );
+    this.#pullPending = true;
+    try {
+      for (;;) {
+        const batch = this.#handle.observationBatch(
+          this.#id,
+          options.maxResults,
+        );
+        const rows = batch.rows.map(publicObservationRow);
+        if (rows.length !== 0) return new ObservationResultBatch(rows);
+        if (
+          batch.state === "completed" ||
+          batch.state === "cancelling" ||
+          batch.state === "failed"
+        )
+          return null;
+        await abortableDelay(2, options.signal);
+      }
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw normalizeError(error);
+    } finally {
+      this.#pullPending = false;
+    }
+  }
+
+  async progress(): Promise<ObservationProgress> {
+    if (!this.#closed) {
+      try {
+        return publicObservationProgress(
+          this.#handle.observationProgress(this.#id),
+        );
+      } catch {
+        // Fall through to the terminal authoritative run.
+      }
+    }
+    return publicObservationProgress((await this.#run).progress);
+  }
+
+  batches(
+    options: ObservationBatchEventEmitterOptions = {},
+  ): ObservationBatchEventEmitter {
+    return new ObservationBatchEventEmitter(this, options);
+  }
+
+  summary(): Promise<ObservationSummary> {
+    if (this.#summaryPromise !== undefined) return this.#summaryPromise;
+    this.#summaryPromise = this.#run.then<
+      ObservationSummary,
+      ObservationSummary
+    >(
+      (run) =>
+        Object.freeze({
+          schemaVersion: 1,
+          state: run.state,
+          interfaces: Object.freeze([...run.interfaces]),
+          protocols: Object.freeze([...run.protocols]),
+          promiscuous: run.promiscuous,
+          includeOutgoing: run.includeOutgoing,
+          progress: publicObservationProgress(run.progress),
+        }),
+      (error: unknown) =>
+        Object.freeze({
+          schemaVersion: 1,
+          state: "failed",
+          interfaces: Object.freeze([]),
+          protocols: Object.freeze([]),
+          promiscuous: false,
+          includeOutgoing: false,
+          progress: zeroObservationProgress(),
+          error: normalizeError(error),
+        }),
+    );
+    return this.#summaryPromise;
+  }
+
+  close(): Promise<void> {
+    if (!this.#closed) {
+      this.#closed = true;
+      this.#state = "closed";
+      try {
+        this.#handle.closeObservation(this.#id);
+      } catch {
+        // Already closed or environment teardown.
+      } finally {
+        this.#releaseObservation();
+      }
+    }
+    return this.#run.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+}
+
+/** Optional Node-style events layered over the bounded observation pull API. */
+export class ObservationBatchEventEmitter extends EventEmitter<ObservationBatchEventMap> {
+  readonly #session: ObservationSession;
+  readonly #maximum: number | undefined;
+  #started = false;
+  #closed = false;
+
+  constructor(
+    session: ObservationSession,
+    options: ObservationBatchEventEmitterOptions = {},
+  ) {
+    super();
+    validateBatchMaximum(options.maxResults);
+    this.#session = session;
+    this.#maximum = options.maxResults;
+  }
+
+  start(): this {
+    if (this.#closed) throw discoveryStateError("start adapter", "closed");
+    if (this.#started) return this;
+    this.#started = true;
+    void this.#pump();
+    return this;
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    await this.#session.close();
+    this.emit("close");
+  }
+
+  async #pump(): Promise<void> {
+    try {
+      while (!this.#closed) {
+        const batch = await this.#session.nextBatch(
+          this.#maximum === undefined ? {} : { maxResults: this.#maximum },
+        );
+        if (this.#closedAfterPull()) return;
+        if (batch === null) break;
+        this.emit("batch", batch);
+      }
+      this.emit("end");
+    } catch (error) {
+      this.emit(
+        "error",
+        error instanceof Error ? error : normalizeError(error),
+      );
+    }
+  }
+
+  #closedAfterPull(): boolean {
+    return this.#closed;
   }
 }
 
@@ -2566,6 +4483,11 @@ export async function inspectNetworkContext(): Promise<NetworkContextSnapshot> {
       })),
       addresses: value.addresses,
       routes: value.routes,
+      rules: value.rules,
+      neighbors: value.neighbors.map((item) => ({
+        ...item,
+        linkLayerAddress: Uint8Array.from(item.linkLayerAddress),
+      })),
       ruleCount: value.ruleCount,
       neighborCount: value.neighborCount,
     };
@@ -2583,6 +4505,285 @@ export async function createScanner(): Promise<Scanner> {
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw normalizeError(error);
+  }
+}
+
+function nativeObservationPlan(plan: ObservationPlan): NativeObservationPlan {
+  try {
+    if (!isRecord(plan))
+      throw invalidPlanData("observation plan must be an object");
+    const interfaceInput = plan.interfaces;
+    const protocolInput = plan.protocols;
+    const riskInput = plan.allowRisks;
+    const promiscuous = plan.promiscuous;
+    const includeOutgoing = plan.includeOutgoing;
+    const durationInput = plan.durationMs;
+    const snapLengthInput = plan.snapLength;
+    const maxResultsInput = plan.maxResults;
+    const maxMetadataBytesInput = plan.maxMetadataBytes;
+    const interfaces = snapshotArray(
+      interfaceInput,
+      "observation interfaces",
+      (name) => {
+        if (
+          typeof name !== "string" ||
+          name.length < 1 ||
+          name.length > 15 ||
+          name.includes("\0")
+        )
+          throw invalidPlanData(
+            "observation interface names must contain 1 through 15 non-NUL characters",
+          );
+        return name;
+      },
+    ).sort(compareEvidenceText);
+    if (
+      interfaces.length < 1 ||
+      interfaces.length > 4 ||
+      new Set(interfaces).size !== interfaces.length
+    )
+      throw invalidPlanData(
+        "observation interfaces must contain one through four unique names",
+      );
+    const protocols = snapshotArray(
+      protocolInput,
+      "observation protocols",
+      (protocol) => {
+        if (
+          protocol !== "arp" &&
+          protocol !== "ipv4" &&
+          protocol !== "ipv6" &&
+          protocol !== "lldp" &&
+          protocol !== "controlPlane"
+        )
+          throw invalidPlanData("observation protocol group is unsupported");
+        return protocol;
+      },
+    ).sort(compareEvidenceText);
+    if (
+      protocols.length < 1 ||
+      protocols.length > 5 ||
+      new Set(protocols).size !== protocols.length
+    )
+      throw invalidPlanData(
+        "observation protocols must contain one through five unique groups",
+      );
+    const bounded = (
+      value: unknown,
+      minimum: number,
+      maximum: number,
+      label: string,
+    ): number | undefined => {
+      if (value === undefined) return undefined;
+      if (
+        !Number.isInteger(value) ||
+        (value as number) < minimum ||
+        (value as number) > maximum
+      )
+        throw invalidPlanData(
+          `${label} must be an integer from ${String(minimum)} through ${String(maximum)}`,
+        );
+      return value as number;
+    };
+    const risks = snapshotArray(
+      riskInput ?? [],
+      "observation risks",
+      (risk) => {
+        if (risk !== "passiveMetadata" && risk !== "promiscuousCapture")
+          throw invalidPlanData("observation risk is unsupported");
+        return risk;
+      },
+    );
+    if (new Set(risks).size !== risks.length)
+      throw invalidPlanData("observation risks must be unique");
+    if (promiscuous === true && !risks.includes("promiscuousCapture"))
+      throw invalidPlanData(
+        "promiscuous observation requires promiscuousCapture consent",
+      );
+    if (promiscuous !== undefined && typeof promiscuous !== "boolean")
+      throw invalidPlanData("observation promiscuous must be boolean");
+    if (includeOutgoing !== undefined && typeof includeOutgoing !== "boolean")
+      throw invalidPlanData("observation includeOutgoing must be boolean");
+    const durationMs = bounded(durationInput, 1, 300_000, "durationMs");
+    const snapLength = bounded(snapLengthInput, 64, 16_384, "snapLength");
+    const maxResults = bounded(maxResultsInput, 1, 8_192, "maxResults");
+    const maxMetadataBytes = bounded(
+      maxMetadataBytesInput,
+      1,
+      16 * 1_024 * 1_024,
+      "maxMetadataBytes",
+    );
+    return {
+      interfaces,
+      protocols,
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(snapLength === undefined ? {} : { snapLength }),
+      ...(maxResults === undefined ? {} : { maxResults }),
+      ...(maxMetadataBytes === undefined ? {} : { maxMetadataBytes }),
+      ...(includeOutgoing === undefined ? {} : { includeOutgoing }),
+      ...(promiscuous === undefined ? {} : { promiscuous }),
+      allowRisks: risks,
+    };
+  } catch (error) {
+    if (error instanceof ScannerError) throw error;
+    throw invalidPlanData("observation plan property access failed");
+  }
+}
+
+function nativeRouterSolicitationPlan(
+  plan: RouterSolicitationPlan,
+): NativeRouterSolicitationPlan {
+  try {
+    if (!isRecord(plan))
+      throw invalidPlanData("router solicitation plan must be an object");
+    if (
+      typeof plan.interface !== "string" ||
+      plan.interface.length < 1 ||
+      plan.interface.length > 15 ||
+      plan.interface.includes("\0")
+    )
+      throw invalidPlanData(
+        "router solicitation interface must contain 1 through 15 non-NUL characters",
+      );
+    const bounded = (
+      value: unknown,
+      maximum: number,
+      label: string,
+    ): number | undefined => {
+      if (value === undefined) return undefined;
+      if (
+        !Number.isInteger(value) ||
+        (value as number) < 1 ||
+        (value as number) > maximum
+      )
+        throw invalidPlanData(
+          `${label} must be an integer from 1 through ${String(maximum)}`,
+        );
+      return value as number;
+    };
+    const deadlineMs = bounded(plan.deadlineMs, 10_000, "deadlineMs");
+    const maxResults = bounded(plan.maxResults, 64, "maxResults");
+    const risks = snapshotArray(
+      plan.allowRisks,
+      "router solicitation risks",
+      (risk) => {
+        if (risk !== "linkMulticast")
+          throw invalidPlanData("router solicitation risk is unsupported");
+        return risk;
+      },
+    );
+    if (risks.length !== 1)
+      throw invalidPlanData(
+        "router solicitation requires exactly linkMulticast consent",
+      );
+    return {
+      interface: plan.interface,
+      ...(deadlineMs === undefined ? {} : { deadlineMs }),
+      ...(maxResults === undefined ? {} : { maxResults }),
+      allowRisks: risks,
+    };
+  } catch (error) {
+    if (error instanceof ScannerError) throw error;
+    throw invalidPlanData("router solicitation plan property access failed");
+  }
+}
+
+function nativePathPlan(plan: PathPlan): NativePathPlan {
+  try {
+    if (
+      !isRecord(plan) ||
+      typeof plan.target !== "string" ||
+      isIP(plan.target) === 0
+    )
+      throw invalidPlanData("path target must be an IPv4 or IPv6 literal");
+    const bounded = (
+      value: unknown,
+      minimum: number,
+      maximum: number,
+      label: string,
+    ): number | undefined => {
+      if (value === undefined) return undefined;
+      if (
+        !Number.isInteger(value) ||
+        (value as number) < minimum ||
+        (value as number) > maximum
+      )
+        throw invalidPlanData(
+          `${label} must be an integer from ${String(minimum)} through ${String(maximum)}`,
+        );
+      return value as number;
+    };
+    const firstHop = bounded(plan.firstHop, 1, 64, "firstHop");
+    const maximumHop = bounded(plan.maximumHop, 1, 64, "maximumHop");
+    const attemptsPerHop = bounded(plan.attemptsPerHop, 1, 8, "attemptsPerHop");
+    const pacingMs = bounded(plan.pacingMs, 0, 1_000, "pacingMs");
+    if ((maximumHop ?? 30) < (firstHop ?? 1))
+      throw invalidPlanData("maximumHop must not precede firstHop");
+    const deadlineMs = bounded(plan.deadlineMs, 1, 300_000, "deadlineMs");
+    if (deadlineMs === undefined)
+      throw invalidPlanData("path deadlineMs is required");
+    const port = bounded(plan.port, 1, 65_535, "port");
+    if (
+      (plan.mode === "icmpEcho" && port !== undefined) ||
+      (plan.mode !== "icmpEcho" && port === undefined)
+    )
+      throw invalidPlanData("path mode and port combination is invalid");
+    return {
+      target: plan.target,
+      mode: plan.mode,
+      ...(port === undefined ? {} : { port }),
+      ...(firstHop === undefined ? {} : { firstHop }),
+      ...(maximumHop === undefined ? {} : { maximumHop }),
+      ...(attemptsPerHop === undefined ? {} : { attemptsPerHop }),
+      ...(pacingMs === undefined ? {} : { pacingMs }),
+      deadlineMs,
+    };
+  } catch (error) {
+    if (error instanceof ScannerError) throw error;
+    throw invalidPlanData("path plan property access failed");
+  }
+}
+
+function nativeServiceIdentificationPlan(
+  plan: ServiceIdentificationPlan,
+): NativeServiceIdentificationPlan {
+  try {
+    if (!isRecord(plan))
+      throw invalidPlanData("service identification plan must be an object");
+    const capabilityId = plan.capabilityId;
+    const target = plan.target;
+    const port = plan.port;
+    const deadlineMs = plan.deadlineMs;
+    const allowRisks = plan.allowRisks;
+    const capability = SERVICE_CAPABILITIES.find(
+      (entry) => entry.id === capabilityId,
+    );
+    if (capability === undefined || capability.disposition === "noGo")
+      throw invalidPlanData("service capability is unavailable");
+    if (typeof target !== "string" || isIP(target) === 0)
+      throw invalidPlanData("service target must be an IPv4 or IPv6 literal");
+    if (!Number.isInteger(port) || port < 1 || port > 65_535)
+      throw invalidPlanData("service port must be from 1 through 65535");
+    if (!Number.isInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 30_000)
+      throw invalidPlanData("service deadlineMs must be from 1 through 30000");
+    if (
+      !Array.isArray(allowRisks) ||
+      allowRisks.length !== 1 ||
+      allowRisks[0] !== capability.risk
+    )
+      throw invalidPlanData(
+        "allowRisks must contain exactly the capability's required risk",
+      );
+    return {
+      capabilityId,
+      target,
+      port,
+      deadlineMs,
+      allowRisks: [capability.risk],
+    };
+  } catch (error) {
+    if (error instanceof ScannerError) throw error;
+    throw invalidPlanData("service identification plan property access failed");
   }
 }
 
@@ -3181,6 +5382,345 @@ function publicDiscoveryProgress(
   });
 }
 
+function publicObservationRow(row: NativeObservationRow): ObservationResult {
+  if (
+    !Array.isArray(row.sourceMac) ||
+    !Array.isArray(row.destinationMac) ||
+    !Array.isArray(row.vlanIds) ||
+    !Array.isArray(row.metadata) ||
+    row.metadata.length > 32 ||
+    !row.sourceMac.every(isByte) ||
+    !row.destinationMac.every(isByte) ||
+    row.sourceMac.length > 6 ||
+    row.destinationMac.length > 6 ||
+    row.vlanIds.length > 2 ||
+    row.vlanIds.some(
+      (identifier) =>
+        !Number.isInteger(identifier) || identifier < 0 || identifier > 4_095,
+    ) ||
+    row.metadata.some(
+      (field) =>
+        typeof field.key !== "string" ||
+        field.key.length < 1 ||
+        field.key.length > 64 ||
+        !Array.isArray(field.value) ||
+        field.value.length > 512 ||
+        !field.value.every(isByte),
+    )
+  )
+    throw batchDataError("native observation row is invalid");
+  return Object.freeze({
+    sequence: BigInt(row.sequence),
+    interfaceIndex: row.interfaceIndex,
+    timestampNanoseconds: BigInt(row.timestampNanoseconds),
+    ...(row.wallTimeMilliseconds === undefined
+      ? {}
+      : { wallTimeMilliseconds: BigInt(row.wallTimeMilliseconds) }),
+    originalLength: row.originalLength,
+    capturedLength: row.capturedLength,
+    packetType: row.packetType,
+    direction: row.direction,
+    protocol: row.protocol,
+    sourceMac: Uint8Array.from(row.sourceMac),
+    destinationMac: Uint8Array.from(row.destinationMac),
+    etherType: row.etherType,
+    vlanIds: Object.freeze([...row.vlanIds]),
+    ...(row.sourceAddress === undefined
+      ? {}
+      : { sourceAddress: row.sourceAddress }),
+    ...(row.destinationAddress === undefined
+      ? {}
+      : { destinationAddress: row.destinationAddress }),
+    ...(row.sourcePort === undefined ? {} : { sourcePort: row.sourcePort }),
+    ...(row.destinationPort === undefined
+      ? {}
+      : { destinationPort: row.destinationPort }),
+    metadata: Object.freeze(
+      row.metadata.map((field) =>
+        Object.freeze({ key: field.key, value: Uint8Array.from(field.value) }),
+      ),
+    ),
+    truncated: row.truncated,
+  });
+}
+
+function publicObservationProgress(
+  value: NativeObservationProgress,
+): ObservationProgress {
+  return Object.freeze({
+    inspected: BigInt(value.inspected),
+    capturedBytes: BigInt(value.capturedBytes),
+    accepted: BigInt(value.accepted),
+    dropped: BigInt(value.dropped),
+    kernelDropped: BigInt(value.kernelDropped),
+    retentionDropped: BigInt(value.retentionDropped),
+    filtered: BigInt(value.filtered),
+    truncated: BigInt(value.truncated),
+  });
+}
+
+function publicRouterSolicitationRun(
+  run: NativeRouterSolicitationRun,
+): RouterSolicitationRun {
+  if (
+    run.schemaVersion !== 1 ||
+    !["completed", "cancelled"].includes(run.state) ||
+    typeof run.interface !== "string" ||
+    !Number.isInteger(run.interfaceIndex) ||
+    run.interfaceIndex < 1 ||
+    !Number.isInteger(run.transmitted) ||
+    run.transmitted !== 1 ||
+    !Number.isInteger(run.received) ||
+    run.received < 0 ||
+    !Number.isInteger(run.rejected) ||
+    run.rejected < 0 ||
+    !Array.isArray(run.advertisements) ||
+    run.advertisements.length > 64
+  )
+    throw batchDataError("native router solicitation run is invalid");
+  const advertisements = run.advertisements.map((advertisement) => {
+    if (
+      typeof advertisement.responder !== "string" ||
+      isIP(advertisement.responder) !== 6 ||
+      advertisement.interfaceIndex !== run.interfaceIndex ||
+      !Array.isArray(advertisement.metadata) ||
+      advertisement.metadata.length > 32 ||
+      advertisement.metadata.some(
+        (field) =>
+          typeof field.key !== "string" ||
+          field.key.length < 1 ||
+          field.key.length > 64 ||
+          !Array.isArray(field.value) ||
+          field.value.length > 512 ||
+          !field.value.every(isByte),
+      )
+    )
+      throw batchDataError("native router advertisement is invalid");
+    const roundTripMicroseconds = BigInt(advertisement.roundTripMicroseconds);
+    if (roundTripMicroseconds < 0n)
+      throw batchDataError("native router advertisement RTT is invalid");
+    return Object.freeze({
+      responder: advertisement.responder,
+      interfaceIndex: advertisement.interfaceIndex,
+      roundTripMicroseconds,
+      metadata: Object.freeze(
+        advertisement.metadata.map((field) =>
+          Object.freeze({
+            key: field.key,
+            value: Uint8Array.from(field.value),
+          }),
+        ),
+      ),
+    });
+  });
+  return Object.freeze({
+    schemaVersion: 1,
+    state: run.state as RouterSolicitationRun["state"],
+    interface: run.interface,
+    interfaceIndex: run.interfaceIndex,
+    transmitted: run.transmitted,
+    received: run.received,
+    rejected: run.rejected,
+    advertisements: Object.freeze(advertisements),
+  });
+}
+
+function publicPathRun(run: NativePathRun): PathTraceRun {
+  if (
+    run.schemaVersion !== 1 ||
+    isIP(run.target) === 0 ||
+    !["icmpEcho", "udp", "tcpSyn"].includes(run.mode) ||
+    !["completed", "partial", "cancelled"].includes(run.state) ||
+    typeof run.destinationReached !== "boolean" ||
+    typeof run.truncated !== "boolean" ||
+    !Array.isArray(run.attempts) ||
+    run.attempts.length > 512
+  )
+    throw batchDataError("native path run is invalid");
+  const attempts = run.attempts.map((attempt) => {
+    if (
+      !Number.isInteger(attempt.hop) ||
+      attempt.hop < 1 ||
+      attempt.hop > 64 ||
+      !Number.isInteger(attempt.attempt) ||
+      attempt.attempt < 1 ||
+      attempt.attempt > 8 ||
+      (attempt.responder !== undefined && isIP(attempt.responder) === 0) ||
+      !isPathOutcome(attempt.outcome) ||
+      (attempt.correlation !== "weak" && attempt.correlation !== "strong")
+    )
+      throw batchDataError("native path attempt is invalid");
+    const roundTripMicroseconds =
+      attempt.roundTripMicroseconds === undefined
+        ? undefined
+        : BigInt(attempt.roundTripMicroseconds);
+    if (roundTripMicroseconds !== undefined && roundTripMicroseconds < 0n)
+      throw batchDataError("native path RTT is invalid");
+    const hasIcmp =
+      attempt.icmpFamily !== undefined ||
+      attempt.icmpType !== undefined ||
+      attempt.icmpCode !== undefined;
+    if (
+      hasIcmp &&
+      ((attempt.icmpFamily !== 4 && attempt.icmpFamily !== 6) ||
+        !Number.isInteger(attempt.icmpType) ||
+        !Number.isInteger(attempt.icmpCode))
+    )
+      throw batchDataError("native path ICMP detail is invalid");
+    return Object.freeze({
+      hop: attempt.hop,
+      attempt: attempt.attempt,
+      ...(attempt.responder === undefined
+        ? {}
+        : { responder: attempt.responder }),
+      ...(roundTripMicroseconds === undefined ? {} : { roundTripMicroseconds }),
+      outcome: attempt.outcome,
+      correlation: attempt.correlation,
+      ...(hasIcmp
+        ? {
+            icmp: Object.freeze({
+              family: attempt.icmpFamily as 4 | 6,
+              type: Number(attempt.icmpType),
+              code: Number(attempt.icmpCode),
+            }),
+          }
+        : {}),
+    });
+  });
+  return Object.freeze({
+    schemaVersion: 1,
+    target: run.target,
+    mode: run.mode as PathTraceRun["mode"],
+    state: run.state as PathTraceRun["state"],
+    destinationReached: run.destinationReached,
+    truncated: run.truncated,
+    attempts: Object.freeze(attempts),
+  });
+}
+
+const SERVICE_OUTCOMES = new Set([
+  "identified",
+  "timeout",
+  "cancelled",
+  "connectRefused",
+  "connectError",
+  "writeError",
+  "readError",
+  "closed",
+  "parserRejected",
+  "responseLimit",
+]);
+
+function publicServiceIdentificationRun(
+  run: NativeServiceIdentificationRun,
+): ServiceIdentificationRun {
+  const capability = SERVICE_CAPABILITIES.find(
+    (entry) => entry.id === run.capabilityId,
+  );
+  if (
+    run.schemaVersion !== 1 ||
+    capability === undefined ||
+    capability.disposition === "noGo" ||
+    isIP(run.target) === 0 ||
+    !Number.isInteger(run.port) ||
+    run.port < 1 ||
+    run.port > 65_535 ||
+    !["completed", "cancelled"].includes(run.state) ||
+    !SERVICE_OUTCOMES.has(run.outcome) ||
+    !Number.isInteger(run.requestBytes) ||
+    run.requestBytes < 0 ||
+    run.requestBytes > capability.maximumRequestBytes ||
+    !Number.isInteger(run.responseBytes) ||
+    run.responseBytes < 0 ||
+    run.responseBytes > capability.maximumResponseBytes ||
+    !Array.isArray(run.fields) ||
+    run.fields.length > 64 ||
+    (run.protocol !== undefined &&
+      (typeof run.protocol !== "string" || run.protocol.length > 64)) ||
+    (run.confidence !== undefined &&
+      (typeof run.confidence !== "string" || run.confidence.length > 128))
+  )
+    throw batchDataError("native service identification run is invalid");
+  let fieldBytes = 0;
+  const fields = run.fields.map((field) => {
+    if (
+      typeof field.key !== "string" ||
+      field.key.length < 1 ||
+      field.key.length > 64 ||
+      !Array.isArray(field.value) ||
+      field.value.length > 4_096 ||
+      !field.value.every(isByte)
+    )
+      throw batchDataError("native service identity field is invalid");
+    fieldBytes += field.key.length + field.value.length;
+    if (fieldBytes > 65_536)
+      throw batchDataError("native service identity fields exceed their bound");
+    return Object.freeze({
+      key: field.key,
+      value: Uint8Array.from(field.value),
+    });
+  });
+  if (
+    (run.outcome === "identified") !==
+    (run.protocol !== undefined && run.confidence !== undefined)
+  )
+    throw batchDataError("native service identity outcome is inconsistent");
+  return Object.freeze({
+    schemaVersion: 1,
+    capabilityId: run.capabilityId,
+    target: run.target,
+    port: run.port,
+    state: run.state as ServiceIdentificationRun["state"],
+    outcome: run.outcome as ServiceIdentificationRun["outcome"],
+    ...(run.protocol === undefined ? {} : { protocol: run.protocol }),
+    ...(run.confidence === undefined ? {} : { confidence: run.confidence }),
+    fields: Object.freeze(fields),
+    requestBytes: run.requestBytes,
+    responseBytes: run.responseBytes,
+  });
+}
+
+function isPathOutcome(value: string): value is PathAttempt["outcome"] {
+  return (
+    value === "timeout" ||
+    value === "hopResponse" ||
+    value === "destinationReached" ||
+    value === "unreachable" ||
+    value === "administrativelyFiltered"
+  );
+}
+
+function zeroObservationProgress(): ObservationProgress {
+  return Object.freeze({
+    inspected: 0n,
+    capturedBytes: 0n,
+    accepted: 0n,
+    dropped: 0n,
+    kernelDropped: 0n,
+    retentionDropped: 0n,
+    filtered: 0n,
+    truncated: 0n,
+  });
+}
+
+function abortableDelay(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(abortError(signal));
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    const abort = (): void => {
+      clearTimeout(timer);
+      reject(abortError(signal));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
 function zeroDiscoveryProgress(): DiscoveryProgress {
   return Object.freeze({
     queries: 0n,
@@ -3771,6 +6311,10 @@ function abortError(signal: AbortSignal | undefined): Error {
     typeof reason === "string" ? reason : "The operation was aborted",
     "AbortError",
   );
+}
+
+function abortSignalIsAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 function isAbortError(error: unknown): error is Error {

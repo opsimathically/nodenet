@@ -985,6 +985,308 @@ in the
 The required Phase 34 questions and binding corrections are closed by the
 [advanced UDP discovery plan review](54-advanced-udp-discovery-plan-review.md).
 
+## Phases 45–58 — Evidence-driven network discovery coverage
+
+Status: Phases 45–57 complete; all available Phase 58 x86-64 gates pass; native
+AArch64 execution remains an external publication gate
+
+This roadmap addresses the scanner's remaining major coverage gaps: devices
+visible only through passive traffic, TCP application identity, routers and
+paths, safe cross-protocol enrichment, explainable asset identity, change over
+time, specialized domain semantics, and multiple observation points. D-052 keeps
+one Rust scanner engine with modular registries and distinct finite
+session/result contracts. Existing scan schemas 1/2, UDP catalogue `1.3.0`,
+discovery schema 1, and discovery registry `1.0.0` remain compatible.
+
+### Phase 45 — Evidence model and derived-work policy
+
+Freeze a provenance-preserving additive evidence graph, conservative identity
+and conflict rules, append-only expiry/withdrawal semantics, capability/schema
+versioning, shared environment reservations, and re-authorized derived-work
+policy. Implement pure adapters for current scan and discovery results but no
+new live protocol.
+
+Exit gate: all current output projects losslessly into deterministic evidence,
+ambiguity remains visible, and unauthorized or over-budget child work is
+rejected before I/O.
+
+### Phase 46 — Passive observation and Linux capture foundation
+
+Add a finite metadata-only `ObservationSession` over bounded nonblocking Linux
+AF_PACKET capture with explicit interfaces, filters, privilege, capture mode,
+drop/truncation accounting, backpressure, and lifecycle. Promiscuous capture is
+separate opt-in; raw frame streaming remains out of scope.
+
+Exit gate: selected links can be observed without transmitted traffic, payload
+retention, event-loop blocking, descriptor/ring leaks, or false completeness
+claims.
+
+### Phase 47 — Passive host and service discovery
+
+Decode bounded ARP, NDP, DHCPv4/v6, mDNS/DNS-SD, LLMNR, NBNS, SSDP, and
+WS-Discovery observations into expiring host/name/service evidence. Passive
+advertisements never schedule active work in this phase.
+
+Exit gate: project-owned dual-stack clients and responders yield deterministic,
+correctly scoped evidence and withdrawal under malformed, duplicate, flooded,
+and lossy traffic.
+
+### Phase 48 — Link and IPv6 control-plane topology
+
+Add full passive RA/control evidence, explicit active Router Solicitation, LLDP,
+reviewed link/routing presence decoders, full read-only neighbor/rule views, and
+router/prefix/DNS/address-conflict topology. CDP and every optional control
+protocol pass independent provenance and fixture gates.
+
+Exit gate: isolated topologies yield correct routers, prefixes, adjacencies,
+lifetimes, and scope without joining elections, adjacencies, or kernel policy.
+
+### Phase 49 — Scanner-native path discovery
+
+Add finite IPv4/IPv6 ICMP, UDP, and TCP traceroute modes with per-hop attempts,
+RTT, correlation strength, multiple responders, partial paths, and exact stop
+conditions feeding the topology model.
+
+Exit gate: routed namespace matrices prove destination, filter, silent-hop,
+multi-responder, route-change, cancellation, and deadline behavior without
+claiming complete ECMP mapping.
+
+### Phase 50 — Bounded TCP conversation engine
+
+Add a reusable ordinary nonblocking TCP state-machine engine with exact
+connect/read/write/deadline/concurrency/byte/parser limits and no authentication
+or general user scripts. The raw SYN scanner remains separate.
+
+Exit gate: virtual and live responders prove partial I/O, slow peers, reset,
+timeout, cancellation, fairness, fd reuse, and exact cleanup before any service
+pack ships.
+
+### Phase 51 — Low-impact TCP identity pack
+
+Evaluate SSH, common server greetings, TLS, HTTP `HEAD`, and server-first
+database greeting candidates. Each independently needs a primary contract,
+strict parser, project responder, useful typed evidence, and justified default
+or opt-in risk.
+
+Exit gate: admitted operations identify services without credentials, login,
+request bodies, mail/shell/database commands, redirects, or inflated
+authentication claims.
+
+### Phase 52 — Extended opt-in TCP service discovery
+
+Evaluate bounded SMB2, RDP, PostgreSQL SSL, Redis, MongoDB, and LDAP RootDSE
+negotiations under separate stateful/sensitive-read policy. Authentication or
+identity-bound operations remain no-go.
+
+Exit gate: every admitted candidate is non-mutating, independently consented,
+strictly bounded, and proven against a project-owned responder.
+
+### Phase 53 — Governed cross-protocol enrichment
+
+Add semantic DNS-SD mappings, link SSDP/SLP where admitted, same-responder
+UPnP/WS HTTP descriptions, bounded PTR/SRV/NAPTR, rpcbind allowlists, and
+optional CoAP/SNMP/gateway enrichment through the Phase 45 authority engine.
+
+Exit gate: malicious URLs, redirects, DNS rebinding, scope changes, cycles,
+decompression, and fan-out cannot escape original authority; disabling
+enrichment preserves original evidence.
+
+### Phase 54 — Asset reconciliation and explainable classification
+
+Build conservative candidate assets and deterministic evidence-backed device
+classes across link, name, service, topology, TLS, SMB, SNMP, UPnP, and optional
+licensed OUI evidence. Preserve conflicts and avoid opaque inference.
+
+Exit gate: golden corpora cover address reuse, duplicate names, shared
+certificates, multi-homing, virtualization, proxies, and ambiguous identity,
+with every claim exposing its reasons.
+
+### Phase 55 — Longitudinal inventory and local context
+
+Add bounded snapshot/delta contracts, external storage adapters, change events,
+complete local network context, and independently reviewed `inet_diag`, resolver
+cache, Avahi, and `nl80211` providers without a mandatory database or daemon.
+
+Exit gate: clock change, restart/import, stale data, provider loss, corrupt
+snapshots, and repeated flaps remain deterministic, read-only, optional, and
+bounded.
+
+### Phase 56 — Specialized opt-in discovery packs
+
+Evaluate printing, Windows/media, IoT/camera, infrastructure, and
+industrial/building protocol packs. Every candidate independently requires an
+authoritative wire contract, safe non-mutating operation, project responder,
+strict parser/bounds, provenance, and useful typed evidence.
+
+Exit gate: admitted packs meet the core quality bar; proprietary ambiguity,
+authentication, unsafe impact, or missing evidence produces an executable no-go
+rather than an approximation.
+
+### Phase 57 — Multi-vantage sensor interchange
+
+Add transport-neutral bounded evidence envelopes and fusion for sensors in
+different VLANs, sites, containers, or namespaces. Applications retain transport
+security, authentication, authorization, deployment, storage, and remote-command
+ownership; the package exposes no listener or remote executor.
+
+Exit gate: duplicate/reordered data, clock skew, restarts, gaps, overlapping
+address spaces, and hostile envelopes preserve sensor/network separation and
+bounded reconciliation.
+
+### Phase 58 — Integrated adversarial audit and release candidate
+
+Freeze the new APIs/registries/schemas, repeat authority/privacy/parser/
+dependency/lifecycle audits, complete ordinary and privileged matrices,
+fuzz/sanitizer/fault/resource stress, documentation, artifacts, consumers, and
+native x86-64/AArch64 execution. Do not bypass remaining Phase 44 release gates.
+
+Exit gate: accepted capabilities are bounded, explainable, correctly scoped,
+reproducible, documented without completeness or authentication overclaims, and
+verified on both declared architectures.
+
+The authoritative architecture, phase deliverables, candidate ceilings,
+verification matrix, review questions, stop conditions, and primary research
+basis are in the
+[network discovery coverage expansion plan](57-network-discovery-coverage-plan.md).
+The completed implementation, admitted/no-go candidate decisions, adversarial
+corrections, and remaining AArch64 gate are recorded in the
+[Phases 46–58 report](60-phases-46-58-implementation-report.md). The subsequent
+reopened adversarial review and product-hardening corrections are recorded in
+the [Phases 46–57 repair report](61-phases-46-57-adversarial-repair-report.md),
+which supersedes report 60 where implementation details differ.
+
+## Phases 59–69 — Independently authored UDP coverage expansion
+
+Status: adversarial repairs complete; all available Phase 69 x86-64 gates pass;
+native AArch64 execution remains an external publication gate
+
+This roadmap closes the highest-value gaps found in a clean-room behavioral
+comparison with pinned Nmap source. It distinguishes request construction,
+correlation, typed parsing, live responder evidence, fingerprinting, and policy
+admission instead of treating a payload count as parity. Existing IDs and safe
+profiles remain compatible; every candidate can independently record a no-go.
+
+### Phase 59 — Coverage contract and admission harness
+
+Freeze a checked multidimensional coverage matrix, append-only candidate
+registry, risk classes, version/schema rules, shared responder/state-machine
+fixtures, environment reservation formula, and provenance enforcement. This
+phase sends no new protocol traffic.
+
+Exit gate: a candidate cannot claim implementation without a primary contract,
+clean-room record, independent risk enforcement, bounded parser/correlation,
+project responder, and public support metadata.
+
+### Phase 60 — RMCP/IPMI and remote-management discovery
+
+Implement DMTF ASF/RMCP Presence discovery and independently evaluate a
+credential-free IPMI capability query, Apple Remote Desktop, and Citrix. Keep
+presence and sensitive management-capability evidence distinct; issue no
+control, session, or authentication request.
+
+Exit gate: admitted exchanges are unicast, non-mutating, exactly correlated,
+separately consented, and live-tested; proprietary ambiguity becomes no-go.
+
+### Phase 61 — Enterprise database discovery
+
+Evaluate IBM Db2 DAS and SAP SQL Anywhere discovery from public vendor wire
+contracts. Separate target/port and fan-out modes, parse only documented bounded
+fields, and retain returned ports as evidence rather than authority.
+
+Exit gate: every implementation has positive and hostile project-responder
+coverage; missing authoritative contracts produce explicit no-go outcomes.
+
+### Phase 62 — Routing and industrial discovery
+
+Add bounded RIPv1 diagnostic and separately risked whole-table discovery plus
+Beckhoff ADS target/link discovery. Preserve responder, interface, network,
+metric, endpoint, provenance, and lifetime without changing kernel routes or
+establishing control sessions.
+
+Exit gate: topology disclosure, amplification, multi-datagram work, link scope,
+and broadcast consent are finite, tested, and independently enforced.
+
+### Phase 63 — Game-server and master discovery
+
+Add opt-in, authoritative-source status support for admitted Quake, Unreal/
+UT2K, ASE, Freelancer, and related families. Model master-server enumeration as
+a finite discovery operation whose bounded returned endpoints are never scanned
+automatically.
+
+Exit gate: delimiter/list parsers, status fields, amplification, duplicate
+suppression, and derived-endpoint authority pass project-responder tests.
+
+### Phase 64 — Voice and media server discovery
+
+Independently evaluate TeamSpeak 2/3, Murmur, Ventrilo, and SqueezeCenter.
+Admitted exchanges stop before authentication, join, registration, or media and
+bound every handshake, field, packet, byte, CPU, and elapsed-time dimension.
+
+Exit gate: useful typed evidence and hostile state-machine tests exist for each
+implementation; opaque or undocumented formats remain no-go.
+
+### Phase 65 — Additional DHT discovery
+
+Evaluate Vuze/Azureus and eDonkey/eMule Kademlia as explicit-target, ephemeral-
+identity ping operations. Do not bootstrap, crawl, store contacts, keep a
+routing table, find peers, announce, publish, or contact returned nodes.
+
+Exit gate: captures prove one bounded ping exchange with no durable network
+participation or implicit fan-out under explicit stateful-operation consent.
+
+### Phase 66 — Sensitive legacy enterprise protocols
+
+Evaluate AFS/Rx, Amanda `noop`, connectionless DCE/RPC, and VxWorks WDB ping
+under legacy-fragility and disclosure risk. Prohibit data/configuration access,
+authentication, callbacks, debugger attachment, and WDB target-connect.
+
+Exit gate: admitted exchanges are read-only, fragment/sequence bounded,
+project-responder tested, and disabled unless explicitly selected.
+
+### Phase 67 — Cryptographic/authentication blocker reassessment
+
+Reassess Kerberos, DHCP information queries, IKE, DTLS, OpenVPN, RADIUS, CLDAP,
+Ubiquiti, pcAnywhere, and WireGuard against current primary sources,
+CPU/logging/ privacy impact, useful evidence, fresh identity, and responder
+feasibility.
+
+Exit gate: every blocker has a dated executable decision; no protocol is
+admitted merely for Nmap comparison or by fabricating authentication identity.
+
+### Phase 68 — Threat and backdoor probe boundary
+
+Record BackOrifice, Trinoo, AndroMouse, AirHID, and comparable families in a
+distinct exclusion ledger. Ordinary active profiles cannot emit those
+signatures; passive observation cannot authorize an active follow-up. Decide
+whether future active threat identification belongs in another package.
+
+Exit gate: tests enforce the active exclusion and public reports count the
+families as intentionally excluded rather than ordinary discovery support.
+
+### Phase 69 — Integrated coverage audit and release candidate
+
+Freeze additive registries, schemas, policies, and claims; regenerate the
+multidimensional comparison; repeat provenance, authority, fuzz, sanitizer,
+fault, cancellation, teardown, resource, amplification, namespace, artifact,
+consumer, reproducibility, x86-64, and native AArch64 gates.
+
+Exit gate: claims name their evidence dimension; implemented operations are
+independently authored, bounded, non-mutating, correctly risked, live-tested,
+and reproducible, while no-go and excluded families remain explicit.
+
+The binding architecture, candidate dispositions, deliverables, verification
+matrix, stop conditions, and primary research basis are in the
+[UDP probe coverage expansion plan](62-udp-probe-coverage-expansion-plan.md).
+The final candidate dispositions, evidence dimensions, implementation details,
+verification record, and remaining publication gate are in the
+[Phases 59–69 implementation report](64-phases-59-69-implementation-report.md).
+The subsequent
+[adversarial implementation review](65-phases-59-69-adversarial-review.md)
+reopened Phases 59, 62, 63, 64, and 69. All findings and their repeated local
+gates are closed by the
+[adversarial repair report](66-phases-59-69-adversarial-repair-report.md), which
+is authoritative over reports 64 and 65 for current implementation status.
+
 ## Cross-phase rule
 
 Do not expand breadth while a known descriptor-lifetime, buffer-lifetime,

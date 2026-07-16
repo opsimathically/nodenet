@@ -1,5 +1,6 @@
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use nix::libc;
 
@@ -220,6 +221,18 @@ impl PacketRing {
         }
     }
 
+    #[allow(
+        unsafe_code,
+        clippy::cast_ptr_alignment,
+        reason = "mmap is page-aligned and the ABI block status offset is u32-aligned"
+    )]
+    fn block_status(&self) -> &AtomicU32 {
+        // SAFETY: block_base is live for self, BLOCK_HEADER_OFFSET is specified
+        // by the TPACKET_V3 ABI and u32-aligned, and ownership of this status
+        // word is exchanged with the kernel using acquire/release ordering.
+        unsafe { AtomicU32::from_ptr(self.block_base().add(BLOCK_HEADER_OFFSET).cast::<u32>()) }
+    }
+
     /// Copies the next validated frame from a userspace-owned ring block.
     ///
     /// # Errors
@@ -248,17 +261,19 @@ impl PacketRing {
     fn next_frame_from_current_block(&mut self) -> Result<Option<RingFrame>, NativeError> {
         let block = self.block_base();
         if self.packets_remaining == 0 {
+            let status = self.block_status().load(Ordering::Acquire);
+            if status & libc::TP_STATUS_USER == 0 {
+                return Ok(None);
+            }
             // SAFETY: the v1 block header begins at fixed aligned offset eight.
-            let header = unsafe {
+            let mut header = unsafe {
                 std::ptr::read_volatile(
                     block
                         .add(BLOCK_HEADER_OFFSET)
                         .cast::<libc::tpacket_hdr_v1>(),
                 )
             };
-            if header.block_status & libc::TP_STATUS_USER == 0 {
-                return Ok(None);
-            }
+            header.block_status = status;
             self.packets_remaining = usize::try_from(header.num_pkts).map_err(|_| {
                 NativeError::malformed_control(
                     Operation::ReceiveRingFrame,
@@ -369,16 +384,9 @@ impl PacketRing {
         Ok(Some(frame))
     }
 
-    #[allow(
-        unsafe_code,
-        clippy::cast_ptr_alignment,
-        reason = "mmap is page-aligned and the ABI block status offset is u32-aligned"
-    )]
     fn release_current_block(&mut self) {
-        let status = unsafe { self.block_base().add(BLOCK_HEADER_OFFSET).cast::<u32>() };
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        // SAFETY: status is the aligned first u32 of the current live v1 block header.
-        unsafe { std::ptr::write_volatile(status, libc::TP_STATUS_KERNEL) };
+        self.block_status()
+            .store(libc::TP_STATUS_KERNEL, Ordering::Release);
         self.current_block = (self.current_block + 1) % self.block_count;
         self.next_packet_offset = 0;
     }
@@ -398,6 +406,7 @@ impl Drop for PacketRing {
 #[cfg(test)]
 mod tests {
     use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use nix::libc;
 
@@ -491,7 +500,8 @@ mod tests {
         assert_eq!(ring.current_block, 1);
         assert_eq!(ring.packets_remaining, 0);
         let status = unsafe {
-            std::ptr::read_volatile(mapping.as_ptr().add(BLOCK_HEADER_OFFSET).cast::<u32>())
+            AtomicU32::from_ptr(mapping.as_ptr().add(BLOCK_HEADER_OFFSET).cast::<u32>())
+                .load(Ordering::Acquire)
         };
         assert_eq!(status, libc::TP_STATUS_KERNEL);
     }

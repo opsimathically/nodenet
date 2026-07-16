@@ -83,9 +83,26 @@ fn namespace_snapshot_matches_ip_json_oracle() {
         return;
     }
     let mut context = RouteContext::new().expect("namespace route context should open");
-    let snapshot = context
-        .snapshot()
-        .expect("namespace snapshot should complete");
+    // Neighbor discovery can complete asynchronously while the namespace is
+    // starting. Only compare a snapshot with an oracle sample that bracketed
+    // the snapshot without changing; otherwise retry the bounded fixture.
+    let mut stable_snapshot = None;
+    let mut stable_neighbor_count = 0;
+    for _ in 0..4 {
+        let before = kernel_neighbor_count();
+        let candidate = context
+            .snapshot()
+            .expect("namespace snapshot should complete");
+        let after = kernel_neighbor_count();
+        if before == after && candidate.neighbors.len() == after {
+            stable_neighbor_count = after;
+            stable_snapshot = Some(candidate);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let snapshot = stable_snapshot
+        .expect("namespace neighbor table should stabilize around a complete snapshot");
 
     assert!(snapshot.interfaces.iter().any(|link| link.name == "ctx-v0"));
     assert!(
@@ -127,12 +144,7 @@ fn namespace_snapshot_matches_ip_json_oracle() {
         occurrences(&route4_json, "\"dst\":") + occurrences(&route6_json, "\"dst\":")
     );
 
-    let neighbor4_json = ip_json(&["-4", "neighbor", "show", "nud", "all"]);
-    let neighbor6_json = ip_json(&["-6", "neighbor", "show", "nud", "all"]);
-    assert_eq!(
-        snapshot.neighbors.len(),
-        occurrences(&neighbor4_json, "\"dst\":") + occurrences(&neighbor6_json, "\"dst\":")
-    );
+    assert_eq!(snapshot.neighbors.len(), stable_neighbor_count);
 
     let next = context
         .snapshot()
@@ -443,6 +455,12 @@ fn ip(arguments: &[&str]) -> bool {
 
 fn occurrences(input: &str, needle: &str) -> usize {
     input.match_indices(needle).count()
+}
+
+fn kernel_neighbor_count() -> usize {
+    let neighbor4_json = ip_json(&["-4", "neighbor", "show", "nud", "all"]);
+    let neighbor6_json = ip_json(&["-6", "neighbor", "show", "nud", "all"]);
+    occurrences(&neighbor4_json, "\"dst\":") + occurrences(&neighbor6_json, "\"dst\":")
 }
 
 fn resident_bytes() -> usize {

@@ -1596,7 +1596,7 @@ mod tests {
             [
                 (1_u16..=16).collect::<Vec<_>>(),
                 (25_u16..=30).collect::<Vec<_>>(),
-                vec![33],
+                vec![33, 36, 37],
             ]
             .concat()
         );
@@ -1623,7 +1623,7 @@ mod tests {
             .iter()
             .filter_map(|request| request.catalogue_probe_id)
             .collect();
-        assert_eq!(legacy_ids, (1_u16..=33).collect::<Vec<_>>());
+        assert_eq!(legacy_ids, (1_u16..=37).collect::<Vec<_>>());
         assert!(matches!(
             legacy.options.udp_program.ipv4[25].eligibility,
             UdpVariantEligibility::DestinationPortRange { start, end }

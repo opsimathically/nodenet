@@ -28,6 +28,36 @@ const target =
   option === -1 ? `linux-${process.arch}-gnu` : process.argv[option + 1];
 if (!(target in targets)) throw new Error(`unsupported target: ${target}`);
 
+function checkedCommand(command, arguments_, options = {}) {
+  const result = spawnSync(command, arguments_, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    ...options,
+  });
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(
+      result.error?.message ||
+        result.stderr.trim() ||
+        result.stdout.trim() ||
+        `${command} ${arguments_.join(" ")} failed`,
+    );
+  }
+  return result.stdout.trim();
+}
+
+const sourceStatus = checkedCommand("git", [
+  "status",
+  "--porcelain=v1",
+  "--untracked-files=all",
+]);
+if (sourceStatus !== "") {
+  throw new Error(
+    "release assembly requires a clean Git worktree so sourceCommit identifies the exact packaged source",
+  );
+}
+const sourceCommit = checkedCommand("git", ["rev-parse", "--verify", "HEAD"]);
+const rustc = checkedCommand("rustc", ["--version", "--verbose"]);
+
 rmSync(stage, { force: true, recursive: true });
 const rootStage = join(stage, "nodenetscanner");
 mkdirSync(join(rootStage, "build", "native"), { recursive: true });
@@ -105,12 +135,8 @@ const provenance = {
   packageVersion: manifest.version,
   target,
   node: process.version,
-  rustc: spawnSync("rustc", ["--version", "--verbose"], {
-    encoding: "utf8",
-  }).stdout.trim(),
-  sourceCommit: spawnSync("git", ["rev-parse", "HEAD"], {
-    encoding: "utf8",
-  }).stdout.trim(),
+  rustc,
+  sourceCommit,
   sourceDateEpoch: process.env.SOURCE_DATE_EPOCH ?? null,
   cargoLockSha256: createHash("sha256")
     .update(readFileSync(join(repositoryRoot, "Cargo.lock")))

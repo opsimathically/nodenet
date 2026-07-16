@@ -12,6 +12,9 @@ pub const MAX_SQL_BROWSER_TEXT_BYTES: usize = 1_024;
 pub const QUIC_VERSION_NEGOTIATION_REQUEST_BYTES: usize = 1_200;
 pub const MAX_QUIC_ADVERTISED_VERSIONS: usize = 64;
 pub const MAX_TFTP_DISCOVERY_RESPONSE_BYTES: usize = 1_024;
+pub const RIPV1_TABLE_REQUEST_BYTES: usize = 24;
+pub const MAX_RIPV1_RESPONSE_BYTES: usize = 504;
+pub const MAX_RIPV1_ROUTES_PER_DATAGRAM: usize = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetedDiscoveryError {
@@ -70,6 +73,63 @@ pub struct QuicVersionNegotiationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuicVersionNegotiationResponse {
     pub versions: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RipV1Route {
+    pub destination: Ipv4Addr,
+    pub metric: u32,
+}
+
+/// Builds the RFC 1058 request for the target's complete `RIPv1` routing table.
+#[must_use]
+pub fn build_ripv1_table_request() -> [u8; RIPV1_TABLE_REQUEST_BYTES] {
+    let mut request = [0_u8; RIPV1_TABLE_REQUEST_BYTES];
+    request[0] = 1;
+    request[1] = 1;
+    request[20..24].copy_from_slice(&16_u32.to_be_bytes());
+    request
+}
+
+/// Parses one independently bounded `RIPv1` response datagram.
+///
+/// # Errors
+///
+/// Rejects non-response commands, non-v1 messages, reserved-field drift,
+/// non-IPv4 routes, incomplete entries, and metrics outside 1 through 16.
+pub fn parse_ripv1_table_response(input: &[u8]) -> Result<Vec<RipV1Route>, TargetedDiscoveryError> {
+    if input.len() < RIPV1_TABLE_REQUEST_BYTES
+        || input.len() > MAX_RIPV1_RESPONSE_BYTES
+        || !(input.len() - 4).is_multiple_of(20)
+        || input[..4] != [2, 1, 0, 0]
+    {
+        return Err(TargetedDiscoveryError::UnexpectedMessage);
+    }
+    let route_count = (input.len() - 4) / 20;
+    if route_count == 0 || route_count > MAX_RIPV1_ROUTES_PER_DATAGRAM {
+        return Err(TargetedDiscoveryError::TooManyValues);
+    }
+    let mut routes = Vec::with_capacity(route_count);
+    for entry in input[4..].chunks_exact(20) {
+        let family = u16::from_be_bytes([entry[0], entry[1]]);
+        let metric = u32::from_be_bytes(
+            entry[16..20]
+                .try_into()
+                .map_err(|_| TargetedDiscoveryError::InvalidLength)?,
+        );
+        if family != 2
+            || entry[2..4] != [0, 0]
+            || entry[8..16] != [0; 8]
+            || !(1..=16).contains(&metric)
+        {
+            return Err(TargetedDiscoveryError::UnexpectedMessage);
+        }
+        routes.push(RipV1Route {
+            destination: Ipv4Addr::new(entry[4], entry[5], entry[6], entry[7]),
+            metric,
+        });
+    }
+    Ok(routes)
 }
 
 #[must_use]
@@ -536,6 +596,42 @@ mod tests {
         let instances = parse_sql_browser_response(&response).unwrap();
         assert_eq!(instances[0].instance_name, "SQLEXPRESS");
         assert_eq!(instances[0].tcp_port, Some(1433));
+    }
+
+    #[test]
+    fn ripv1_table_datagrams_are_strict_and_preserve_routes() {
+        assert_eq!(
+            build_ripv1_table_request(),
+            [
+                1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16,
+            ]
+        );
+        let mut response = vec![2, 1, 0, 0];
+        for (address, metric) in [([192, 0, 2, 0], 1_u32), ([198, 51, 100, 0], 16)] {
+            response.extend_from_slice(&2_u16.to_be_bytes());
+            response.extend_from_slice(&[0; 2]);
+            response.extend_from_slice(&address);
+            response.extend_from_slice(&[0; 8]);
+            response.extend_from_slice(&metric.to_be_bytes());
+        }
+        assert_eq!(
+            parse_ripv1_table_response(&response).unwrap(),
+            [
+                RipV1Route {
+                    destination: Ipv4Addr::new(192, 0, 2, 0),
+                    metric: 1,
+                },
+                RipV1Route {
+                    destination: Ipv4Addr::new(198, 51, 100, 0),
+                    metric: 16,
+                },
+            ]
+        );
+        response[2] = 1;
+        assert!(parse_ripv1_table_response(&response).is_err());
+        response[2] = 0;
+        response[20..24].copy_from_slice(&17_u32.to_be_bytes());
+        assert!(parse_ripv1_table_response(&response).is_err());
     }
 
     #[test]

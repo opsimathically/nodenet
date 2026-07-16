@@ -4,9 +4,9 @@ use sha2::{Digest, Sha256};
 
 use crate::MAX_UDP_REQUEST_BYTES;
 
-pub const UDP_PROBE_CATALOGUE_VERSION: &str = "1.3.0";
+pub const UDP_PROBE_CATALOGUE_VERSION: &str = "1.4.1";
 pub const UDP_PROBE_CATALOGUE_SHA256_HEX: &str =
-    "427cdc09881907c610bbea8f6bc8cffa18e2819e3f7f04626adcf264e598b976";
+    "90c1589cd264385c6931cd6ed9efdc216f352239790a9026830bfe98cffe5e56";
 pub const MAX_UDP_CATALOGUE_VARIANTS: usize = 256;
 pub const MAX_UDP_CORRELATION_FIELDS: usize = 8;
 pub const MAX_UDP_RESPONSE_BYTES: usize = 65_527;
@@ -204,11 +204,11 @@ impl fmt::Display for UdpCatalogueError {
 
 impl std::error::Error for UdpCatalogueError {}
 
-const REGISTERED_REQUEST_BUILDERS: [u16; 33] = [
+const REGISTERED_REQUEST_BUILDERS: [u16; 37] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
 ];
-const REGISTERED_RESPONSE_PARSERS: [u16; 33] = REGISTERED_REQUEST_BUILDERS;
+const REGISTERED_RESPONSE_PARSERS: [u16; 37] = REGISTERED_REQUEST_BUILDERS;
 const EMPTY_RISKS: UdpProbeRiskSet = match UdpProbeRiskSet::from_bits(0) {
     Some(value) => value,
     None => unreachable!(),
@@ -321,6 +321,18 @@ const SLP_PORTS: &[UdpPortRange] = &[UdpPortRange {
     start: 427,
     end: 427,
 }];
+const QUAKE2_PORTS: &[UdpPortRange] = &[UdpPortRange {
+    start: 27_910,
+    end: 27_910,
+}];
+const QUAKE3_PORTS: &[UdpPortRange] = &[UdpPortRange {
+    start: 27_960,
+    end: 27_960,
+}];
+const MUMBLE_PORTS: &[UdpPortRange] = &[UdpPortRange {
+    start: 64_738,
+    end: 64_738,
+}];
 const TX16: &[UdpCorrelationField] = &[UdpCorrelationField {
     offset: 0,
     length: 2,
@@ -375,6 +387,16 @@ const OFFSET12_TX64: &[UdpCorrelationField] = &[UdpCorrelationField {
     offset: 12,
     length: 8,
     kind: UdpCorrelationFieldKind::TokenU64,
+}];
+const OFFSET4_TX64: &[UdpCorrelationField] = &[UdpCorrelationField {
+    offset: 4,
+    length: 8,
+    kind: UdpCorrelationFieldKind::TokenU64,
+}];
+const OFFSET28_EXACT16: &[UdpCorrelationField] = &[UdpCorrelationField {
+    offset: 28,
+    length: 16,
+    kind: UdpCorrelationFieldKind::ExactBytes,
 }];
 const NO_TX: &[UdpCorrelationField] = &[];
 
@@ -1055,6 +1077,78 @@ pub static UDP_PROBE_CATALOGUE: &[UdpProbeDescriptor] = &[
         "https://www.rfc-editor.org/rfc/rfc2608",
         "RFC 2608 Service Request/Reply for service-agent"
     ),
+    extended_probe!(
+        34,
+        34,
+        "ripv1-routing-table",
+        Legacy,
+        8,
+        (1 << UdpProbeRisk::HighAmplification as u8) | (1 << UdpProbeRisk::SensitiveRead as u8),
+        Ipv4,
+        RIP_PORTS,
+        24,
+        24,
+        504,
+        0,
+        NO_TX,
+        "RFC Editor",
+        "https://www.rfc-editor.org/rfc/rfc1058",
+        "RFC 1058 sections 3.4 and 3.4.1"
+    ),
+    extended_probe!(
+        35,
+        35,
+        "quake2-status",
+        Legacy,
+        7,
+        (1 << UdpProbeRisk::HighAmplification as u8) | (1 << UdpProbeRisk::SensitiveRead as u8),
+        Both,
+        QUAKE2_PORTS,
+        10,
+        10,
+        1_400,
+        0,
+        NO_TX,
+        "Yamagi Quake II project",
+        "https://github.com/yquake2/yquake2",
+        "connectionless status command and print response"
+    ),
+    extended_probe!(
+        36,
+        36,
+        "quake3-info",
+        Comprehensive,
+        6,
+        (1 << UdpProbeRisk::HighAmplification as u8) | (1 << UdpProbeRisk::SensitiveRead as u8),
+        Both,
+        QUAKE3_PORTS,
+        28,
+        28,
+        1_041,
+        0,
+        OFFSET28_EXACT16,
+        "id Software",
+        "https://github.com/id-Software/Quake-III-Arena",
+        "challenge-correlated getinfo/infoResponse exchange"
+    ),
+    extended_probe!(
+        37,
+        37,
+        "mumble-extended-ping",
+        Comprehensive,
+        6,
+        (1 << UdpProbeRisk::HighAmplification as u8) | (1 << UdpProbeRisk::SensitiveRead as u8),
+        Both,
+        MUMBLE_PORTS,
+        12,
+        12,
+        24,
+        0,
+        OFFSET4_TX64,
+        "Mumble project",
+        "https://github.com/mumble-voip/mumble",
+        "legacy extended UDP ping with opaque timestamp echo"
+    ),
 ];
 
 /// Validates descriptor bounds, stable ordering, provenance, and component IDs.
@@ -1386,13 +1480,13 @@ mod tests {
             Err(UdpCatalogueError::OversizedRequestTemplate)
         );
         let mut unknown_builder = descriptor(1);
-        unknown_builder.request_builder_id = 34;
+        unknown_builder.request_builder_id = 38;
         assert_eq!(
             validate_udp_probe_catalogue(&[unknown_builder]),
             Err(UdpCatalogueError::UnknownRequestBuilder)
         );
         let mut unknown_parser = descriptor(1);
-        unknown_parser.response_parser_id = 34;
+        unknown_parser.response_parser_id = 38;
         assert_eq!(
             validate_udp_probe_catalogue(&[unknown_parser]),
             Err(UdpCatalogueError::UnknownResponseParser)

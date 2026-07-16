@@ -57,6 +57,7 @@
     "fuzz:scanner": "cargo +nightly fuzz run plan --fuzz-dir crates/nodenetscanner-engine/fuzz -- -max_total_time=60 -max_len=65536",
     "benchmark:protocols": "cargo bench -p nodenet-protocols --bench foundation --locked",
     "udp:catalogue:check": "cargo run -q -p nodenet-protocols --bin check_udp_catalogue --locked",
+    "udp:provenance:check": "node scripts/check-udp-provenance.mjs",
     "release:assemble": "npm run release:assemble --workspace=@opsimathically/nodenetraw",
     "release:verify-artifact": "npm run release:verify-artifact --workspace=@opsimathically/nodenetraw",
     "release:consumer-test": "npm run release:consumer-test --workspace=@opsimathically/nodenetraw",

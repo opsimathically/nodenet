@@ -84,6 +84,9 @@ if [ "${NODENETRAW_IN_NAMESPACE:-0}" = "1" ]; then
     event-stress)
       exec "$node" test/phase11-event-stress.mjs
       ;;
+    ring-stress)
+      exec "$node" test/phase9-stress.mjs
+      ;;
     traceroute-stress)
       exec "$node" test/phase15-traceroute-stress.mjs
       ;;

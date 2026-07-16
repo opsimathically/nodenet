@@ -95,6 +95,10 @@ pub fn parse_surface(data: &[u8]) {
         UdpCatalogueProbe::DnsChaosVersion,
         UdpCatalogueProbe::NtpControlReadVariables,
         UdpCatalogueProbe::SlpServiceAgent,
+        UdpCatalogueProbe::RipV1Table,
+        UdpCatalogueProbe::Quake2Status,
+        UdpCatalogueProbe::Quake3Info,
+        UdpCatalogueProbe::MumbleExtendedPing,
     ] {
         if let Ok(request) = build_udp_catalogue_request(
             probe,

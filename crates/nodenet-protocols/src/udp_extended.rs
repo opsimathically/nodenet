@@ -6,7 +6,8 @@
 use crate::udp_safe::{bounded_text, encode_metadata};
 use crate::{
     IpAddress, UdpByteSignature, UdpSafeCodecError, UdpSafeMatch, UdpSafeProbe, UdpSignatureClause,
-    build_udp_safe_request, match_udp_signature, parse_udp_safe_response,
+    build_ripv1_table_request, build_udp_safe_request, match_udp_signature,
+    parse_ripv1_table_response, parse_udp_safe_response,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -45,6 +46,10 @@ pub enum UdpCatalogueProbe {
     DnsChaosVersion = 31,
     NtpControlReadVariables = 32,
     SlpServiceAgent = 33,
+    RipV1Table = 34,
+    Quake2Status = 35,
+    Quake3Info = 36,
+    MumbleExtendedPing = 37,
 }
 
 impl UdpCatalogueProbe {
@@ -84,6 +89,10 @@ impl UdpCatalogueProbe {
             31 => Some(Self::DnsChaosVersion),
             32 => Some(Self::NtpControlReadVariables),
             33 => Some(Self::SlpServiceAgent),
+            34 => Some(Self::RipV1Table),
+            35 => Some(Self::Quake2Status),
+            36 => Some(Self::Quake3Info),
+            37 => Some(Self::MumbleExtendedPing),
             _ => None,
         }
     }
@@ -122,7 +131,11 @@ impl UdpCatalogueProbe {
             | Self::BitTorrentDhtPing
             | Self::DnsChaosVersion
             | Self::NtpControlReadVariables
-            | Self::SlpServiceAgent => None,
+            | Self::SlpServiceAgent
+            | Self::RipV1Table
+            | Self::Quake2Status
+            | Self::Quake3Info
+            | Self::MumbleExtendedPing => None,
         }
     }
 
@@ -183,6 +196,10 @@ pub fn build_udp_catalogue_request(
         UdpCatalogueProbe::DnsChaosVersion => build_dns_chaos(token),
         UdpCatalogueProbe::NtpControlReadVariables => build_ntp_control(token),
         UdpCatalogueProbe::SlpServiceAgent => build_slp(token),
+        UdpCatalogueProbe::RipV1Table => build_ripv1(),
+        UdpCatalogueProbe::Quake2Status => build_quake2_status(),
+        UdpCatalogueProbe::Quake3Info => build_quake3_info(token),
+        UdpCatalogueProbe::MumbleExtendedPing => build_mumble_extended_ping(token),
         _ => return Err(UdpSafeCodecError::UnsupportedProbe),
     })
 }
@@ -230,6 +247,10 @@ pub fn parse_udp_catalogue_response(
         UdpCatalogueProbe::BitTorrentDhtPing => parse_dht(request, response)?,
         UdpCatalogueProbe::NtpControlReadVariables => parse_ntp_control(request, response)?,
         UdpCatalogueProbe::SlpServiceAgent => parse_slp(request, response)?,
+        UdpCatalogueProbe::RipV1Table => parse_ripv1(response)?,
+        UdpCatalogueProbe::Quake2Status => parse_quake2_status(response)?,
+        UdpCatalogueProbe::Quake3Info => parse_quake3_info(request, response)?,
+        UdpCatalogueProbe::MumbleExtendedPing => parse_mumble_extended_ping(request, response)?,
         UdpCatalogueProbe::DnsChaosVersion => unreachable!("handled above"),
         _ => return Err(UdpSafeCodecError::UnsupportedProbe),
     };
@@ -250,6 +271,29 @@ fn build_ripv2() -> Vec<u8> {
     let mut value = vec![1, 2, 0, 0];
     value.extend_from_slice(&[0; 16]);
     value.extend_from_slice(&16_u32.to_be_bytes());
+    value
+}
+
+fn build_ripv1() -> Vec<u8> {
+    build_ripv1_table_request().to_vec()
+}
+
+fn build_quake2_status() -> Vec<u8> {
+    let mut value = vec![0xff; 4];
+    value.extend_from_slice(b"status");
+    value
+}
+
+fn build_quake3_info(token: [u8; 16]) -> Vec<u8> {
+    let mut value = vec![0xff; 4];
+    value.extend_from_slice(b"getinfo ");
+    value.extend_from_slice(token_hex(&token[..8]).as_bytes());
+    value
+}
+
+fn build_mumble_extended_ping(token: [u8; 16]) -> Vec<u8> {
+    let mut value = vec![0; 4];
+    value.extend_from_slice(&token[..8]);
     value
 }
 
@@ -384,6 +428,174 @@ fn parse_ripv2(response: &[u8]) -> Result<ExtendedParsed, UdpSafeCodecError> {
         }
     }
     Ok(("RIPv2", 2, Some("2".into()), vec![(4, routes.to_string())]))
+}
+
+fn parse_ripv1(response: &[u8]) -> Result<ExtendedParsed, UdpSafeCodecError> {
+    let routes = parse_ripv1_table_response(response)
+        .map_err(|_| UdpSafeCodecError::MalformedResponse)?
+        .len();
+    Ok(("RIPv1", 2, Some("1".into()), vec![(4, routes.to_string())]))
+}
+
+fn parse_quake_info_fields(
+    value: &[u8],
+    maximum_bytes: usize,
+    maximum_key_bytes: usize,
+    maximum_value_bytes: usize,
+) -> Result<Vec<(String, String)>, UdpSafeCodecError> {
+    if value.is_empty()
+        || value.len() > maximum_bytes
+        || value.iter().any(|byte| !(0x20..=0x7e).contains(byte))
+    {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let text = core::str::from_utf8(value).map_err(|_| UdpSafeCodecError::MalformedResponse)?;
+    if !text.starts_with('\\') || text.contains(['\r', '\0']) {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let fields: Vec<&str> = text[1..].split('\\').collect();
+    if fields.is_empty() || fields.len() > 128 || !fields.len().is_multiple_of(2) {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let mut parsed: Vec<(String, String)> = Vec::with_capacity(fields.len() / 2);
+    for pair in fields.chunks_exact(2) {
+        if pair[0].is_empty()
+            || pair[0].len() > maximum_key_bytes
+            || pair[1].len() > maximum_value_bytes
+        {
+            return Err(UdpSafeCodecError::MalformedResponse);
+        }
+        if parsed
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case(pair[0]))
+        {
+            return Err(UdpSafeCodecError::MalformedResponse);
+        }
+        parsed.push((pair[0].to_owned(), pair[1].to_owned()));
+    }
+    Ok(parsed)
+}
+
+fn quake_field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn quake_metadata(fields: &[(String, String)], players: usize) -> Vec<(u16, String)> {
+    let mut metadata = Vec::new();
+    for (name, id) in [("hostname", 3), ("mapname", 4), ("game", 5)] {
+        if let Some(value) = quake_field(fields, name) {
+            metadata.push((id, value[..value.len().min(255)].to_owned()));
+        }
+    }
+    metadata.push((6, players.to_string()));
+    if let Some(value) = quake_field(fields, "clients") {
+        metadata.push((7, value.to_owned()));
+    }
+    if let Some(value) =
+        quake_field(fields, "sv_maxclients").or_else(|| quake_field(fields, "maxclients"))
+    {
+        metadata.push((8, value.to_owned()));
+    }
+    metadata
+}
+
+fn parse_quake2_status(response: &[u8]) -> Result<ExtendedParsed, UdpSafeCodecError> {
+    const PREFIX: &[u8] = b"\xff\xff\xff\xffprint\n";
+    if response.len() <= PREFIX.len() || response.len() > 1_400 || !response.starts_with(PREFIX) {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let body_bytes = &response[PREFIX.len()..];
+    if body_bytes
+        .iter()
+        .any(|byte| *byte != b'\n' && !(0x20..=0x7e).contains(byte))
+    {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let body =
+        core::str::from_utf8(body_bytes).map_err(|_| UdpSafeCodecError::MalformedResponse)?;
+    let mut lines = body.lines();
+    let server = lines.next().ok_or(UdpSafeCodecError::MalformedResponse)?;
+    // Yamagi Quake II reserves one byte of each C string for termination.
+    let fields = parse_quake_info_fields(server.as_bytes(), 511, 63, 63)?;
+    let mut players = 0_usize;
+    for line in lines {
+        if line.len() > 1_023 || line.contains('\0') {
+            return Err(UdpSafeCodecError::MalformedResponse);
+        }
+        if !line.is_empty() {
+            players += 1;
+            if players > 256 {
+                return Err(UdpSafeCodecError::MalformedResponse);
+            }
+        }
+    }
+    let version = quake_field(&fields, "version").map(str::to_owned);
+    Ok(("Quake II", 2, version, quake_metadata(&fields, players)))
+}
+
+fn parse_quake3_info(request: &[u8], response: &[u8]) -> Result<ExtendedParsed, UdpSafeCodecError> {
+    const REQUEST_PREFIX: &[u8] = b"\xff\xff\xff\xffgetinfo ";
+    const RESPONSE_PREFIX: &[u8] = b"\xff\xff\xff\xffinfoResponse\n";
+    if request.len() != 28
+        || !request.starts_with(REQUEST_PREFIX)
+        || response.len() <= RESPONSE_PREFIX.len()
+        || response.len() > 1_041
+        || !response.starts_with(RESPONSE_PREFIX)
+    {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let mut lines = response[RESPONSE_PREFIX.len()..].split(|byte| *byte == b'\n');
+    let body = lines.next().ok_or(UdpSafeCodecError::MalformedResponse)?;
+    if lines.any(|line| !line.is_empty()) {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    // Quake III's MAX_INFO_STRING includes the terminating NUL.
+    let fields = parse_quake_info_fields(body, 1_023, 1_023, 1_023)?;
+    let challenge = quake_field(&fields, "challenge").ok_or(UdpSafeCodecError::WrongTransaction)?;
+    if challenge.as_bytes() != &request[REQUEST_PREFIX.len()..] {
+        return Err(UdpSafeCodecError::WrongTransaction);
+    }
+    let version = quake_field(&fields, "protocol").map(str::to_owned);
+    Ok(("Quake III", 3, version, quake_metadata(&fields, 0)))
+}
+
+fn parse_mumble_extended_ping(
+    request: &[u8],
+    response: &[u8],
+) -> Result<ExtendedParsed, UdpSafeCodecError> {
+    if request.len() != 12 || request[..4] != [0; 4] || response.len() != 24 {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    if response[4..12] != request[4..12] {
+        return Err(UdpSafeCodecError::WrongTransaction);
+    }
+    let encoded_version = u32::from_be_bytes(response[..4].try_into().unwrap());
+    let users = u32::from_be_bytes(response[12..16].try_into().unwrap());
+    let maximum_users = u32::from_be_bytes(response[16..20].try_into().unwrap());
+    let maximum_bandwidth = u32::from_be_bytes(response[20..24].try_into().unwrap());
+    if encoded_version == 0 || maximum_users == 0 || users > maximum_users || maximum_bandwidth == 0
+    {
+        return Err(UdpSafeCodecError::MalformedResponse);
+    }
+    let version = format!(
+        "{}.{}.{}",
+        encoded_version >> 16,
+        (encoded_version >> 8) & 0xff,
+        encoded_version & 0xff
+    );
+    Ok((
+        "Mumble",
+        3,
+        Some(version),
+        vec![
+            (4, users.to_string()),
+            (5, maximum_users.to_string()),
+            (6, maximum_bandwidth.to_string()),
+        ],
+    ))
 }
 
 fn parse_xdmcp(response: &[u8]) -> Result<ExtendedParsed, UdpSafeCodecError> {
@@ -1520,6 +1732,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&stats[8..], b"stats\r\n");
+
+        let ripv1 = build_udp_catalogue_request(UdpCatalogueProbe::RipV1Table, TOKEN, context(520))
+            .unwrap();
+        assert_eq!(ripv1, build_ripv1());
+
+        let quake2 =
+            build_udp_catalogue_request(UdpCatalogueProbe::Quake2Status, TOKEN, context(27_910))
+                .unwrap();
+        assert_eq!(quake2, b"\xff\xff\xff\xffstatus");
+
+        let quake3 =
+            build_udp_catalogue_request(UdpCatalogueProbe::Quake3Info, TOKEN, context(27_960))
+                .unwrap();
+        assert_eq!(quake3, b"\xff\xff\xff\xffgetinfo 3031323334353637");
+
+        let mumble = build_udp_catalogue_request(
+            UdpCatalogueProbe::MumbleExtendedPing,
+            TOKEN,
+            context(64_738),
+        )
+        .unwrap();
+        assert_eq!(&mumble[..4], &[0; 4]);
+        assert_eq!(&mumble[4..], &TOKEN[..8]);
     }
 
     #[test]
@@ -1568,6 +1803,63 @@ mod tests {
             "SIP/2.0 200 OK\r\nCall-ID: {call_id}\r\nCSeq: 1 OPTIONS\r\nServer: fixture/1\r\nContent-Length: 0\r\n\r\n"
         );
         assert!(parse_sip(&request, response.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn quake_parsers_accept_authoritative_envelopes_and_reject_wrong_transactions() {
+        let quake2_info = format!(
+            "\\hostname\\{}\\mapname\\{}\\game\\{}\\version\\{}",
+            "h".repeat(63),
+            "m".repeat(63),
+            "g".repeat(63),
+            "v".repeat(63)
+        );
+        assert!(quake2_info.len() > 255 && quake2_info.len() <= 511);
+        let mut quake2 = b"\xff\xff\xff\xffprint\n".to_vec();
+        quake2.extend_from_slice(quake2_info.as_bytes());
+        quake2.push(b'\n');
+        for _ in 0..256 {
+            quake2.extend_from_slice(b"x\n");
+        }
+        assert!(quake2.len() <= 1_400);
+        assert!(parse_quake2_status(&quake2).is_ok());
+        quake2.extend_from_slice(b"x\n");
+        assert_eq!(
+            parse_quake2_status(&quake2),
+            Err(UdpSafeCodecError::MalformedResponse)
+        );
+
+        let request = build_quake3_info(TOKEN);
+        let mut quake3 = b"\xff\xff\xff\xffinfoResponse\n\\challenge\\".to_vec();
+        quake3.extend_from_slice(&request[b"\xff\xff\xff\xffgetinfo ".len()..]);
+        quake3.extend_from_slice(b"\\hostname\\");
+        quake3.extend(std::iter::repeat_n(b'h', 300));
+        assert!(quake3.len() > 255 && quake3.len() <= 1_041);
+        let parsed =
+            parse_udp_catalogue_response(UdpCatalogueProbe::Quake3Info, &request, &quake3).unwrap();
+        assert_eq!(parsed.confidence, 3);
+        let challenge = b"3031323334353637";
+        let challenge_offset = quake3
+            .windows(challenge.len())
+            .position(|value| value == challenge)
+            .unwrap();
+        quake3[challenge_offset] ^= 1;
+        assert_eq!(
+            parse_quake3_info(&request, &quake3),
+            Err(UdpSafeCodecError::WrongTransaction)
+        );
+
+        let mumble_request = build_mumble_extended_ping(TOKEN);
+        let mut mumble_response = 0x0001_0501_u32.to_be_bytes().to_vec();
+        mumble_response.extend_from_slice(&mumble_request[4..12]);
+        mumble_response.extend_from_slice(&2_u32.to_be_bytes());
+        mumble_response.extend_from_slice(&10_u32.to_be_bytes());
+        mumble_response.extend_from_slice(&72_000_u32.to_be_bytes());
+        mumble_response[4] ^= 1;
+        assert_eq!(
+            parse_mumble_extended_ping(&mumble_request, &mumble_response),
+            Err(UdpSafeCodecError::WrongTransaction)
+        );
     }
 
     #[test]
@@ -1635,6 +1927,10 @@ mod tests {
             UdpCatalogueProbe::DnsChaosVersion,
             UdpCatalogueProbe::NtpControlReadVariables,
             UdpCatalogueProbe::SlpServiceAgent,
+            UdpCatalogueProbe::RipV1Table,
+            UdpCatalogueProbe::Quake2Status,
+            UdpCatalogueProbe::Quake3Info,
+            UdpCatalogueProbe::MumbleExtendedPing,
         ] {
             let request = build_udp_catalogue_request(probe, TOKEN, context(1)).unwrap();
             let response = phase31_response(probe, &request);
@@ -1645,6 +1941,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive canonical-response fixture keeps catalogue coverage visibly complete"
+    )]
     fn phase31_response(probe: UdpCatalogueProbe, request: &[u8]) -> Vec<u8> {
         match probe {
             UdpCatalogueProbe::Echo => request.to_vec(),
@@ -1734,6 +2034,35 @@ mod tests {
                 value.extend_from_slice(&[0, 2, b'e', b'n', 0, 0, 0, 0]);
                 value
             }
+            UdpCatalogueProbe::RipV1Table => {
+                let mut value = vec![2, 1, 0, 0];
+                value.extend_from_slice(&2_u16.to_be_bytes());
+                value.extend_from_slice(&0_u16.to_be_bytes());
+                value.extend_from_slice(&[192, 0, 2, 0]);
+                value.extend_from_slice(&[0; 8]);
+                value.extend_from_slice(&1_u32.to_be_bytes());
+                value
+            }
+            UdpCatalogueProbe::Quake2Status => {
+                b"\xff\xff\xff\xffprint\n\\hostname\\fixture\\mapname\\base1\\maxclients\\8\\version\\3.21\n0 1 player\n"
+                    .to_vec()
+            }
+            UdpCatalogueProbe::Quake3Info => {
+                let mut value = b"\xff\xff\xff\xffinfoResponse\n\\challenge\\".to_vec();
+                value.extend_from_slice(&request[b"\xff\xff\xff\xffgetinfo ".len()..]);
+                value.extend_from_slice(
+                    b"\\protocol\\68\\hostname\\fixture\\mapname\\q3dm1\\clients\\1\\sv_maxclients\\8",
+                );
+                value
+            }
+            UdpCatalogueProbe::MumbleExtendedPing => {
+                let mut value = 0x0001_0501_u32.to_be_bytes().to_vec();
+                value.extend_from_slice(&request[4..12]);
+                value.extend_from_slice(&2_u32.to_be_bytes());
+                value.extend_from_slice(&10_u32.to_be_bytes());
+                value.extend_from_slice(&72_000_u32.to_be_bytes());
+                value
+            }
             _ => unreachable!(),
         }
     }
@@ -1813,6 +2142,10 @@ mod tests {
             UdpCatalogueProbe::DnsChaosVersion,
             UdpCatalogueProbe::NtpControlReadVariables,
             UdpCatalogueProbe::SlpServiceAgent,
+            UdpCatalogueProbe::RipV1Table,
+            UdpCatalogueProbe::Quake2Status,
+            UdpCatalogueProbe::Quake3Info,
+            UdpCatalogueProbe::MumbleExtendedPing,
         ] {
             let request = build_udp_catalogue_request(probe, TOKEN, context(1)).unwrap();
             for length in 0..request.len().min(48) {

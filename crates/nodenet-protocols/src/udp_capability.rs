@@ -350,6 +350,46 @@ pub static UDP_CAPABILITY_LEDGER: &[UdpCapabilityEntry] = &[
         "https://www.rfc-editor.org/rfc/rfc2608",
         "bounded unicast service-agent request"
     ),
+    capability!(
+        "ripv1-table-probe",
+        "network-discovery",
+        UnsafeOptIn,
+        [34],
+        "https://www.rfc-editor.org/rfc/rfc1058",
+        "single-datagram compatibility probe with strict route validation"
+    ),
+    discovery_capability!(
+        "ripv1-route-discovery",
+        "network-discovery",
+        UnsafeOptIn,
+        [10],
+        "https://www.rfc-editor.org/rfc/rfc1058",
+        "bounded ten-datagram explicit-target route discovery with typed topology"
+    ),
+    capability!(
+        "quake2-status",
+        "game-discovery",
+        UnsafeOptIn,
+        [35],
+        "https://github.com/yquake2/yquake2",
+        "bounded connectionless status response"
+    ),
+    capability!(
+        "quake3-info",
+        "game-discovery",
+        UnsafeOptIn,
+        [36],
+        "https://github.com/id-Software/Quake-III-Arena",
+        "challenge-correlated bounded server information"
+    ),
+    capability!(
+        "mumble-extended-ping",
+        "voice",
+        UnsafeOptIn,
+        [37],
+        "https://github.com/mumble-voip/mumble",
+        "timestamp-correlated version and capacity response"
+    ),
     discovery_capability!(
         "mdns-dns-sd",
         "directory",

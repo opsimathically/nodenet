@@ -27,6 +27,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run ci
+      - name: Run raw socket privileged matrix
+        run: >-
+          sudo env NODENETRAW_NODE="$(command -v node)" PATH="$(dirname
+          "$(command -v
+          node)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          npm run test:privileged
+      - name: Run raw event and traceroute stress
+        run: >-
+          sudo env NODENETRAW_NODE="$(command -v node)" PATH="$(dirname
+          "$(command -v
+          node)"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          sh -c 'npm run test:phase11:stress && npm run test:phase15:stress'
       - run: npm run build:native:release && npm run build:typescript
         env:
           CARGO_INCREMENTAL: "0"
