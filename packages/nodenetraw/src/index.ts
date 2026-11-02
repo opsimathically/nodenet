@@ -1,0 +1,4815 @@
+import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
+import { isIPv4, isIPv6 } from "node:net";
+import { clearTimeout, setTimeout } from "node:timers";
+import { EventReceiveController } from "./internal/event-controller.js";
+import {
+  createInternalFinalizers,
+  type InternalFinalizers,
+} from "./internal/finalizers.js";
+import * as icmpCodec from "./internal/icmp.js";
+import * as traceroute from "./internal/traceroute.js";
+import type {
+  IcmpChecksumStatus,
+  IcmpAddressMaskInfo,
+  IcmpDestinationUnreachableClassification,
+  IcmpDestinationUnreachableCode,
+  IcmpEchoQuoteMatchOptions,
+  IcmpEchoQuoteMatchResult,
+  IcmpMessage,
+  IcmpParseFailure,
+  IcmpParseOptions,
+  IcmpParseResult,
+  IcmpValidationIssue,
+  IcmpValidationResult,
+  IcmpTimestampReply,
+  IcmpTimestampReplyTimes,
+  IcmpTimestampValue,
+  ParsedIcmpTimestampRequest,
+  ParsedIcmpPacket,
+  ParsedIcmpQuote,
+  ParsedIpv4Header,
+} from "./internal/icmp.js";
+
+export {
+  ICMP_ADDRESS,
+  ICMP_ADDRESSREPLY,
+  ICMP_DEST_UNREACH,
+  ICMP_ECHO,
+  ICMP_ECHOREPLY,
+  ICMP_EXC_FRAGTIME,
+  ICMP_EXC_TTL,
+  ICMP_FRAG_NEEDED,
+  ICMP_HOST_ANO,
+  ICMP_HOST_ISOLATED,
+  ICMP_HOST_UNKNOWN,
+  ICMP_HOST_UNREACH,
+  ICMP_HOST_UNR_TOS,
+  ICMP_NET_ANO,
+  ICMP_NET_UNKNOWN,
+  ICMP_NET_UNREACH,
+  ICMP_NET_UNR_TOS,
+  ICMP_PARAMETERPROB,
+  ICMP_PARAMPROB_BAD_LENGTH,
+  ICMP_PARAMPROB_ERRATPTR,
+  ICMP_PARAMPROB_LENGTH,
+  ICMP_PARAMPROB_MISSING_OPTION,
+  ICMP_PARAMPROB_OPTABSENT,
+  ICMP_PARAMPROB_POINTER,
+  ICMP_PKT_FILTERED,
+  ICMP_PORT_UNREACH,
+  ICMP_PREC_CUTOFF,
+  ICMP_PREC_VIOLATION,
+  ICMP_PROT_UNREACH,
+  ICMP_REDIRECT,
+  ICMP_REDIR_HOST,
+  ICMP_REDIR_HOSTTOS,
+  ICMP_REDIR_NET,
+  ICMP_REDIR_NETTOS,
+  ICMP_ROUTERADVERT,
+  ICMP_ROUTERSOLICIT,
+  ICMP_SR_FAILED,
+  ICMP_TIMESTAMP,
+  ICMP_TIMESTAMPREPLY,
+  ICMP_TIME_EXCEEDED,
+} from "./internal/icmp.js";
+export type {
+  IcmpChecksumPolicy,
+  IcmpChecksumStatus,
+  IcmpConformance,
+  IcmpAddressMaskInfo,
+  IcmpAddressMaskReply,
+  IcmpAddressMaskRequest,
+  IcmpDestinationUnreachable,
+  IcmpDestinationUnreachableCategory,
+  IcmpDestinationUnreachableClassification,
+  IcmpDestinationUnreachableCode,
+  IcmpEchoReply,
+  IcmpEchoRequest,
+  IcmpEchoQuoteMatchOptions,
+  IcmpEchoQuoteMatchResult,
+  IcmpExtensionChecksumStatus,
+  IcmpExtensionObject,
+  IcmpMessage,
+  IcmpParameterProblem,
+  IcmpParameterProblemCode,
+  IcmpParseFailure,
+  IcmpParseFailureReason,
+  IcmpParseOptions,
+  IcmpParseResult,
+  IcmpValidationIssue,
+  IcmpValidationResult,
+  IcmpRedirect,
+  IcmpRedirectCode,
+  IcmpRouterAdvertisement,
+  IcmpRouterAdvertisementEntry,
+  IcmpRouterSolicitation,
+  IcmpTimestampClassification,
+  IcmpTimestampReply,
+  IcmpTimestampReplyTimes,
+  IcmpTimestampRequest,
+  IcmpTimestampValue,
+  IcmpTimeExceeded,
+  IcmpTimeExceededCode,
+  ParsedIcmpDestinationUnreachable,
+  ParsedIcmpEchoReply,
+  ParsedIcmpEchoRequest,
+  ParsedIcmpExtensionObject,
+  ParsedIcmpExtensions,
+  ParsedIcmpMessage,
+  ParsedIcmpPacket,
+  ParsedIcmpParameterProblem,
+  ParsedIcmpQuote,
+  ParsedIcmpRedirect,
+  ParsedIcmpRouterAdvertisement,
+  ParsedIcmpRouterAdvertisementEntry,
+  ParsedIcmpRouterSolicitation,
+  ParsedIcmpTimestampReply,
+  ParsedIcmpTimestampRequest,
+  ParsedIcmpAddressMaskReply,
+  ParsedIcmpAddressMaskRequest,
+  ParsedIcmpTimeExceeded,
+  ParsedQuotedIcmpPrefix,
+  ParsedIpv4Header,
+  ParsedUnknownCodeIcmpMessage,
+  ParsedUnknownIcmpMessage,
+} from "./internal/icmp.js";
+export type {
+  IcmpTracerouteExtensionSummary,
+  IcmpTracerouteHopResult,
+  IcmpTracerouteIpv4Destination,
+  IcmpTracerouteMatch,
+  IcmpTracerouteMatchStrength,
+  IcmpTracerouteProbe,
+  IcmpTracerouteProbeOptions,
+  IcmpTracerouteProbeResult,
+  IcmpTracerouteProgress,
+  IcmpTracerouteResult,
+  IcmpTracerouteTermination,
+  IcmpTracerouteTimeoutKind,
+  TraceIcmpRouteOptions,
+} from "./internal/traceroute.js";
+
+const MAX_PACKET_LENGTH = 65_535;
+const DEFAULT_CONTROL_CAPACITY = 4 * 1024;
+const MAX_CONTROL_CAPACITY = 64 * 1024;
+const MAX_SOCKET_BUFFER_SIZE = 16 * 1024 * 1024;
+const OPEN_OPERATION_ID = 0;
+const MAX_OPERATION_ID = 0xffff_ffff;
+
+/** Common Linux IP protocol numbers accepted by IPv4/IPv6 raw sockets. */
+export const IPPROTO_ICMP = 1;
+export const IPPROTO_IGMP = 2;
+export const IPPROTO_IPIP = 4;
+export const IPPROTO_TCP = 6;
+export const IPPROTO_UDP = 17;
+export const IPPROTO_IPV6 = 41;
+export const IPPROTO_GRE = 47;
+export const IPPROTO_ESP = 50;
+export const IPPROTO_AH = 51;
+export const IPPROTO_ICMPV6 = 58;
+export const IPPROTO_SCTP = 132;
+export const IPPROTO_UDPLITE = 136;
+export const IPPROTO_RAW = 255;
+
+/** Common Linux Ethernet protocol identifiers accepted by packet sockets. */
+export const ETH_P_ALL = 0x0003;
+export const ETH_P_IP = 0x0800;
+export const ETH_P_ARP = 0x0806;
+export const ETH_P_8021Q = 0x8100;
+export const ETH_P_IPV6 = 0x86dd;
+export const ETH_P_8021AD = 0x88a8;
+
+export type RawSocketStatus = "open" | "closing" | "closed";
+
+export type RawSocketErrorKind =
+  | "aborted"
+  | "internal"
+  | "invalidArgument"
+  | "invalidState"
+  | "queueFull"
+  | "reactorClosed"
+  | "receiverActive"
+  | "socketClosed"
+  | "system"
+  | "malformedControl"
+  | "unsupported";
+
+export interface RawSocketOptions {
+  /** Defaults to `ipv4` for compatibility. */
+  family?: RawSocketFamily;
+  /** Linux IP protocol number from 1 through 255. */
+  protocol: number;
+  /** Required for packet sockets; raw includes the link header, cooked omits it. */
+  mode?: PacketSocketMode;
+}
+export type RawSocketFamily = "ipv4" | "ipv6" | "packet";
+
+export interface RawSocketEventEmitterOptions {
+  readonly dataCapacity?: number;
+  readonly controlCapacity?: number;
+  readonly errorQueue?: boolean;
+}
+
+export type RawSocketEventEmitterStatus =
+  | "idle"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "detaching"
+  | "detached"
+  | "closing"
+  | "closed";
+
+export interface RawSocketEventMap {
+  message: [message: ReceivedMessage];
+  error: [error: unknown];
+  close: [];
+}
+export type PacketSocketMode = "raw" | "cooked";
+export interface ClassicBpfInstruction {
+  readonly code: number;
+  readonly jumpTrue: number;
+  readonly jumpFalse: number;
+  readonly value: number;
+}
+export type PacketMembershipKind = "promiscuous" | "allMulticast" | "multicast";
+export interface PacketMembership {
+  readonly interfaceIndex: number;
+  readonly kind: PacketMembershipKind;
+  readonly address?: Uint8Array;
+}
+export type PacketFanoutMode =
+  | "hash"
+  | "loadBalance"
+  | "cpu"
+  | "rollover"
+  | "random"
+  | "queueMapping"
+  | "classicBpf"
+  | "ebpf";
+export interface PacketStatistics {
+  readonly packets: number;
+  readonly drops: number;
+}
+export interface PacketAuxdata {
+  readonly status: number;
+  readonly originalLength: number;
+  readonly snapshotLength: number;
+  readonly macOffset: number;
+  readonly networkOffset: number;
+  readonly vlanTci: number;
+  readonly vlanTpid: number;
+}
+
+export interface PacketRingConfig {
+  readonly blockSize?: number;
+  readonly blockCount?: number;
+  readonly frameSize?: number;
+  readonly retireTimeoutMs?: number;
+}
+
+export class PacketRingFrameLease {
+  #data: Buffer | undefined;
+  readonly originalLength: number;
+  readonly snapshotLength: number;
+  readonly timestamp: bigint;
+  readonly status: number;
+  readonly vlanTci: number;
+  readonly vlanTpid: number;
+
+  /** @internal Constructed by `RawSocket.receiveRingFrame()`. */
+  constructor(
+    data: Buffer,
+    originalLength: number,
+    snapshotLength: number,
+    seconds: number,
+    nanoseconds: number,
+    status: number,
+    vlanTci: number,
+    vlanTpid: number,
+  ) {
+    this.#data = data;
+    this.originalLength = originalLength;
+    this.snapshotLength = snapshotLength;
+    this.timestamp = BigInt(seconds) * 1_000_000_000n + BigInt(nanoseconds);
+    this.status = status;
+    this.vlanTci = vlanTci;
+    this.vlanTpid = vlanTpid;
+  }
+
+  get released(): boolean {
+    return this.#data === undefined;
+  }
+
+  read(): Buffer {
+    if (this.#data === undefined)
+      throw invalidArgument(
+        "receiveRingFrame",
+        "packet ring frame lease is released",
+      );
+    return Buffer.from(this.#data);
+  }
+
+  release(): void {
+    this.#data = undefined;
+  }
+}
+
+export interface RawSocketOptionMap {
+  broadcast: boolean;
+  ipTtl: number;
+  ipTypeOfService: number;
+  receiveBufferSize: number;
+  sendBufferSize: number;
+  receivePacketInfo: boolean;
+  receiveTtl: boolean;
+  receiveTypeOfService: boolean;
+  receiveTimestampNanoseconds: boolean;
+  receiveQueueOverflow: boolean;
+  receiveErrors: boolean;
+  bindToDevice: string | null;
+  ipv6Only: boolean;
+  ipv6UnicastHops: number;
+  ipv6TrafficClass: number;
+  ipv6MulticastHops: number;
+  receiveHopLimit: boolean;
+  receiveTrafficClass: boolean;
+  headerIncluded: boolean;
+  freebind: boolean;
+  transparent: boolean;
+  priority: number;
+  mark: number;
+  pathMtuDiscovery: number;
+  multicastTtl: number;
+  multicastLoop: boolean;
+  ipv6ChecksumOffset: number;
+  busyPollMicroseconds: number;
+}
+
+export type SendMessageFlag = "dontRoute";
+export type ReceiveMessageFlag = "peek" | "errorQueue";
+export type ReceivedMessageFlag = "endOfRecord" | "outOfBand" | "errorQueue";
+
+export interface Ipv4MessageAddress {
+  readonly family: "ipv4";
+  readonly address: string;
+}
+export interface Ipv6MessageAddress {
+  readonly family: "ipv6";
+  readonly address: string;
+  readonly scopeId?: number;
+  readonly flowInfo?: number;
+}
+export interface PacketMessageAddress {
+  readonly family: "packet";
+  readonly interfaceIndex: number;
+  readonly protocol: number;
+  readonly address?: Uint8Array;
+  readonly hardwareType?: number;
+  readonly packetType?: number;
+}
+export type IpMessageAddress =
+  Ipv4MessageAddress | Ipv6MessageAddress | PacketMessageAddress;
+
+export type SendControlMessage =
+  | {
+      readonly kind: "ipv4PacketInfo";
+      readonly interfaceIndex?: number;
+      readonly sourceAddress?: string;
+    }
+  | { readonly kind: "ipv4Ttl"; readonly value: number }
+  | {
+      readonly kind: "ipv6PacketInfo";
+      readonly interfaceIndex?: number;
+      readonly sourceAddress?: string;
+    }
+  | {
+      readonly kind: "ipv6HopLimit" | "ipv6TrafficClass";
+      readonly value: number;
+    };
+
+export type ReceivedControlMessage =
+  | {
+      readonly kind: "ipv4PacketInfo";
+      readonly interfaceIndex: number;
+      readonly selectedAddress: string;
+      readonly destinationAddress: string;
+    }
+  | { readonly kind: "ipv4Ttl" | "ipv4TypeOfService"; readonly value: number }
+  | {
+      readonly kind: "timestampNanoseconds";
+      readonly seconds: bigint;
+      readonly nanoseconds: number;
+      readonly timestamp: bigint;
+    }
+  | { readonly kind: "receiveQueueOverflow"; readonly value: number }
+  | {
+      readonly kind: "ipv4ExtendedError";
+      readonly errno: number;
+      readonly origin: number;
+      readonly type: number;
+      readonly code: number;
+      readonly info: number;
+      readonly data: number;
+      readonly offender?: string;
+    }
+  | {
+      readonly kind: "unknown";
+      readonly level: number;
+      readonly type: number;
+      readonly data: Buffer;
+    }
+  | {
+      readonly kind: "ipv6PacketInfo";
+      readonly interfaceIndex: number;
+      readonly destinationAddress: string;
+    }
+  | {
+      readonly kind: "ipv6HopLimit" | "ipv6TrafficClass";
+      readonly value: number;
+    }
+  | {
+      readonly kind: "ipv6ExtendedError";
+      readonly errno: number;
+      readonly origin: number;
+      readonly type: number;
+      readonly code: number;
+      readonly info: number;
+      readonly data: number;
+      readonly offender?: string;
+    };
+
+export interface SendMessageRequest {
+  readonly data: Uint8Array;
+  readonly destination: IpMessageAddress;
+  readonly flags?: readonly SendMessageFlag[];
+  readonly control?: readonly SendControlMessage[];
+  readonly signal?: AbortSignal;
+}
+
+export interface ReceiveMessageOptions {
+  readonly dataCapacity?: number;
+  readonly controlCapacity?: number;
+  readonly flags?: readonly ReceiveMessageFlag[];
+  readonly signal?: AbortSignal;
+}
+
+export interface BatchSendRequest {
+  readonly data: Uint8Array;
+  readonly destination: IpMessageAddress;
+}
+
+export interface SendBatchResult {
+  readonly requested: number;
+  readonly completed: number;
+  readonly results: readonly {
+    readonly index: number;
+    readonly bytesSent: number;
+  }[];
+}
+
+export interface ReceiveBatchOptions {
+  readonly count: number;
+  readonly dataCapacity?: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface ReceiveBatchResult {
+  readonly completed: number;
+  readonly messages: readonly ReceivedMessage[];
+}
+
+export interface ReceivedMessage {
+  readonly data: Buffer;
+  readonly source: IpMessageAddress | undefined;
+  readonly dataLength: number;
+  readonly dataTruncated: boolean;
+  readonly controlTruncated: boolean;
+  readonly flags: readonly ReceivedMessageFlag[];
+  readonly control: readonly ReceivedControlMessage[];
+  readonly ipv4: Ipv4PacketMetadata | undefined;
+  readonly packetAuxdata: PacketAuxdata | undefined;
+}
+
+export type IcmpReceivedParseResult =
+  | {
+      readonly ok: true;
+      readonly received: ReceivedMessage;
+      readonly ipv4: ParsedIpv4Header;
+      readonly packet: ParsedIcmpPacket;
+      readonly incomplete: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly received: ReceivedMessage;
+      readonly error: IcmpParseFailure;
+      readonly checksumStatus: IcmpChecksumStatus;
+      readonly issues: readonly IcmpValidationIssue[];
+      readonly ipv4?: ParsedIpv4Header;
+    };
+
+export interface IcmpSendOptions {
+  readonly destination: Ipv4MessageAddress;
+  readonly ttl?: number;
+  readonly flags?: readonly SendMessageFlag[];
+  readonly control?: readonly SendControlMessage[];
+  readonly signal?: AbortSignal;
+}
+
+export interface IcmpReceiveOptions {
+  readonly dataCapacity?: number;
+  readonly controlCapacity?: number;
+  readonly signal?: AbortSignal;
+  readonly parse?: IcmpParseOptions;
+}
+
+export interface IcmpEchoReplyMatch {
+  readonly identifier: number;
+  readonly sequence: number;
+  readonly expectedSourceAddress?: string;
+  readonly expectedDestinationAddress?: string;
+  readonly token?: Uint8Array;
+}
+
+export interface AbortableOperationOptions {
+  readonly signal?: AbortSignal;
+}
+
+export type RawSocketOptionName = keyof RawSocketOptionMap;
+
+export interface Ipv4PacketMetadata {
+  destinationAddress: string;
+  protocol: number;
+  ttl: number;
+  typeOfService: number;
+  headerLength: number;
+  totalLength: number;
+  identification: number;
+  fragmentOffset: number;
+  dontFragment: boolean;
+  moreFragments: boolean;
+}
+
+export interface ReceivedPacket {
+  /** The received IPv4 packet bytes. Raw IPv4 receives include the IP header. */
+  data: Buffer;
+  /** Dotted-decimal IPv4 source address reported by Linux. */
+  sourceAddress: string;
+  /** Original datagram length reported by Linux, before capture truncation. */
+  packetLength: number;
+  /** True when the packet exceeded the requested receive buffer length. */
+  truncated: boolean;
+  /** Parsed IPv4 header fields when the captured bytes contain a valid header. */
+  ipv4: Ipv4PacketMetadata | undefined;
+}
+
+type NativeIpv4PacketMetadata = Ipv4PacketMetadata;
+
+interface NativeErrorData {
+  kind: string;
+  code: string;
+  operation: string;
+  errno?: number;
+  errnoName?: string;
+  message: string;
+}
+
+interface NativeCompletion {
+  operationId: number;
+  kind: string;
+  bytesSent?: number;
+  data?: Buffer;
+  sourceAddress?: string;
+  packetLength?: number;
+  truncated?: boolean;
+  ipv4?: NativeIpv4PacketMetadata;
+  localAddress?: string;
+  localFamily?: string;
+  localScopeId?: number;
+  localFlowInfo?: number;
+  optionValue?: number;
+  deviceValue?: string;
+  message?: NativeReceivedMessage;
+  rawOption?: Buffer;
+  statisticsPackets?: number;
+  statisticsDrops?: number;
+  batchMessages?: NativeReceivedMessage[];
+  batchLengths?: number[];
+  batchRequested?: number;
+  ringData?: Buffer;
+  ringOriginalLength?: number;
+  ringSnapshotLength?: number;
+  ringSeconds?: number;
+  ringNanoseconds?: number;
+  ringStatus?: number;
+  ringVlanTci?: number;
+  ringVlanTpid?: number;
+  error?: NativeErrorData;
+}
+
+interface NativeSendControlMessage {
+  kind: string;
+  interfaceIndex?: number;
+  sourceAddress?: string;
+  value?: number;
+}
+interface NativeReceivedControlMessage {
+  kind: string;
+  interfaceIndex?: number;
+  selectedAddress?: string;
+  destinationAddress?: string;
+  value?: number;
+  seconds?: string;
+  nanoseconds?: number;
+  errno?: number;
+  origin?: number;
+  errorType?: number;
+  errorCode?: number;
+  info?: number;
+  extendedData?: number;
+  offender?: string;
+  level?: number;
+  messageType?: number;
+  data?: Buffer;
+}
+interface NativeReceivedMessage {
+  data: Buffer;
+  sourceAddress?: string;
+  sourceFamily?: string;
+  sourceScopeId?: number;
+  sourceFlowInfo?: number;
+  sourceInterfaceIndex?: number;
+  sourceProtocol?: number;
+  sourceHardwareAddress?: Buffer;
+  sourceHardwareType?: number;
+  sourcePacketType?: number;
+  packetAuxStatus?: number;
+  packetAuxOriginalLength?: number;
+  packetAuxSnapshotLength?: number;
+  packetAuxMacOffset?: number;
+  packetAuxNetworkOffset?: number;
+  packetAuxVlanTci?: number;
+  packetAuxVlanTpid?: number;
+  dataLength: number;
+  dataTruncated: boolean;
+  controlTruncated: boolean;
+  endOfRecord: boolean;
+  outOfBand: boolean;
+  errorQueue: boolean;
+  control: NativeReceivedControlMessage[];
+  ipv4?: NativeIpv4PacketMetadata;
+}
+
+interface NativeSubmitResult {
+  accepted: boolean;
+  error?: NativeErrorData;
+}
+
+interface NativeBatchSendMessage {
+  data: Buffer;
+  destination: string;
+  destinationFamily: string;
+  scopeId: number;
+  flowInfo: number;
+  packetProtocol: number;
+  interfaceIndex: number;
+  hardwareAddress: Buffer;
+}
+
+interface NativePacketRingConfig {
+  blockSize: number;
+  blockCount: number;
+  frameSize: number;
+  retireTimeoutMs: number;
+}
+
+type NativeHandle = object;
+
+interface NativeBinding {
+  nativeCancel(handle: NativeHandle, operationId: number): boolean;
+  nativeBind(
+    handle: NativeHandle,
+    operationId: number,
+    address: string,
+  ): NativeSubmitResult;
+  nativeBindIpv6(
+    handle: NativeHandle,
+    operationId: number,
+    address: string,
+    scopeId: number,
+    flowInfo: number,
+  ): NativeSubmitResult;
+  nativeBindPacket(
+    handle: NativeHandle,
+    operationId: number,
+    interfaceIndex: number,
+    protocol: number,
+  ): NativeSubmitResult;
+  nativeConnectIpv6(
+    handle: NativeHandle,
+    operationId: number,
+    address: string,
+    scopeId: number,
+    flowInfo: number,
+  ): NativeSubmitResult;
+  nativeConnectIpv4(
+    handle: NativeHandle,
+    operationId: number,
+    address: string,
+  ): NativeSubmitResult;
+  nativeDisconnect(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativeClose(handle: NativeHandle, operationId: number): NativeSubmitResult;
+  nativeGetOption(
+    handle: NativeHandle,
+    operationId: number,
+    option: string,
+  ): NativeSubmitResult;
+  nativeGetIpv6Option(
+    handle: NativeHandle,
+    operationId: number,
+    option: string,
+  ): NativeSubmitResult;
+  nativeGetBindToDevice(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativeSetBindToDevice(
+    handle: NativeHandle,
+    operationId: number,
+    device?: string,
+  ): NativeSubmitResult;
+  nativeLocalAddress(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativeOpenRawSocket(
+    family: string,
+    mode: string | undefined,
+    protocol: number,
+    callback: (completion: NativeCompletion) => void,
+  ): NativeHandle | NativeErrorData;
+  nativeSmokeTest(): string;
+  nativeSocketStatus(handle: NativeHandle): string;
+  nativeSubmitReceive(
+    handle: NativeHandle,
+    operationId: number,
+    bufferLength: number,
+  ): NativeSubmitResult;
+  nativeSubmitSend(
+    handle: NativeHandle,
+    operationId: number,
+    data: Buffer,
+    destination: string,
+  ): NativeSubmitResult;
+  nativeSubmitSendMessage(
+    handle: NativeHandle,
+    operationId: number,
+    data: Buffer,
+    destination: string,
+    destinationFamily: string,
+    scopeId: number,
+    flowInfo: number,
+    packetProtocol: number,
+    interfaceIndex: number,
+    hardwareAddress: Buffer,
+    dontRoute: boolean,
+    control: NativeSendControlMessage[],
+  ): NativeSubmitResult;
+  nativeInterfaceIndex(name: string): number | NativeErrorData;
+  nativeInterfaceName(index: number): string | NativeErrorData;
+  nativeSubmitReceiveMessage(
+    handle: NativeHandle,
+    operationId: number,
+    bufferLength: number,
+    controlCapacity: number,
+    peek: boolean,
+    errorQueue: boolean,
+  ): NativeSubmitResult;
+  nativeSubmitSendBatch(
+    handle: NativeHandle,
+    operationId: number,
+    messages: NativeBatchSendMessage[],
+  ): NativeSubmitResult;
+  nativeSubmitReceiveBatch(
+    handle: NativeHandle,
+    operationId: number,
+    count: number,
+    bufferLength: number,
+  ): NativeSubmitResult;
+  nativeConfigurePacketRing(
+    handle: NativeHandle,
+    operationId: number,
+    config: NativePacketRingConfig,
+  ): NativeSubmitResult;
+  nativeReceiveRingFrame(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativeSetOption(
+    handle: NativeHandle,
+    operationId: number,
+    option: string,
+    value: number,
+  ): NativeSubmitResult;
+  nativeSetIpv6Option(
+    handle: NativeHandle,
+    operationId: number,
+    option: string,
+    value: number,
+  ): NativeSubmitResult;
+  nativeGetRawOption(
+    handle: NativeHandle,
+    operationId: number,
+    level: number,
+    name: number,
+    maximum: number,
+  ): NativeSubmitResult;
+  nativeSetRawOption(
+    handle: NativeHandle,
+    operationId: number,
+    level: number,
+    name: number,
+    value: Buffer,
+  ): NativeSubmitResult;
+  nativeAttachClassicFilter(
+    handle: NativeHandle,
+    operationId: number,
+    program: ClassicBpfInstruction[],
+  ): NativeSubmitResult;
+  nativeAttachEbpfFilter(
+    handle: NativeHandle,
+    operationId: number,
+    fd: number,
+  ): NativeSubmitResult;
+  nativeDetachFilter(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativeLockFilter(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+  nativePacketMembership(
+    handle: NativeHandle,
+    operationId: number,
+    interfaceIndex: number,
+    kind: string,
+    address: Buffer,
+    add: boolean,
+  ): NativeSubmitResult;
+  nativePacketAuxdata(
+    handle: NativeHandle,
+    operationId: number,
+    enabled: boolean,
+  ): NativeSubmitResult;
+  nativePacketFanout(
+    handle: NativeHandle,
+    operationId: number,
+    group: number,
+    mode: number,
+  ): NativeSubmitResult;
+  nativePacketStatistics(
+    handle: NativeHandle,
+    operationId: number,
+  ): NativeSubmitResult;
+}
+
+interface PendingOperation {
+  resolve(completion: NativeCompletion): void;
+  reject(error: RawSocketError): void;
+  finalizers?: InternalFinalizers;
+}
+
+type ReceiveLane = "normal" | "errorQueue";
+
+interface SocketCloseObserver {
+  closing(): void;
+  closed(error: unknown, rejected: boolean): void;
+}
+
+interface SocketState {
+  readonly pending: Map<number, PendingOperation>;
+  readonly directReceives: Record<ReceiveLane, number>;
+  readonly eventClaims: Map<ReceiveLane, symbol>;
+  readonly ringConfigurations: Set<symbol>;
+  readonly closeObservers: Set<SocketCloseObserver>;
+  ringFrameReceives: number;
+  ringActive: boolean;
+}
+
+interface ClaimedReceiveOptions {
+  readonly dataCapacity: number;
+  readonly controlCapacity: number;
+  readonly errorQueue: boolean;
+}
+
+interface ValidatedRawSocketOptions {
+  readonly family: RawSocketFamily;
+  readonly mode: PacketSocketMode | undefined;
+  readonly protocol: number;
+}
+
+interface ValidatedIcmpReceivedMessageInput {
+  readonly data: Uint8Array;
+  readonly dataLength: number;
+  readonly dataTruncated: boolean;
+  readonly ipv4: Ipv4PacketMetadata | undefined;
+  readonly sourceAddress: string | undefined;
+}
+
+interface SocketInternals {
+  readonly state: SocketState;
+  readonly isOpen: () => boolean;
+  readonly receiveClaimed: (
+    claim: symbol,
+    options: ClaimedReceiveOptions,
+    signal: AbortSignal,
+  ) => Promise<ReceivedMessage>;
+}
+
+const socketInternals = new WeakMap<RawSocket, SocketInternals>();
+
+const require = createRequire(import.meta.url);
+const nativeBinding = require("../build/native/binding.cjs") as NativeBinding;
+
+/** A stable error raised by the public raw-socket API. */
+export class RawSocketError extends Error {
+  override readonly name = "RawSocketError";
+  readonly kind: RawSocketErrorKind;
+  readonly code: string;
+  readonly operation: string;
+  readonly errno: number | undefined;
+  readonly errnoName: string | undefined;
+
+  constructor(data: NativeErrorData) {
+    super(`${data.operation} failed: ${data.message}`);
+    this.kind = normalizeErrorKind(data.kind);
+    this.code = data.code;
+    this.operation = data.operation;
+    this.errno = data.errno;
+    this.errnoName = data.errnoName;
+  }
+}
+
+/** An owned Linux IPv4, IPv6, or packet socket. */
+export class RawSocket {
+  readonly #handle: NativeHandle;
+  readonly #state: SocketState;
+  readonly #family: RawSocketFamily;
+  readonly #mode: PacketSocketMode | undefined;
+  readonly #protocol: number;
+  #nextOperationId = 1;
+  #closed = false;
+  #closePromise: Promise<void> | undefined;
+
+  private constructor(
+    handle: NativeHandle,
+    state: SocketState,
+    family: RawSocketFamily,
+    mode: PacketSocketMode | undefined,
+    protocol: number,
+  ) {
+    this.#handle = handle;
+    this.#state = state;
+    this.#family = family;
+    this.#mode = mode;
+    this.#protocol = protocol;
+  }
+
+  /**
+   * Creates a nonblocking `AF_INET` or `AF_INET6` `SOCK_RAW` socket.
+   *
+   * Linux normally requires `CAP_NET_RAW` in the governing user namespace.
+   */
+  static open(options: RawSocketOptions): Promise<RawSocket> {
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      let validated: ValidatedRawSocketOptions;
+      try {
+        validated = validateProtocol(options);
+      } catch (error) {
+        reject(normalizeUnknownError(error, "createRawSocket"));
+        return;
+      }
+
+      const state = createSocketState();
+      let socket: RawSocket | undefined;
+      state.pending.set(OPEN_OPERATION_ID, {
+        resolve: () => {
+          if (socket === undefined) {
+            reject(
+              internalError(
+                "registerSocket",
+                "native open completed without a handle",
+              ),
+            );
+          } else {
+            const openedSocket = socket;
+            socketInternals.set(openedSocket, {
+              state,
+              isOpen: () => !openedSocket.#closed,
+              receiveClaimed: (claim, options, signal) =>
+                openedSocket.#receiveMessageClaimed(claim, options, signal),
+            });
+            resolve(openedSocket);
+          }
+        },
+        reject,
+      });
+
+      try {
+        const result = nativeBinding.nativeOpenRawSocket(
+          validated.family,
+          validated.mode,
+          validated.protocol,
+          (completion) => {
+            dispatchCompletion(state, completion);
+          },
+        );
+        if (isNativeErrorData(result)) {
+          state.pending.delete(OPEN_OPERATION_ID);
+          reject(new RawSocketError(result));
+          return;
+        }
+        socket = new RawSocket(
+          result,
+          state,
+          validated.family,
+          validated.mode,
+          validated.protocol,
+        );
+      } catch (error) {
+        state.pending.delete(OPEN_OPERATION_ID);
+        reject(normalizeUnknownError(error, "createRawSocket"));
+      }
+    });
+  }
+
+  /** Current native lifecycle state. */
+  get status(): RawSocketStatus {
+    const status = nativeBinding.nativeSocketStatus(this.#handle);
+    return isRawSocketStatus(status) ? status : "closed";
+  }
+
+  get family(): RawSocketFamily {
+    return this.#family;
+  }
+
+  get packetMode(): PacketSocketMode | undefined {
+    return this.#mode;
+  }
+
+  /** The checked protocol supplied when this socket was opened. */
+  get protocol(): number {
+    return this.#protocol;
+  }
+
+  /** Binds the socket to a local dotted-decimal IPv4 address. */
+  bind(address: string | IpMessageAddress): Promise<void> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("bind"));
+    }
+    try {
+      if (this.#family === "ipv4") {
+        const value =
+          typeof address === "string"
+            ? address
+            : address.family === "ipv4"
+              ? address.address
+              : undefined;
+        validateIpv4Address(value, "bind", "address");
+      } else if (this.#family === "ipv6") {
+        validateIpv6MessageAddress(address, "bind");
+      } else {
+        validatePacketMessageAddress(address, "bind", false);
+      }
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "bind"));
+    }
+
+    return this.#submitVoid("bind", (operationId) => {
+      if (this.#family === "ipv4") {
+        const value =
+          typeof address === "string"
+            ? address
+            : (address as Ipv4MessageAddress).address;
+        return nativeBinding.nativeBind(this.#handle, operationId, value);
+      }
+      if (this.#family === "ipv6") {
+        const value = address as Ipv6MessageAddress;
+        return nativeBinding.nativeBindIpv6(
+          this.#handle,
+          operationId,
+          value.address,
+          value.scopeId ?? 0,
+          value.flowInfo ?? 0,
+        );
+      }
+      const value = address as PacketMessageAddress;
+      return nativeBinding.nativeBindPacket(
+        this.#handle,
+        operationId,
+        value.interfaceIndex,
+        value.protocol,
+      );
+    });
+  }
+
+  /** Returns the currently bound local IPv4 address (`0.0.0.0` if unbound). */
+  localAddress(): Promise<string> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("localAddress"));
+    }
+    if (this.#family !== "ipv4")
+      return Promise.reject(
+        unsupportedError(
+          "localAddress",
+          this.#family === "ipv6"
+            ? "use localMessageAddress() for IPv6"
+            : "packet sockets use bound link addresses",
+        ),
+      );
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (completion.localAddress === undefined) {
+            reject(
+              internalError(
+                "localAddress",
+                "native completion omitted local address",
+              ),
+            );
+          } else {
+            resolve(completion.localAddress);
+          }
+        },
+        reject,
+      });
+      const result = callNative(
+        () => nativeBinding.nativeLocalAddress(this.#handle, operationId),
+        "localAddress",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  localMessageAddress(): Promise<IpMessageAddress> {
+    if (this.#closed) return Promise.reject(socketClosedError("localAddress"));
+    if (this.#family === "packet")
+      return Promise.reject(
+        unsupportedError(
+          "localAddress",
+          "packet sockets use the address supplied to bind()",
+        ),
+      );
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (
+            completion.localAddress === undefined ||
+            completion.localFamily === undefined
+          ) {
+            reject(
+              internalError(
+                "localAddress",
+                "native completion omitted address fields",
+              ),
+            );
+            return;
+          }
+          resolve(
+            completion.localFamily === "ipv6"
+              ? {
+                  family: "ipv6",
+                  address: completion.localAddress,
+                  scopeId: completion.localScopeId ?? 0,
+                  flowInfo: completion.localFlowInfo ?? 0,
+                }
+              : { family: "ipv4", address: completion.localAddress },
+          );
+        },
+        reject,
+      });
+      const result = callNative(
+        () => nativeBinding.nativeLocalAddress(this.#handle, operationId),
+        "localAddress",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  connect(address: Ipv4MessageAddress | Ipv6MessageAddress): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("connect"));
+    try {
+      if (this.#family === "packet")
+        throw unsupportedError(
+          "connect",
+          "packet sockets use per-message link destinations",
+        );
+      if (this.#family === "ipv6")
+        validateIpv6MessageAddress(address, "connect");
+      else {
+        if (address.family !== "ipv4")
+          throw invalidArgument(
+            "connect",
+            "address family must match socket family",
+          );
+        validateIpv4Address(address.address, "connect", "address");
+      }
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "connect"));
+    }
+    return this.#submitVoid("connect", (operationId) =>
+      address.family === "ipv4"
+        ? nativeBinding.nativeConnectIpv4(
+            this.#handle,
+            operationId,
+            address.address,
+          )
+        : nativeBinding.nativeConnectIpv6(
+            this.#handle,
+            operationId,
+            address.address,
+            address.scopeId ?? 0,
+            address.flowInfo ?? 0,
+          ),
+    );
+  }
+
+  disconnect(): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("disconnect"));
+    if (this.#family === "packet")
+      return Promise.reject(
+        unsupportedError(
+          "disconnect",
+          "packet sockets use per-message link destinations",
+        ),
+      );
+    return this.#submitVoid("disconnect", (operationId) =>
+      nativeBinding.nativeDisconnect(this.#handle, operationId),
+    );
+  }
+
+  /** Reads one supported typed Linux socket option. */
+  getOption<Name extends RawSocketOptionName>(
+    name: Name,
+  ): Promise<RawSocketOptionMap[Name]> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("getOption"));
+    }
+    try {
+      validateOptionName(name, "getOption");
+      validateOptionFamily(name, this.#family, "getOption");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "getOption"));
+    }
+
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (name === "bindToDevice") {
+            resolve(
+              (completion.deviceValue ?? null) as RawSocketOptionMap[Name],
+            );
+            return;
+          }
+          if (completion.optionValue === undefined) {
+            reject(
+              internalError("getOption", "native completion omitted value"),
+            );
+          } else {
+            resolve(
+              (isBooleanOption(name)
+                ? completion.optionValue !== 0
+                : completion.optionValue) as RawSocketOptionMap[Name],
+            );
+          }
+        },
+        reject,
+      });
+      const result = callNative(
+        () =>
+          name === "bindToDevice"
+            ? nativeBinding.nativeGetBindToDevice(this.#handle, operationId)
+            : this.#family === "ipv6"
+              ? nativeBinding.nativeGetIpv6Option(
+                  this.#handle,
+                  operationId,
+                  name,
+                )
+              : nativeBinding.nativeGetOption(this.#handle, operationId, name),
+        "getOption",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Sets one supported typed Linux socket option. */
+  setOption<Name extends RawSocketOptionName>(
+    name: Name,
+    value: RawSocketOptionMap[Name],
+  ): Promise<void> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("setOption"));
+    }
+    let encodedValue: number | undefined;
+    try {
+      validateOptionFamily(name, this.#family, "setOption");
+      encodedValue = validateOptionValue(name, value);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "setOption"));
+    }
+
+    return this.#submitVoid("setOption", (operationId) => {
+      if (name === "bindToDevice") {
+        return nativeBinding.nativeSetBindToDevice(
+          this.#handle,
+          operationId,
+          value === null ? undefined : String(value),
+        );
+      }
+      if (encodedValue === undefined) {
+        return {
+          accepted: false,
+          error: errorDataFromUnknown(
+            "missing encoded option value",
+            "setOption",
+          ),
+        };
+      }
+      return this.#family === "ipv6"
+        ? nativeBinding.nativeSetIpv6Option(
+            this.#handle,
+            operationId,
+            name,
+            encodedValue,
+          )
+        : nativeBinding.nativeSetOption(
+            this.#handle,
+            operationId,
+            name,
+            encodedValue,
+          );
+    });
+  }
+
+  getSocketOption(
+    level: number,
+    name: number,
+    maximumLength = 256,
+  ): Promise<Buffer> {
+    if (this.#closed) return Promise.reject(socketClosedError("getOption"));
+    try {
+      validateRawOptionNumbers(level, name, maximumLength, "getOption");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "getOption"));
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (completion.rawOption === undefined) {
+            reject(
+              internalError(
+                "getOption",
+                "native completion omitted raw option bytes",
+              ),
+            );
+          } else {
+            resolve(completion.rawOption);
+          }
+        },
+        reject,
+      });
+      const result = callNative(
+        () =>
+          nativeBinding.nativeGetRawOption(
+            this.#handle,
+            operationId,
+            level,
+            name,
+            maximumLength,
+          ),
+        "getOption",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  setSocketOption(
+    level: number,
+    name: number,
+    value: Uint8Array,
+  ): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("setOption"));
+    try {
+      if (!(value instanceof Uint8Array))
+        throw invalidArgument("setOption", "value must be Uint8Array");
+      validateRawOptionNumbers(
+        level,
+        name,
+        value.byteLength,
+        "setOption",
+        true,
+      );
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "setOption"));
+    }
+    return this.#submitVoid("setOption", (operationId) =>
+      nativeBinding.nativeSetRawOption(
+        this.#handle,
+        operationId,
+        level,
+        name,
+        Buffer.from(value),
+      ),
+    );
+  }
+
+  attachClassicFilter(
+    program: readonly ClassicBpfInstruction[],
+  ): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("attachFilter"));
+    try {
+      validateClassicFilter(program);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "attachFilter"));
+    }
+    return this.#submitVoid("attachFilter", (operationId) =>
+      nativeBinding.nativeAttachClassicFilter(
+        this.#handle,
+        operationId,
+        program.map((instruction) => ({ ...instruction })),
+      ),
+    );
+  }
+  attachEbpfFilter(fd: number): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("attachFilter"));
+    try {
+      validateIntegerRange(fd, 0, 0x7fff_ffff, "attachFilter", "fd");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "attachFilter"));
+    }
+    return this.#submitVoid("attachFilter", (operationId) =>
+      nativeBinding.nativeAttachEbpfFilter(this.#handle, operationId, fd),
+    );
+  }
+  detachFilter(): Promise<void> {
+    return this.#closed
+      ? Promise.reject(socketClosedError("attachFilter"))
+      : this.#submitVoid("attachFilter", (id) =>
+          nativeBinding.nativeDetachFilter(this.#handle, id),
+        );
+  }
+  lockFilter(): Promise<void> {
+    return this.#closed
+      ? Promise.reject(socketClosedError("attachFilter"))
+      : this.#submitVoid("attachFilter", (id) =>
+          nativeBinding.nativeLockFilter(this.#handle, id),
+        );
+  }
+
+  addPacketMembership(membership: PacketMembership): Promise<void> {
+    return this.#packetMembership(membership, true);
+  }
+  dropPacketMembership(membership: PacketMembership): Promise<void> {
+    return this.#packetMembership(membership, false);
+  }
+  setPacketAuxdata(enabled: boolean): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("setOption"));
+    if (this.#family !== "packet")
+      return Promise.reject(
+        invalidArgument("setOption", "packet auxdata requires a packet socket"),
+      );
+    if (typeof enabled !== "boolean")
+      return Promise.reject(
+        invalidArgument("setOption", "enabled must be boolean"),
+      );
+    return this.#submitVoid("setOption", (id) =>
+      nativeBinding.nativePacketAuxdata(this.#handle, id, enabled),
+    );
+  }
+  setPacketFanout(group: number, mode: PacketFanoutMode): Promise<void> {
+    if (this.#closed) return Promise.reject(socketClosedError("setOption"));
+    try {
+      if (this.#family !== "packet")
+        throw invalidArgument(
+          "setOption",
+          "packet fanout requires a packet socket",
+        );
+      validateIntegerRange(group, 0, 0xffff, "setOption", "group");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "setOption"));
+    }
+    const modes: Record<PacketFanoutMode, number> = {
+      hash: 0,
+      loadBalance: 1,
+      cpu: 2,
+      rollover: 3,
+      random: 4,
+      queueMapping: 5,
+      classicBpf: 6,
+      ebpf: 7,
+    };
+    if (!(mode in modes))
+      return Promise.reject(
+        invalidArgument("setOption", "unsupported packet fanout mode"),
+      );
+    return this.#submitVoid("setOption", (id) =>
+      nativeBinding.nativePacketFanout(this.#handle, id, group, modes[mode]),
+    );
+  }
+  packetStatistics(): Promise<PacketStatistics> {
+    if (this.#closed)
+      return Promise.reject(socketClosedError("packetStatistics"));
+    if (this.#family !== "packet")
+      return Promise.reject(
+        invalidArgument(
+          "packetStatistics",
+          "statistics require a packet socket",
+        ),
+      );
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (
+            completion.statisticsPackets === undefined ||
+            completion.statisticsDrops === undefined
+          ) {
+            reject(
+              internalError(
+                "packetStatistics",
+                "native completion omitted statistics",
+              ),
+            );
+          } else {
+            resolve({
+              packets: completion.statisticsPackets,
+              drops: completion.statisticsDrops,
+            });
+          }
+        },
+        reject,
+      });
+      const result = callNative(
+        () => nativeBinding.nativePacketStatistics(this.#handle, operationId),
+        "packetStatistics",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  #packetMembership(membership: PacketMembership, add: boolean): Promise<void> {
+    if (this.#closed)
+      return Promise.reject(socketClosedError("packetMembership"));
+    try {
+      validatePacketMembership(membership, this.#family);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "packetMembership"));
+    }
+    return this.#submitVoid("packetMembership", (id) =>
+      nativeBinding.nativePacketMembership(
+        this.#handle,
+        id,
+        membership.interfaceIndex,
+        membership.kind,
+        Buffer.from(membership.address ?? new Uint8Array()),
+        add,
+      ),
+    );
+  }
+
+  /**
+   * Sends one owned copy of `data` to a dotted-decimal IPv4 address.
+   *
+   * Linux constructs the IPv4 header unless header-included mode is added by a
+   * later API phase.
+   */
+  send(
+    data: Uint8Array,
+    destination: string,
+    options: AbortableOperationOptions = {},
+  ): Promise<number> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("send"));
+    }
+    if (this.#family !== "ipv4")
+      return Promise.reject(
+        unsupportedError("send", "use sendMessage() for IPv6"),
+      );
+    try {
+      validatePacketData(data);
+      validateDestination(destination);
+      validateSignal(options.signal, "send");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "send"));
+    }
+
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (completion.bytesSent === undefined) {
+            reject(
+              internalError(
+                "send",
+                "native send completion omitted byte count",
+              ),
+            );
+          } else {
+            resolve(completion.bytesSent);
+          }
+        },
+        reject,
+      });
+      if (this.#attachAbort(operationId, options.signal, reject, "send"))
+        return;
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitSend(
+            this.#handle,
+            operationId,
+            Buffer.from(data),
+            destination,
+          ),
+        "send",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Sends one IP message using Linux `sendmsg(2)` flags and control data. */
+  sendMessage(request: SendMessageRequest): Promise<number> {
+    if (this.#closed) return Promise.reject(socketClosedError("sendMessage"));
+    try {
+      validateSendMessageRequest(request, this.#family);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "sendMessage"));
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (completion.bytesSent === undefined) {
+            reject(
+              internalError(
+                "sendMessage",
+                "native completion omitted byte count",
+              ),
+            );
+          } else {
+            resolve(completion.bytesSent);
+          }
+        },
+        reject,
+      });
+      if (this.#attachAbort(operationId, request.signal, reject, "sendMessage"))
+        return;
+      const controls: NativeSendControlMessage[] = (request.control ?? []).map(
+        (control) =>
+          control.kind === "ipv4PacketInfo" || control.kind === "ipv6PacketInfo"
+            ? {
+                kind: control.kind,
+                ...(control.interfaceIndex === undefined
+                  ? {}
+                  : { interfaceIndex: control.interfaceIndex }),
+                ...(control.sourceAddress === undefined
+                  ? {}
+                  : { sourceAddress: control.sourceAddress }),
+              }
+            : { kind: control.kind, value: control.value },
+      );
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitSendMessage(
+            this.#handle,
+            operationId,
+            Buffer.from(request.data),
+            request.destination.family === "packet"
+              ? ""
+              : request.destination.address,
+            request.destination.family,
+            request.destination.family === "ipv6"
+              ? (request.destination.scopeId ?? 0)
+              : 0,
+            request.destination.family === "ipv6"
+              ? (request.destination.flowInfo ?? 0)
+              : 0,
+            request.destination.family === "packet"
+              ? request.destination.protocol
+              : 0,
+            request.destination.family === "packet"
+              ? request.destination.interfaceIndex
+              : 0,
+            Buffer.from(
+              request.destination.family === "packet"
+                ? (request.destination.address ?? new Uint8Array())
+                : new Uint8Array(),
+            ),
+            request.flags?.includes("dontRoute") ?? false,
+            controls,
+          ),
+        "sendMessage",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Sends a bounded same-family vector with one nonblocking `sendmmsg(2)`. */
+  sendBatch(
+    requests: readonly BatchSendRequest[],
+    options: AbortableOperationOptions = {},
+  ): Promise<SendBatchResult> {
+    if (this.#closed) return Promise.reject(socketClosedError("sendBatch"));
+    try {
+      validateSendBatch(requests, this.#family);
+      validateSignal(options.signal, "sendBatch");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "sendBatch"));
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (
+            completion.batchLengths === undefined ||
+            completion.batchRequested === undefined
+          ) {
+            reject(
+              internalError(
+                "sendBatch",
+                "native completion omitted batch results",
+              ),
+            );
+            return;
+          }
+          resolve({
+            requested: completion.batchRequested,
+            completed: completion.batchLengths.length,
+            results: completion.batchLengths.map((bytesSent, index) => ({
+              index,
+              bytesSent,
+            })),
+          });
+        },
+        reject,
+      });
+      if (this.#attachAbort(operationId, options.signal, reject, "sendBatch"))
+        return;
+      const messages: NativeBatchSendMessage[] = requests.map((request) => ({
+        data: Buffer.from(request.data),
+        destination:
+          request.destination.family === "packet"
+            ? ""
+            : request.destination.address,
+        destinationFamily: request.destination.family,
+        scopeId:
+          request.destination.family === "ipv6"
+            ? (request.destination.scopeId ?? 0)
+            : 0,
+        flowInfo:
+          request.destination.family === "ipv6"
+            ? (request.destination.flowInfo ?? 0)
+            : 0,
+        packetProtocol:
+          request.destination.family === "packet"
+            ? request.destination.protocol
+            : 0,
+        interfaceIndex:
+          request.destination.family === "packet"
+            ? request.destination.interfaceIndex
+            : 0,
+        hardwareAddress: Buffer.from(
+          request.destination.family === "packet"
+            ? (request.destination.address ?? new Uint8Array())
+            : new Uint8Array(),
+        ),
+      }));
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitSendBatch(
+            this.#handle,
+            operationId,
+            messages,
+          ),
+        "sendBatch",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Receives one IPv4 packet, waiting off the Node.js event-loop thread. */
+  receive(
+    maxLength = MAX_PACKET_LENGTH,
+    options: AbortableOperationOptions = {},
+  ): Promise<ReceivedPacket> {
+    if (this.#closed) {
+      return Promise.reject(socketClosedError("receive"));
+    }
+    if (this.#family !== "ipv4")
+      return Promise.reject(
+        unsupportedError("receive", "use receiveMessage() for IPv6"),
+      );
+    try {
+      validatePacketLength(maxLength, "maxLength");
+      validateSignal(options.signal, "receive");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "receive"));
+    }
+
+    if (this.#state.eventClaims.has("normal")) {
+      return Promise.reject(
+        receiverActive(
+          "receive",
+          "the normal receive lane is owned by an event source",
+        ),
+      );
+    }
+
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (
+            completion.data === undefined ||
+            completion.sourceAddress === undefined ||
+            completion.packetLength === undefined ||
+            completion.truncated === undefined
+          ) {
+            reject(
+              internalError(
+                "receive",
+                "native receive completion was incomplete",
+              ),
+            );
+          } else {
+            resolve({
+              data: completion.data,
+              sourceAddress: completion.sourceAddress,
+              packetLength: completion.packetLength,
+              truncated: completion.truncated,
+              ipv4: completion.ipv4,
+            });
+          }
+        },
+        reject,
+      });
+      this.#trackDirectReceive(operationId, "normal");
+      if (this.#attachAbort(operationId, options.signal, reject, "receive"))
+        return;
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitReceive(
+            this.#handle,
+            operationId,
+            maxLength,
+          ),
+        "receive",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Receives one IPv4 message and its typed Linux ancillary metadata. */
+  receiveMessage(
+    options: ReceiveMessageOptions = {},
+  ): Promise<ReceivedMessage> {
+    return this.#receiveMessageInternal(options);
+  }
+
+  #receiveMessageClaimed(
+    claim: symbol,
+    options: ClaimedReceiveOptions,
+    signal: AbortSignal,
+  ): Promise<ReceivedMessage> {
+    return this.#receiveMessageInternal(
+      {
+        dataCapacity: options.dataCapacity,
+        controlCapacity: options.controlCapacity,
+        flags: options.errorQueue ? ["errorQueue"] : [],
+        signal,
+      },
+      claim,
+    );
+  }
+
+  #receiveMessageInternal(
+    options: ReceiveMessageOptions,
+    eventClaim?: symbol,
+  ): Promise<ReceivedMessage> {
+    if (this.#closed)
+      return Promise.reject(socketClosedError("receiveMessage"));
+    try {
+      validateReceiveMessageOptions(options);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "receiveMessage"));
+    }
+    const flags = options.flags ?? [];
+    const lane: ReceiveLane = flags.includes("errorQueue")
+      ? "errorQueue"
+      : "normal";
+    if (eventClaim === undefined) {
+      if (this.#state.eventClaims.has(lane)) {
+        return Promise.reject(
+          receiverActive(
+            "receiveMessage",
+            `the ${lane} receive lane is owned by an event source`,
+          ),
+        );
+      }
+    } else if (this.#state.eventClaims.get(lane) !== eventClaim) {
+      return Promise.reject(
+        receiverActive(
+          "receiveMessage",
+          `the ${lane} event receive claim is no longer active`,
+        ),
+      );
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          try {
+            if (completion.message === undefined)
+              throw internalError(
+                "receiveMessage",
+                "native completion omitted message",
+              );
+            resolve(convertReceivedMessage(completion.message));
+          } catch (error) {
+            reject(normalizeUnknownError(error, "receiveMessage"));
+          }
+        },
+        reject,
+      });
+      if (eventClaim === undefined) {
+        this.#trackDirectReceive(operationId, lane);
+      }
+      if (
+        this.#attachAbort(operationId, options.signal, reject, "receiveMessage")
+      )
+        return;
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitReceiveMessage(
+            this.#handle,
+            operationId,
+            options.dataCapacity ?? MAX_PACKET_LENGTH,
+            options.controlCapacity ?? DEFAULT_CONTROL_CAPACITY,
+            flags.includes("peek"),
+            flags.includes("errorQueue"),
+          ),
+        "receiveMessage",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Receives one productive bounded `recvmmsg(2)` vector. */
+  receiveBatch(options: ReceiveBatchOptions): Promise<ReceiveBatchResult> {
+    if (this.#closed) return Promise.reject(socketClosedError("receiveBatch"));
+    try {
+      validateReceiveBatchOptions(options);
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "receiveBatch"));
+    }
+    if (this.#state.eventClaims.has("normal")) {
+      return Promise.reject(
+        receiverActive(
+          "receiveBatch",
+          "the normal receive lane is owned by an event source",
+        ),
+      );
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          try {
+            if (completion.batchMessages === undefined)
+              throw internalError(
+                "receiveBatch",
+                "native completion omitted batch messages",
+              );
+            const messages = completion.batchMessages.map(
+              convertReceivedMessage,
+            );
+            resolve({ completed: messages.length, messages });
+          } catch (error) {
+            reject(normalizeUnknownError(error, "receiveBatch"));
+          }
+        },
+        reject,
+      });
+      this.#trackDirectReceive(operationId, "normal");
+      if (
+        this.#attachAbort(operationId, options.signal, reject, "receiveBatch")
+      )
+        return;
+      const result = callNative(
+        () =>
+          nativeBinding.nativeSubmitReceiveBatch(
+            this.#handle,
+            operationId,
+            options.count,
+            options.dataCapacity ?? MAX_PACKET_LENGTH,
+          ),
+        "receiveBatch",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Configures one bounded receive-only TPACKET_V3 ring. */
+  configurePacketRing(config: PacketRingConfig = {}): Promise<void> {
+    if (this.#closed)
+      return Promise.reject(socketClosedError("configurePacketRing"));
+    let nativeConfig: NativePacketRingConfig;
+    try {
+      nativeConfig = validatePacketRingConfig(config, this.#family);
+    } catch (error) {
+      return Promise.reject(
+        normalizeUnknownError(error, "configurePacketRing"),
+      );
+    }
+    if (this.#state.eventClaims.size > 0) {
+      return Promise.reject(
+        receiverActive(
+          "configurePacketRing",
+          "packet-ring mode conflicts with attached event sources",
+        ),
+      );
+    }
+    const token = Symbol("packetRingConfiguration");
+    this.#state.ringConfigurations.add(token);
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: () => {
+          this.#state.ringActive = true;
+          resolve();
+        },
+        reject,
+      });
+      addPendingFinalizer(this.#state, operationId, () => {
+        this.#state.ringConfigurations.delete(token);
+      });
+      const result = callNative(
+        () =>
+          nativeBinding.nativeConfigurePacketRing(
+            this.#handle,
+            operationId,
+            nativeConfig,
+          ),
+        "configurePacketRing",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /** Waits for and leases one copied frame from the configured packet ring. */
+  receiveRingFrame(
+    options: AbortableOperationOptions = {},
+  ): Promise<PacketRingFrameLease> {
+    if (this.#closed)
+      return Promise.reject(socketClosedError("receiveRingFrame"));
+    try {
+      if (this.#family !== "packet")
+        throw invalidArgument(
+          "receiveRingFrame",
+          "packet ring frames require a packet socket",
+        );
+      validateSignal(options.signal, "receiveRingFrame");
+    } catch (error) {
+      return Promise.reject(normalizeUnknownError(error, "receiveRingFrame"));
+    }
+    if (this.#state.eventClaims.size > 0) {
+      return Promise.reject(
+        receiverActive(
+          "receiveRingFrame",
+          "packet-ring receives conflict with attached event sources",
+        ),
+      );
+    }
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: (completion) => {
+          if (
+            completion.ringData === undefined ||
+            completion.ringOriginalLength === undefined ||
+            completion.ringSnapshotLength === undefined ||
+            completion.ringSeconds === undefined ||
+            completion.ringNanoseconds === undefined ||
+            completion.ringStatus === undefined ||
+            completion.ringVlanTci === undefined ||
+            completion.ringVlanTpid === undefined
+          ) {
+            reject(
+              internalError(
+                "receiveRingFrame",
+                "native completion omitted ring frame fields",
+              ),
+            );
+            return;
+          }
+          resolve(
+            new PacketRingFrameLease(
+              completion.ringData,
+              completion.ringOriginalLength,
+              completion.ringSnapshotLength,
+              completion.ringSeconds,
+              completion.ringNanoseconds,
+              completion.ringStatus,
+              completion.ringVlanTci,
+              completion.ringVlanTpid,
+            ),
+          );
+        },
+        reject,
+      });
+      this.#state.ringFrameReceives += 1;
+      addPendingFinalizer(this.#state, operationId, () => {
+        this.#state.ringFrameReceives -= 1;
+      });
+      if (
+        this.#attachAbort(
+          operationId,
+          options.signal,
+          reject,
+          "receiveRingFrame",
+        )
+      )
+        return;
+      const result = callNative(
+        () => nativeBinding.nativeReceiveRingFrame(this.#handle, operationId),
+        "receiveRingFrame",
+      );
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  /**
+   * Idempotently closes the socket and cancels pending sends/receives.
+   *
+   * The Promise resolves after reactor deregistration and descriptor release.
+   */
+  close(): Promise<void> {
+    if (this.#closePromise !== undefined) {
+      return this.#closePromise;
+    }
+    this.#closed = true;
+    const operationId = this.#allocateOperationId();
+    let resolveClose!: () => void;
+    let rejectClose!: (error: RawSocketError) => void;
+    this.#closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    void this.#closePromise.then(
+      () => {
+        this.#notifyCloseOutcome(undefined, false);
+      },
+      (error: unknown) => {
+        this.#notifyCloseOutcome(error, true);
+      },
+    );
+    this.#notifyClosing();
+    this.#state.pending.set(operationId, {
+      resolve: () => {
+        resolveClose();
+      },
+      reject: rejectClose,
+    });
+    const result = callNative(
+      () => nativeBinding.nativeClose(this.#handle, operationId),
+      "close",
+    );
+    if (!result.accepted && result.error === undefined) {
+      takePendingOperation(this.#state, operationId);
+      resolveClose();
+      return this.#closePromise;
+    }
+    this.#settleRejectedSubmission(operationId, result, rejectClose);
+    return this.#closePromise;
+  }
+
+  #notifyClosing(): void {
+    for (const observer of [...this.#state.closeObservers]) {
+      try {
+        observer.closing();
+      } catch {
+        // Lifecycle observers are internal and isolated from RawSocket.close().
+      }
+    }
+  }
+
+  #notifyCloseOutcome(error: unknown, rejected: boolean): void {
+    for (const observer of [...this.#state.closeObservers]) {
+      try {
+        observer.closed(error, rejected);
+      } catch {
+        // One adapter cannot prevent sibling close settlement.
+      }
+    }
+  }
+
+  #submitVoid(
+    operation: string,
+    submit: (operationId: number) => NativeSubmitResult,
+  ): Promise<void> {
+    const operationId = this.#allocateOperationId();
+    return new Promise((resolve, reject: (error: RawSocketError) => void) => {
+      this.#state.pending.set(operationId, {
+        resolve: () => {
+          resolve();
+        },
+        reject,
+      });
+      const result = callNative(() => submit(operationId), operation);
+      this.#settleRejectedSubmission(operationId, result, reject);
+    });
+  }
+
+  #allocateOperationId(): number {
+    for (;;) {
+      const candidate = this.#nextOperationId;
+      this.#nextOperationId =
+        candidate === MAX_OPERATION_ID ? 1 : candidate + 1;
+      if (!this.#state.pending.has(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  #trackDirectReceive(operationId: number, lane: ReceiveLane): void {
+    this.#state.directReceives[lane] += 1;
+    addPendingFinalizer(this.#state, operationId, () => {
+      this.#state.directReceives[lane] -= 1;
+    });
+  }
+
+  #settleRejectedSubmission(
+    operationId: number,
+    result: NativeSubmitResult,
+    reject: (error: RawSocketError) => void,
+  ): void {
+    if (result.accepted) {
+      return;
+    }
+    takePendingOperation(this.#state, operationId);
+    reject(
+      result.error === undefined
+        ? internalError("submitOperation", "native operation was not accepted")
+        : new RawSocketError(result.error),
+    );
+  }
+
+  #attachAbort(
+    operationId: number,
+    signal: AbortSignal | undefined,
+    reject: (error: RawSocketError) => void,
+    operation: string,
+  ): boolean {
+    if (signal === undefined) return false;
+    const abort = (): void => {
+      try {
+        nativeBinding.nativeCancel(this.#handle, operationId);
+      } catch (error) {
+        const pending = takePendingOperation(this.#state, operationId);
+        pending?.reject(normalizeUnknownError(error, operation));
+      }
+    };
+    try {
+      if (signal.aborted) {
+        takePendingOperation(this.#state, operationId);
+        reject(abortedError(operation));
+        return true;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+      addPendingFinalizer(this.#state, operationId, () => {
+        signal.removeEventListener("abort", abort);
+      });
+    } catch (error) {
+      try {
+        signal.removeEventListener("abort", abort);
+      } catch {
+        // A hostile AbortSignal-like value cannot prevent operation cleanup.
+      }
+      takePendingOperation(this.#state, operationId);
+      reject(normalizeUnknownError(error, operation));
+      return true;
+    }
+    return false;
+  }
+}
+
+/** Computes the RFC 1071 Internet checksum over one bounded input snapshot. */
+export function computeInternetChecksum(data: Uint8Array): number {
+  return callIcmpCodec("computeInternetChecksum", () =>
+    icmpCodec.computeInternetChecksumInternal(data),
+  );
+}
+
+/** Validates a complete checksum-covered Internet message. */
+export function validateInternetChecksum(data: Uint8Array): boolean {
+  return callIcmpCodec("validateInternetChecksum", () =>
+    icmpCodec.validateInternetChecksumInternal(data),
+  );
+}
+
+/** Canonically encodes one supported standalone ICMPv4 message. */
+export function encodeIcmpMessage(message: IcmpMessage): Buffer {
+  return callIcmpCodec("encodeIcmpMessage", () =>
+    icmpCodec.encodeIcmpMessageInternal(message),
+  );
+}
+
+/** Structurally parses one standalone ICMPv4 message. */
+export function parseIcmpMessage(
+  data: Uint8Array,
+  options?: IcmpParseOptions,
+): IcmpParseResult {
+  return callIcmpCodec("parseIcmpMessage", () =>
+    icmpCodec.parseIcmpMessageInternal(
+      data,
+      icmpCodec.normalizeIcmpParseOptions(options),
+    ),
+  );
+}
+
+/** Validates one standalone ICMPv4 message without duplicating parser rules. */
+export function validateIcmpMessage(
+  data: Uint8Array,
+  options?: IcmpParseOptions,
+): IcmpValidationResult {
+  return callIcmpCodec("validateIcmpMessage", () =>
+    icmpCodec.validateIcmpMessageInternal(
+      data,
+      icmpCodec.normalizeIcmpParseOptions(options),
+    ),
+  );
+}
+
+/** Parses the IPv4-header-prefixed layout returned by Linux raw IPv4 sockets. */
+export function parseIcmpReceivedMessage(
+  message: ReceivedMessage,
+  options?: IcmpParseOptions,
+): IcmpReceivedParseResult {
+  return callIcmpCodec("parseIcmpReceivedMessage", () => {
+    const validated = validateIcmpReceivedMessageInput(message);
+    const normalized = icmpCodec.normalizeIcmpParseOptions(options);
+    if (validated.ipv4 === undefined) {
+      return {
+        ok: false,
+        received: message,
+        error: {
+          reason: "invalidIpv4Header",
+          message: "received message does not contain parsed IPv4 metadata",
+          offset: 0,
+        },
+        checksumStatus: "unverifiable",
+        issues: [],
+      };
+    }
+    const result = icmpCodec.parseIcmpIpv4FrameInternal(
+      validated.data,
+      validated.dataLength,
+      validated.dataTruncated,
+      validated.ipv4,
+      validated.sourceAddress,
+      normalized,
+    );
+    if (result.ok) {
+      return {
+        ok: true,
+        received: message,
+        ipv4: result.ipv4,
+        packet: result.packet,
+        incomplete: result.incomplete,
+      };
+    }
+    return {
+      ok: false,
+      received: message,
+      error: result.error,
+      checksumStatus: result.checksumStatus,
+      issues: result.issues,
+      ...(result.ipv4 === undefined ? {} : { ipv4: result.ipv4 }),
+    };
+  });
+}
+
+/** Encodes and sends exactly one ICMPv4 message through an existing socket. */
+export function sendIcmpMessage(
+  socket: RawSocket,
+  message: IcmpMessage,
+  options: IcmpSendOptions,
+): Promise<number> {
+  return callIcmpCodec("sendIcmpMessage", () => {
+    validateIcmpSocket(socket, "sendIcmpMessage");
+    const rawOptions: unknown = options;
+    if (typeof rawOptions !== "object" || rawOptions === null) {
+      throw invalidArgument("sendIcmpMessage", "options must be an object");
+    }
+    const candidate = rawOptions as Record<string, unknown>;
+    const destination = validateIcmpTracerouteDestination(
+      candidate.destination,
+      "sendIcmpMessage",
+    );
+    const ttl = candidate.ttl;
+    const flags = snapshotIcmpSendFlags(candidate.flags);
+    const rawControl: unknown = candidate.control ?? [];
+    const signal = candidate.signal;
+    if (!Array.isArray(rawControl)) {
+      throw invalidArgument(
+        "sendIcmpMessage",
+        "control must contain at most 64 messages",
+      );
+    }
+    const controlCount = rawControl.length;
+    if (
+      !Number.isSafeInteger(controlCount) ||
+      controlCount < 0 ||
+      controlCount > 64
+    ) {
+      throw invalidArgument(
+        "sendIcmpMessage",
+        "control must contain at most 64 messages",
+      );
+    }
+    const ownedControl: unknown[] = [];
+    for (let index = 0; index < controlCount; index += 1) {
+      ownedControl.push(snapshotIcmpSendControl(rawControl[index]));
+    }
+    if (ttl !== undefined) {
+      validateIntegerRange(ttl, 1, 255, "sendIcmpMessage", "ttl");
+      if (
+        ownedControl.some(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            (entry as { kind?: unknown }).kind === "ipv4Ttl",
+        )
+      ) {
+        throw invalidArgument(
+          "sendIcmpMessage",
+          "ttl and an ipv4Ttl control are mutually exclusive",
+        );
+      }
+      ownedControl.push({ kind: "ipv4Ttl", value: ttl });
+    }
+    const data = encodeIcmpMessage(message);
+    const sendDestination = destination;
+    if (
+      data[0] === icmpCodec.ICMP_ROUTERSOLICIT ||
+      data[0] === icmpCodec.ICMP_ROUTERADVERT
+    ) {
+      const address = destination.address;
+      if (isIpv4MulticastAddress(address)) {
+        const expected =
+          data[0] === icmpCodec.ICMP_ROUTERSOLICIT ? "224.0.0.2" : "224.0.0.1";
+        if (address !== expected) {
+          throw invalidArgument(
+            "sendIcmpMessage",
+            `Router Discovery multicast destination must be ${expected}`,
+          );
+        }
+        let ttlControl: unknown;
+        let index = 0;
+        while (index < ownedControl.length) {
+          const entry = ownedControl[index];
+          if (
+            typeof entry === "object" &&
+            entry !== null &&
+            (entry as { kind?: unknown }).kind === "ipv4Ttl"
+          ) {
+            ttlControl = (entry as { value?: unknown }).value;
+            break;
+          }
+          index += 1;
+        }
+        if (ttlControl === undefined) {
+          ownedControl.push({ kind: "ipv4Ttl", value: 1 });
+        } else if (ttlControl !== 1) {
+          throw invalidArgument(
+            "sendIcmpMessage",
+            "Router Discovery multicast TTL must be 1",
+          );
+        }
+      }
+    }
+    return socket.sendMessage({
+      data,
+      destination: sendDestination,
+      ...(flags === undefined ? {} : { flags }),
+      ...(ownedControl.length === 0
+        ? {}
+        : { control: ownedControl as readonly SendControlMessage[] }),
+      ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+    });
+  });
+}
+
+/** Receives and parses exactly one normal-lane ICMPv4 message. */
+export function receiveIcmpMessage(
+  socket: RawSocket,
+  options: IcmpReceiveOptions = {},
+): Promise<IcmpReceivedParseResult> {
+  return callIcmpCodec("receiveIcmpMessage", () => {
+    validateIcmpSocket(socket, "receiveIcmpMessage");
+    const rawOptions: unknown = options;
+    if (typeof rawOptions !== "object" || rawOptions === null) {
+      throw invalidArgument("receiveIcmpMessage", "options must be an object");
+    }
+    const candidate = rawOptions as Record<string, unknown>;
+    const flags = candidate.flags;
+    const dataCapacity = candidate.dataCapacity;
+    const controlCapacity = candidate.controlCapacity;
+    const signal = candidate.signal;
+    const parse = candidate.parse;
+    if (flags !== undefined) {
+      throw invalidArgument(
+        "receiveIcmpMessage",
+        "peek and errorQueue flags are not supported by this helper",
+      );
+    }
+    const parseOptions = icmpCodec.normalizeIcmpParseOptions(parse);
+    return socket
+      .receiveMessage({
+        ...(dataCapacity === undefined
+          ? {}
+          : { dataCapacity: dataCapacity as number }),
+        ...(controlCapacity === undefined
+          ? {}
+          : { controlCapacity: controlCapacity as number }),
+        ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+      })
+      .then((received) => parseIcmpReceivedMessage(received, parseOptions));
+  });
+}
+
+/** Strongly matches one complete received Echo Reply against explicit fields. */
+export function matchesIcmpEchoReply(
+  received: IcmpReceivedParseResult,
+  expected: IcmpEchoReplyMatch,
+): boolean {
+  return callIcmpCodec("matchesIcmpEchoReply", () => {
+    const rawExpected: unknown = expected;
+    if (typeof rawExpected !== "object" || rawExpected === null) {
+      throw invalidArgument(
+        "matchesIcmpEchoReply",
+        "expected must be an object",
+      );
+    }
+    const candidate = rawExpected as Record<string, unknown>;
+    const identifier = candidate.identifier;
+    const sequence = candidate.sequence;
+    const expectedSourceAddress = candidate.expectedSourceAddress;
+    const expectedDestinationAddress = candidate.expectedDestinationAddress;
+    const rawToken = candidate.token;
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "matchesIcmpEchoReply",
+      "identifier",
+    );
+    validateIntegerRange(
+      sequence,
+      0,
+      0xffff,
+      "matchesIcmpEchoReply",
+      "sequence",
+    );
+    if (expectedSourceAddress !== undefined) {
+      validateIpv4Address(
+        expectedSourceAddress,
+        "matchesIcmpEchoReply",
+        "expectedSourceAddress",
+      );
+    }
+    if (expectedDestinationAddress !== undefined) {
+      validateIpv4Address(
+        expectedDestinationAddress,
+        "matchesIcmpEchoReply",
+        "expectedDestinationAddress",
+      );
+    }
+    const token =
+      rawToken === undefined
+        ? undefined
+        : snapshotIcmpBytes(
+            rawToken,
+            icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8,
+            "matchesIcmpEchoReply",
+            "token",
+          );
+    const rawReceived: unknown = received;
+    if (
+      typeof rawReceived !== "object" ||
+      rawReceived === null ||
+      (rawReceived as { ok?: unknown }).ok !== true
+    ) {
+      return false;
+    }
+    const successful = rawReceived as Extract<
+      IcmpReceivedParseResult,
+      { readonly ok: true }
+    >;
+    if (
+      successful.incomplete ||
+      successful.packet.checksumStatus !== "valid" ||
+      successful.packet.message.kind !== "echoReply"
+    ) {
+      return false;
+    }
+    const reply = successful.packet.message;
+    if (
+      reply.identifier !== identifier ||
+      reply.sequence !== sequence ||
+      (expectedSourceAddress !== undefined &&
+        successful.ipv4.sourceAddress !== expectedSourceAddress) ||
+      (expectedDestinationAddress !== undefined &&
+        successful.ipv4.destinationAddress !== expectedDestinationAddress)
+    ) {
+      return false;
+    }
+    if (token === undefined) return true;
+    if (token.byteLength > reply.data.byteLength) return false;
+    for (let index = 0; index < token.byteLength; index += 1) {
+      if (token[index] !== reply.data[index]) return false;
+    }
+    return true;
+  });
+}
+
+/** Correlates a checked quoted IPv4/ICMP prefix with an Echo Request tuple. */
+export function matchIcmpEchoQuote(
+  quote: ParsedIcmpQuote,
+  expected: IcmpEchoQuoteMatchOptions,
+): IcmpEchoQuoteMatchResult {
+  return callIcmpCodec("matchIcmpEchoQuote", () => {
+    const rawQuote: unknown = quote;
+    if (typeof rawQuote !== "object" || rawQuote === null) {
+      throw invalidArgument("matchIcmpEchoQuote", "quote must be an object");
+    }
+    const quoteCandidate = rawQuote as Record<string, unknown>;
+    const quotedIcmp = quoteCandidate.icmp;
+    if (
+      typeof quoteCandidate.valid !== "boolean" ||
+      !(quoteCandidate.bytes instanceof Uint8Array) ||
+      (quoteCandidate.ipv4 !== undefined &&
+        (typeof quoteCandidate.ipv4 !== "object" ||
+          quoteCandidate.ipv4 === null)) ||
+      (quotedIcmp !== undefined &&
+        (typeof quotedIcmp !== "object" ||
+          quotedIcmp === null ||
+          !(
+            (quotedIcmp as { dataPrefix?: unknown }).dataPrefix instanceof
+            Uint8Array
+          )))
+    ) {
+      throw invalidArgument(
+        "matchIcmpEchoQuote",
+        "quote must be a ParsedIcmpQuote",
+      );
+    }
+    const rawExpected: unknown = expected;
+    if (typeof rawExpected !== "object" || rawExpected === null) {
+      throw invalidArgument("matchIcmpEchoQuote", "expected must be an object");
+    }
+    const candidate = rawExpected as Record<string, unknown>;
+    const expectedDestinationAddress = candidate.expectedDestinationAddress;
+    const identifier = candidate.identifier;
+    const sequence = candidate.sequence;
+    const rawToken = candidate.token;
+    validateIpv4Address(
+      expectedDestinationAddress,
+      "matchIcmpEchoQuote",
+      "expectedDestinationAddress",
+    );
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "matchIcmpEchoQuote",
+      "identifier",
+    );
+    validateIntegerRange(sequence, 0, 0xffff, "matchIcmpEchoQuote", "sequence");
+    const token =
+      rawToken === undefined
+        ? undefined
+        : snapshotIcmpBytes(
+            rawToken,
+            icmpCodec.MAX_ICMPV4_MESSAGE_LENGTH - 8,
+            "matchIcmpEchoQuote",
+            "token",
+          );
+    return icmpCodec.matchIcmpEchoQuoteInternal(quote, {
+      expectedDestinationAddress,
+      identifier,
+      sequence,
+      token,
+    });
+  });
+}
+
+/** Classifies a registered Destination Unreachable code without applying policy. */
+export function classifyIcmpDestinationUnreachable(
+  code: IcmpDestinationUnreachableCode,
+): IcmpDestinationUnreachableClassification {
+  return callIcmpCodec("classifyIcmpDestinationUnreachable", () => {
+    const rawCode: unknown = code;
+    validateIntegerRange(
+      rawCode,
+      0,
+      15,
+      "classifyIcmpDestinationUnreachable",
+      "code",
+    );
+    return icmpCodec.classifyDestinationUnreachableInternal(
+      rawCode as IcmpDestinationUnreachableCode,
+    );
+  });
+}
+
+/** Classifies one raw RFC 792 timestamp without consulting a clock. */
+export function classifyIcmpTimestamp(value: number): IcmpTimestampValue {
+  return callIcmpCodec("classifyIcmpTimestamp", () =>
+    icmpCodec.classifyIcmpTimestampInternal(value),
+  );
+}
+
+/** Inspects a dotted-decimal IPv4 mask without applying host configuration. */
+export function inspectIpv4AddressMask(mask: string): IcmpAddressMaskInfo {
+  return callIcmpCodec("inspectIpv4AddressMask", () =>
+    icmpCodec.inspectIpv4AddressMaskInternal(mask),
+  );
+}
+
+/** Copies a parsed request tuple into an explicit Timestamp Reply value. */
+export function createIcmpTimestampReply(
+  request: ParsedIcmpTimestampRequest,
+  times: IcmpTimestampReplyTimes,
+): IcmpTimestampReply {
+  return callIcmpCodec("createIcmpTimestampReply", () => {
+    const rawRequest: unknown = request;
+    if (
+      typeof rawRequest !== "object" ||
+      rawRequest === null ||
+      (rawRequest as { kind?: unknown }).kind !== "timestampRequest"
+    ) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "request must be a parsed Timestamp Request",
+      );
+    }
+    const requestCandidate = rawRequest as Record<string, unknown>;
+    const identifier = requestCandidate.identifier;
+    const sequence = requestCandidate.sequence;
+    const rawOriginate = requestCandidate.originateTimestamp;
+    if (typeof rawOriginate !== "object" || rawOriginate === null) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "request.originateTimestamp must be a parsed timestamp",
+      );
+    }
+    const originateTimestamp = (rawOriginate as { raw?: unknown }).raw;
+    validateIntegerRange(
+      identifier,
+      0,
+      0xffff,
+      "createIcmpTimestampReply",
+      "request.identifier",
+    );
+    validateIntegerRange(
+      sequence,
+      0,
+      0xffff,
+      "createIcmpTimestampReply",
+      "request.sequence",
+    );
+    const rawTimes: unknown = times;
+    if (typeof rawTimes !== "object" || rawTimes === null) {
+      throw invalidArgument(
+        "createIcmpTimestampReply",
+        "times must be an object",
+      );
+    }
+    const timesCandidate = rawTimes as Record<string, unknown>;
+    const receiveTimestamp = timesCandidate.receiveTimestamp;
+    const transmitTimestamp = timesCandidate.transmitTimestamp;
+    const reply: IcmpTimestampReply = {
+      kind: "timestampReply",
+      identifier,
+      sequence,
+      originateTimestamp: originateTimestamp as number,
+      receiveTimestamp: receiveTimestamp as number,
+      transmitTimestamp: transmitTimestamp as number,
+    };
+    icmpCodec.encodeIcmpMessageInternal(reply);
+    return reply;
+  });
+}
+
+/** Builds one deterministic TTL-limited ICMP Echo traceroute probe. */
+export function createIcmpTracerouteProbe(
+  options: traceroute.IcmpTracerouteProbeOptions,
+): traceroute.IcmpTracerouteProbe {
+  return callIcmpCodec("createIcmpTracerouteProbe", () =>
+    traceroute.createIcmpTracerouteProbeInternal(
+      validateIcmpTracerouteProbeOptions(options),
+    ),
+  );
+}
+
+/** Purely classifies one parsed ICMPv4 receive against one explicit probe. */
+export function classifyIcmpTracerouteResponse(
+  probe: traceroute.IcmpTracerouteProbe,
+  received: IcmpReceivedParseResult,
+  receivedAt: bigint,
+): traceroute.IcmpTracerouteMatch {
+  return callIcmpCodec("classifyIcmpTracerouteResponse", () => {
+    const validatedProbe = validateIcmpTracerouteProbe(probe);
+    if (typeof receivedAt !== "bigint" || receivedAt < validatedProbe.sentAt) {
+      throw invalidArgument(
+        "classifyIcmpTracerouteResponse",
+        "receivedAt must be a nonnegative monotonic bigint no earlier than probe.sentAt",
+      );
+    }
+    const validatedReceived = validateIcmpTracerouteReceived(received);
+    return traceroute.classifyIcmpTracerouteResponseInternal(
+      validatedProbe,
+      validatedReceived,
+      receivedAt,
+    );
+  });
+}
+
+/** Runs one bounded conventional ICMP Echo traceroute on a dedicated socket. */
+export function traceIcmpRoute(
+  socket: RawSocket,
+  destination: Ipv4MessageAddress,
+  options: traceroute.TraceIcmpRouteOptions = {},
+): Promise<traceroute.IcmpTracerouteResult> {
+  return callIcmpCodec("traceIcmpRoute", () => {
+    validateIcmpSocket(socket, "traceIcmpRoute");
+    const normalized = normalizeTraceIcmpRouteOptions(destination, options);
+    return traceroute.traceIcmpRouteInternal(normalized, {
+      now: () => process.hrtime.bigint(),
+      send: async (probe, signal) => {
+        await sendIcmpMessage(
+          socket,
+          {
+            kind: "echoRequest",
+            identifier: probe.identifier,
+            sequence: probe.sequence,
+            data: probe.data,
+          },
+          {
+            destination: probe.destination,
+            ttl: probe.ttl,
+            signal,
+          },
+        );
+      },
+      attach: (callbacks) => {
+        const source = new RawSocketEventEmitter(socket);
+        const onMessage = (message: ReceivedMessage): void => {
+          try {
+            callbacks.message(parseIcmpReceivedMessage(message));
+          } catch (error) {
+            callbacks.error(error);
+          }
+        };
+        const onError = (error: unknown): void => {
+          callbacks.error(error);
+        };
+        const onClose = (): void => {
+          callbacks.close();
+        };
+        source.on("message", onMessage);
+        source.on("error", onError);
+        source.on("close", onClose);
+        return {
+          start(): void {
+            source.start();
+          },
+          async detach(): Promise<void> {
+            try {
+              await source.detach();
+            } finally {
+              source.off("message", onMessage);
+              source.off("error", onError);
+              source.off("close", onClose);
+            }
+          },
+        };
+      },
+      setTimer: (callback, milliseconds) => setTimeout(callback, milliseconds),
+      clearTimer: (timer) => {
+        clearTimeout(timer as NodeJS.Timeout);
+      },
+      abortedError: () => abortedError("traceIcmpRoute"),
+      socketClosedError: () => socketClosedError("traceIcmpRoute"),
+    });
+  });
+}
+
+/** A Node-style, bounded event adapter over one RawSocket receive lane. */
+export class RawSocketEventEmitter extends EventEmitter<RawSocketEventMap> {
+  readonly #socket: RawSocket;
+  readonly #controller: EventReceiveController<ReceivedMessage, RawSocket>;
+
+  constructor(socket: RawSocket, options: RawSocketEventEmitterOptions = {}) {
+    super();
+    const internals = socketInternals.get(socket);
+    if (internals === undefined) {
+      throw invalidArgument(
+        "createRawSocketEventEmitter",
+        "socket must be a RawSocket returned by this module",
+      );
+    }
+    let configured: ClaimedReceiveOptions;
+    try {
+      configured = validateRawSocketEventEmitterOptions(options, socket.family);
+    } catch (error) {
+      throw normalizeUnknownError(error, "createRawSocketEventEmitter");
+    }
+    if (!internals.isOpen()) {
+      throw socketClosedError("createRawSocketEventEmitter");
+    }
+
+    const lane: ReceiveLane = configured.errorQueue ? "errorQueue" : "normal";
+    const state = internals.state;
+    if (state.ringActive) {
+      throw unsupportedError(
+        "createRawSocketEventEmitter",
+        "message events are unavailable after packet-ring configuration",
+      );
+    }
+    if (state.ringConfigurations.size > 0 || state.ringFrameReceives > 0) {
+      throw receiverActive(
+        "createRawSocketEventEmitter",
+        "packet-ring receive mode is currently active",
+      );
+    }
+    if (state.directReceives[lane] > 0 || state.eventClaims.has(lane)) {
+      throw receiverActive(
+        "createRawSocketEventEmitter",
+        `the ${lane} receive lane already has an active receiver`,
+      );
+    }
+
+    this.#socket = socket;
+    const claim = Symbol(`eventReceive:${lane}`);
+    let controller!: EventReceiveController<ReceivedMessage, RawSocket>;
+    const observer: SocketCloseObserver = {
+      closing: () => {
+        controller.notifyClosing();
+      },
+      closed: (error, rejected) => {
+        controller.notifyCloseOutcome(error, rejected);
+      },
+    };
+    state.eventClaims.set(lane, claim);
+    state.closeObservers.add(observer);
+    try {
+      controller = new EventReceiveController({
+        receive: (signal) =>
+          internals.receiveClaimed(claim, configured, signal),
+        close: () => socket.close(),
+        releaseClaim: () => {
+          if (state.eventClaims.get(lane) === claim) {
+            state.eventClaims.delete(lane);
+          }
+        },
+        removeCloseObserver: () => {
+          state.closeObservers.delete(observer);
+        },
+        detachValue: () => socket,
+        dispatchMessage: (message) => {
+          this.#emitMessage(message);
+        },
+        dispatchError: (error) => {
+          this.#emitError(error);
+        },
+        dispatchClose: () => {
+          this.#emitClose();
+        },
+        invalidState: (operation) =>
+          invalidState(
+            operation,
+            `cannot ${operation} an event source while it is ${controller.status}`,
+          ),
+        socketClosed: (operation) => socketClosedError(operation),
+        isAborted: (error) => isRawSocketErrorKind(error, "aborted"),
+        isSocketClosed: (error) => isRawSocketErrorKind(error, "socketClosed"),
+        isReactorClosed: (error) =>
+          isRawSocketErrorKind(error, "reactorClosed"),
+      });
+      this.#controller = controller;
+    } catch (error) {
+      if (state.eventClaims.get(lane) === claim) {
+        state.eventClaims.delete(lane);
+      }
+      state.closeObservers.delete(observer);
+      throw normalizeUnknownError(error, "createRawSocketEventEmitter");
+    }
+  }
+
+  get socket(): RawSocket {
+    return this.#socket;
+  }
+
+  get status(): RawSocketEventEmitterStatus {
+    return this.#controller.status;
+  }
+
+  start(): this {
+    this.#controller.start();
+    return this;
+  }
+
+  pause(): Promise<void> {
+    return this.#controller.pause();
+  }
+
+  resume(): this {
+    this.#controller.resume();
+    return this;
+  }
+
+  detach(): Promise<RawSocket> {
+    return this.#controller.detach();
+  }
+
+  close(): Promise<void> {
+    return this.#controller.close();
+  }
+
+  #emitMessage(message: ReceivedMessage): void {
+    super.emit("message", message);
+  }
+
+  #emitError(error: unknown): void {
+    super.emit("error", error);
+  }
+
+  #emitClose(): void {
+    super.emit("close");
+  }
+}
+
+/**
+ * Confirms that the TypeScript package can call into the Rust Node-API addon.
+ *
+ * This bootstrap-only diagnostic does not perform network operations.
+ */
+export function nativeSmokeTest(): string {
+  return nativeBinding.nativeSmokeTest();
+}
+
+/** Resolves a Linux interface name to its current nonzero index. */
+export function interfaceIndex(name: string): number {
+  const result = nativeBinding.nativeInterfaceIndex(name);
+  if (isNativeErrorData(result)) throw new RawSocketError(result);
+  return result;
+}
+
+/** Resolves a Linux interface index to its current name. */
+export function interfaceName(index: number): string {
+  const result = nativeBinding.nativeInterfaceName(index);
+  if (isNativeErrorData(result)) throw new RawSocketError(result);
+  return result;
+}
+
+function dispatchCompletion(
+  state: SocketState,
+  completion: NativeCompletion,
+): void {
+  const pending = takePendingOperation(state, completion.operationId);
+  if (pending === undefined) {
+    return;
+  }
+  if (completion.error === undefined) {
+    pending.resolve(completion);
+  } else {
+    pending.reject(new RawSocketError(completion.error));
+  }
+}
+
+function takePendingOperation(
+  state: SocketState,
+  operationId: number,
+): PendingOperation | undefined {
+  const pending = state.pending.get(operationId);
+  if (pending === undefined) return undefined;
+  state.pending.delete(operationId);
+  pending.finalizers?.run();
+  return pending;
+}
+
+function addPendingFinalizer(
+  state: SocketState,
+  operationId: number,
+  finalizer: () => void,
+): void {
+  const pending = state.pending.get(operationId);
+  if (pending === undefined) {
+    throw internalError(
+      "registerOperationFinalizer",
+      "pending operation was not registered",
+    );
+  }
+  const finalizers =
+    pending.finalizers ?? (pending.finalizers = createInternalFinalizers());
+  finalizers.add(finalizer);
+}
+
+function createSocketState(): SocketState {
+  return {
+    pending: new Map(),
+    directReceives: { normal: 0, errorQueue: 0 },
+    eventClaims: new Map(),
+    ringConfigurations: new Set(),
+    closeObservers: new Set(),
+    ringFrameReceives: 0,
+    ringActive: false,
+  };
+}
+
+function callNative(
+  operation: () => NativeSubmitResult,
+  operationName: string,
+): NativeSubmitResult {
+  try {
+    return operation();
+  } catch (error) {
+    return {
+      accepted: false,
+      error: errorDataFromUnknown(error, operationName),
+    };
+  }
+}
+
+function validateProtocol(
+  options: RawSocketOptions,
+): ValidatedRawSocketOptions {
+  const candidate: unknown = options;
+  if (typeof candidate !== "object" || candidate === null) {
+    throw invalidArgument("createRawSocket", "options must be an object");
+  }
+  const family = (candidate as { family?: unknown }).family;
+  if (
+    family !== undefined &&
+    family !== "ipv4" &&
+    family !== "ipv6" &&
+    family !== "packet"
+  )
+    throw invalidArgument(
+      "createRawSocket",
+      "family must be ipv4, ipv6, or packet",
+    );
+  const resolvedFamily = family ?? "ipv4";
+  const mode = (candidate as { mode?: unknown }).mode;
+  if (resolvedFamily === "packet") {
+    if (mode !== "raw" && mode !== "cooked")
+      throw invalidArgument(
+        "createPacketSocket",
+        "packet mode must be raw or cooked",
+      );
+  } else if (mode !== undefined)
+    throw invalidArgument(
+      "createRawSocket",
+      "mode is valid only for packet sockets",
+    );
+  const protocol = (candidate as { protocol?: unknown }).protocol;
+  validatePacketLength(
+    protocol,
+    "protocol",
+    resolvedFamily === "packet" ? 0xffff : 255,
+  );
+  return {
+    family: resolvedFamily,
+    mode,
+    protocol: protocol as number,
+  };
+}
+
+function validatePacketData(data: Uint8Array): void {
+  if (!(data instanceof Uint8Array)) {
+    throw invalidArgument("send", "data must be a Uint8Array");
+  }
+  validatePacketLength(data.byteLength, "data.byteLength");
+}
+
+function validateDestination(destination: string): void {
+  validateIpv4Address(destination, "send", "destination");
+}
+
+function validateSignal(signal: unknown, operation: string): void {
+  if (signal !== undefined && !(signal instanceof AbortSignal))
+    throw invalidArgument(operation, "signal must be an AbortSignal");
+}
+
+function validateSendMessageRequest(
+  request: unknown,
+  socketFamily: RawSocketFamily,
+): asserts request is SendMessageRequest {
+  if (typeof request !== "object" || request === null)
+    throw invalidArgument("sendMessage", "request must be an object");
+  const candidate = request as Record<string, unknown>;
+  validatePacketData(candidate.data as Uint8Array);
+  if (
+    typeof candidate.destination !== "object" ||
+    candidate.destination === null ||
+    ((candidate.destination as Record<string, unknown>).family !== "ipv4" &&
+      (candidate.destination as Record<string, unknown>).family !== "ipv6" &&
+      (candidate.destination as Record<string, unknown>).family !== "packet")
+  ) {
+    throw invalidArgument(
+      "sendMessage",
+      "destination must be an IP message address",
+    );
+  }
+  const destination = candidate.destination as Record<string, unknown>;
+  if (destination.family !== socketFamily)
+    throw invalidArgument(
+      "sendMessage",
+      "destination family must match socket family",
+    );
+  if (socketFamily === "ipv4")
+    validateIpv4Address(
+      destination.address,
+      "sendMessage",
+      "destination.address",
+    );
+  else if (socketFamily === "ipv6")
+    validateIpv6MessageAddress(destination, "sendMessage");
+  else validatePacketMessageAddress(destination, "sendMessage", true);
+  validateFlagList(candidate.flags, ["dontRoute"], "sendMessage");
+  validateSignal(candidate.signal, "sendMessage");
+  const control: unknown = candidate.control ?? [];
+  if (!Array.isArray(control) || control.length > 64)
+    throw invalidArgument(
+      "sendMessage",
+      "control must contain at most 64 messages",
+    );
+  if (socketFamily === "packet" && control.length !== 0) {
+    throw invalidArgument(
+      "sendMessage",
+      "packet controls are deferred to Phase 8",
+    );
+  }
+  const kinds = new Set<string>();
+  for (const rawMessage of control) {
+    if (typeof rawMessage !== "object" || rawMessage === null)
+      throw invalidArgument(
+        "sendMessage",
+        "control messages must be valid and unique by kind",
+      );
+    const message = rawMessage as Record<string, unknown>;
+    if (typeof message.kind !== "string" || kinds.has(message.kind)) {
+      throw invalidArgument(
+        "sendMessage",
+        "control messages must have unique string kinds",
+      );
+    }
+    kinds.add(message.kind);
+    if (
+      message.kind === "ipv4Ttl" ||
+      message.kind === "ipv6HopLimit" ||
+      message.kind === "ipv6TrafficClass"
+    ) {
+      validateIntegerRange(
+        message.value,
+        1,
+        255,
+        "sendMessage",
+        `${message.kind}.value`,
+      );
+      if ((socketFamily === "ipv4") !== message.kind.startsWith("ipv4"))
+        throw invalidArgument(
+          "sendMessage",
+          "control family must match socket family",
+        );
+    } else if (
+      message.kind === "ipv4PacketInfo" ||
+      message.kind === "ipv6PacketInfo"
+    ) {
+      if (message.interfaceIndex !== undefined)
+        validateIntegerRange(
+          message.interfaceIndex,
+          0,
+          0x7fff_ffff,
+          "sendMessage",
+          "interfaceIndex",
+        );
+      if ((socketFamily === "ipv4") !== message.kind.startsWith("ipv4"))
+        throw invalidArgument(
+          "sendMessage",
+          "control family must match socket family",
+        );
+      if (message.sourceAddress !== undefined) {
+        if (socketFamily === "ipv4")
+          validateIpv4Address(
+            message.sourceAddress,
+            "sendMessage",
+            "sourceAddress",
+          );
+        else
+          validateIpv6Address(
+            message.sourceAddress,
+            "sendMessage",
+            "sourceAddress",
+          );
+      }
+    } else
+      throw invalidArgument("sendMessage", "unsupported control message kind");
+  }
+}
+
+function validateSendBatch(
+  requests: unknown,
+  family: RawSocketFamily,
+): asserts requests is readonly BatchSendRequest[] {
+  if (!Array.isArray(requests) || requests.length < 1 || requests.length > 64)
+    throw invalidArgument(
+      "sendBatch",
+      "requests must contain 1 through 64 messages",
+    );
+  let bytes = 0;
+  for (const request of requests) {
+    if (typeof request !== "object" || request === null)
+      throw invalidArgument("sendBatch", "each request must be an object");
+    const candidate = request as Record<string, unknown>;
+    validateSendMessageRequest(
+      {
+        data: candidate.data,
+        destination: candidate.destination,
+      },
+      family,
+    );
+    bytes += (candidate.data as Uint8Array).byteLength;
+    if (bytes > 1024 * 1024)
+      throw invalidArgument(
+        "sendBatch",
+        "combined batch data must not exceed 1048576 bytes",
+      );
+  }
+}
+
+function validateReceiveMessageOptions(
+  options: unknown,
+): asserts options is ReceiveMessageOptions {
+  if (typeof options !== "object" || options === null)
+    throw invalidArgument("receiveMessage", "options must be an object");
+  const candidate = options as Record<string, unknown>;
+  validatePacketLength(
+    candidate.dataCapacity ?? MAX_PACKET_LENGTH,
+    "dataCapacity",
+  );
+  validateIntegerRange(
+    candidate.controlCapacity ?? DEFAULT_CONTROL_CAPACITY,
+    0,
+    MAX_CONTROL_CAPACITY,
+    "receiveMessage",
+    "controlCapacity",
+  );
+  validateFlagList(candidate.flags, ["peek", "errorQueue"], "receiveMessage");
+  validateSignal(candidate.signal, "receiveMessage");
+}
+
+function validateRawSocketEventEmitterOptions(
+  options: unknown,
+  family: RawSocketFamily,
+): ClaimedReceiveOptions {
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(
+      "createRawSocketEventEmitter",
+      "options must be an object",
+    );
+  }
+  const candidate = options as Record<string, unknown>;
+  const dataCapacity = candidate.dataCapacity ?? MAX_PACKET_LENGTH;
+  const controlCapacity = candidate.controlCapacity ?? DEFAULT_CONTROL_CAPACITY;
+  const errorQueue = candidate.errorQueue ?? false;
+  validateIntegerRange(
+    dataCapacity,
+    1,
+    MAX_PACKET_LENGTH,
+    "createRawSocketEventEmitter",
+    "dataCapacity",
+  );
+  validateIntegerRange(
+    controlCapacity,
+    0,
+    MAX_CONTROL_CAPACITY,
+    "createRawSocketEventEmitter",
+    "controlCapacity",
+  );
+  if (typeof errorQueue !== "boolean") {
+    throw invalidArgument(
+      "createRawSocketEventEmitter",
+      "errorQueue must be a boolean",
+    );
+  }
+  if (errorQueue && family === "packet") {
+    throw unsupportedError(
+      "createRawSocketEventEmitter",
+      "Linux packet sockets do not support the IP error queue",
+    );
+  }
+  return { dataCapacity, controlCapacity, errorQueue };
+}
+
+function validateReceiveBatchOptions(
+  options: unknown,
+): asserts options is ReceiveBatchOptions {
+  if (typeof options !== "object" || options === null)
+    throw invalidArgument("receiveBatch", "options must be an object");
+  const candidate = options as Record<string, unknown>;
+  validateIntegerRange(candidate.count, 1, 64, "receiveBatch", "count");
+  const capacity = candidate.dataCapacity ?? MAX_PACKET_LENGTH;
+  validateIntegerRange(
+    capacity,
+    1,
+    MAX_PACKET_LENGTH,
+    "receiveBatch",
+    "dataCapacity",
+  );
+  if (candidate.count * capacity > 1024 * 1024)
+    throw invalidArgument(
+      "receiveBatch",
+      "combined receive batch allocation must not exceed 1048576 bytes",
+    );
+  validateSignal(candidate.signal, "receiveBatch");
+}
+
+function validatePacketRingConfig(
+  config: unknown,
+  family: RawSocketFamily,
+): NativePacketRingConfig {
+  if (family !== "packet")
+    throw invalidArgument(
+      "configurePacketRing",
+      "packet rings require a packet socket",
+    );
+  if (typeof config !== "object" || config === null)
+    throw invalidArgument(
+      "configurePacketRing",
+      "ring configuration must be an object",
+    );
+  const candidate = config as Record<string, unknown>;
+  const blockSize = candidate.blockSize ?? 1024 * 1024;
+  const blockCount = candidate.blockCount ?? 4;
+  const frameSize = candidate.frameSize ?? 2048;
+  const retireTimeoutMs = candidate.retireTimeoutMs ?? 64;
+  validateIntegerRange(
+    blockSize,
+    4096,
+    64 * 1024 * 1024,
+    "configurePacketRing",
+    "blockSize",
+  );
+  validateIntegerRange(
+    blockCount,
+    1,
+    16_384,
+    "configurePacketRing",
+    "blockCount",
+  );
+  validateIntegerRange(
+    frameSize,
+    256,
+    65_536,
+    "configurePacketRing",
+    "frameSize",
+  );
+  validateIntegerRange(
+    retireTimeoutMs,
+    1,
+    60_000,
+    "configurePacketRing",
+    "retireTimeoutMs",
+  );
+  if (
+    blockSize % frameSize !== 0 ||
+    frameSize % 16 !== 0 ||
+    blockSize * blockCount > 64 * 1024 * 1024
+  )
+    throw invalidArgument(
+      "configurePacketRing",
+      "ring geometry is misaligned or exceeds 64 MiB",
+    );
+  return {
+    blockSize,
+    blockCount,
+    frameSize,
+    retireTimeoutMs,
+  };
+}
+
+function validateFlagList(
+  value: unknown,
+  allowed: readonly string[],
+  operation: string,
+): void {
+  if (value === undefined) return;
+  if (
+    !Array.isArray(value) ||
+    new Set(value).size !== value.length ||
+    value.some(
+      (flag: unknown) => typeof flag !== "string" || !allowed.includes(flag),
+    )
+  ) {
+    throw invalidArgument(
+      operation,
+      "flags must contain unique supported values",
+    );
+  }
+}
+
+function validateIntegerRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  operation: string,
+  name: string,
+): asserts value is number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw invalidArgument(
+      operation,
+      `${name} must be an integer from ${String(minimum)} through ${String(maximum)}`,
+    );
+  }
+}
+
+function validateRawOptionNumbers(
+  level: unknown,
+  name: unknown,
+  length: unknown,
+  operation: string,
+  allowZero = false,
+): void {
+  validateIntegerRange(level, 0, 0x7fff_ffff, operation, "level");
+  validateIntegerRange(name, 0, 0x7fff_ffff, operation, "name");
+  validateIntegerRange(
+    length,
+    allowZero ? 0 : 1,
+    4096,
+    operation,
+    "option length",
+  );
+}
+
+function validateClassicFilter(
+  program: unknown,
+): asserts program is readonly ClassicBpfInstruction[] {
+  if (!Array.isArray(program) || program.length < 1 || program.length > 4096)
+    throw invalidArgument(
+      "attachFilter",
+      "program must contain 1 through 4096 instructions",
+    );
+  for (const raw of program) {
+    if (typeof raw !== "object" || raw === null)
+      throw invalidArgument(
+        "attachFilter",
+        "each instruction must be an object",
+      );
+    const instruction = raw as Record<string, unknown>;
+    validateIntegerRange(instruction.code, 0, 0xffff, "attachFilter", "code");
+    validateIntegerRange(
+      instruction.jumpTrue,
+      0,
+      0xff,
+      "attachFilter",
+      "jumpTrue",
+    );
+    validateIntegerRange(
+      instruction.jumpFalse,
+      0,
+      0xff,
+      "attachFilter",
+      "jumpFalse",
+    );
+    validateIntegerRange(
+      instruction.value,
+      0,
+      0xffff_ffff,
+      "attachFilter",
+      "value",
+    );
+  }
+}
+
+function validatePacketMembership(
+  value: unknown,
+  family: RawSocketFamily,
+): asserts value is PacketMembership {
+  if (family !== "packet")
+    throw invalidArgument(
+      "packetMembership",
+      "membership requires a packet socket",
+    );
+  if (typeof value !== "object" || value === null)
+    throw invalidArgument("packetMembership", "membership must be an object");
+  const candidate = value as Record<string, unknown>;
+  validateIntegerRange(
+    candidate.interfaceIndex,
+    1,
+    0x7fff_ffff,
+    "packetMembership",
+    "interfaceIndex",
+  );
+  if (
+    candidate.kind !== "promiscuous" &&
+    candidate.kind !== "allMulticast" &&
+    candidate.kind !== "multicast"
+  )
+    throw invalidArgument("packetMembership", "unsupported membership kind");
+  if (
+    candidate.address !== undefined &&
+    (!(candidate.address instanceof Uint8Array) ||
+      candidate.address.byteLength > 8)
+  )
+    throw invalidArgument(
+      "packetMembership",
+      "membership address must contain at most eight bytes",
+    );
+  if (
+    candidate.kind === "multicast" &&
+    (!(candidate.address instanceof Uint8Array) ||
+      candidate.address.byteLength === 0)
+  )
+    throw invalidArgument(
+      "packetMembership",
+      "multicast membership requires an address",
+    );
+}
+
+function convertReceivedMessage(
+  message: NativeReceivedMessage,
+): ReceivedMessage {
+  const flags: ReceivedMessageFlag[] = [];
+  if (message.endOfRecord) flags.push("endOfRecord");
+  if (message.outOfBand) flags.push("outOfBand");
+  if (message.errorQueue) flags.push("errorQueue");
+  return {
+    data: message.data,
+    source: convertReceivedSource(message),
+    dataLength: message.dataLength,
+    dataTruncated: message.dataTruncated,
+    controlTruncated: message.controlTruncated,
+    flags,
+    control: message.control.map(convertReceivedControl),
+    ipv4: message.ipv4,
+    packetAuxdata: convertPacketAuxdata(message),
+  };
+}
+
+function convertPacketAuxdata(
+  message: NativeReceivedMessage,
+): PacketAuxdata | undefined {
+  if (message.packetAuxStatus === undefined) return undefined;
+  if (
+    message.packetAuxOriginalLength === undefined ||
+    message.packetAuxSnapshotLength === undefined ||
+    message.packetAuxMacOffset === undefined ||
+    message.packetAuxNetworkOffset === undefined ||
+    message.packetAuxVlanTci === undefined ||
+    message.packetAuxVlanTpid === undefined
+  ) {
+    throw internalError(
+      "receiveMessage",
+      "native PACKET_AUXDATA completion was incomplete",
+    );
+  }
+  return {
+    status: message.packetAuxStatus,
+    originalLength: message.packetAuxOriginalLength,
+    snapshotLength: message.packetAuxSnapshotLength,
+    macOffset: message.packetAuxMacOffset,
+    networkOffset: message.packetAuxNetworkOffset,
+    vlanTci: message.packetAuxVlanTci,
+    vlanTpid: message.packetAuxVlanTpid,
+  };
+}
+
+function convertReceivedSource(
+  message: NativeReceivedMessage,
+): IpMessageAddress | undefined {
+  if (message.sourceFamily === "packet") {
+    if (
+      message.sourceInterfaceIndex === undefined ||
+      message.sourceProtocol === undefined ||
+      message.sourceHardwareAddress === undefined ||
+      message.sourceHardwareType === undefined ||
+      message.sourcePacketType === undefined
+    ) {
+      throw internalError(
+        "receiveMessage",
+        "native packet source metadata was incomplete",
+      );
+    }
+    return {
+      family: "packet",
+      interfaceIndex: message.sourceInterfaceIndex,
+      protocol: message.sourceProtocol,
+      address: message.sourceHardwareAddress,
+      hardwareType: message.sourceHardwareType,
+      packetType: message.sourcePacketType,
+    };
+  }
+  if (message.sourceAddress === undefined) return undefined;
+  return message.sourceFamily === "ipv6"
+    ? {
+        family: "ipv6",
+        address: message.sourceAddress,
+        scopeId: message.sourceScopeId ?? 0,
+        flowInfo: message.sourceFlowInfo ?? 0,
+      }
+    : { family: "ipv4", address: message.sourceAddress };
+}
+
+function convertReceivedControl(
+  message: NativeReceivedControlMessage,
+): ReceivedControlMessage {
+  switch (message.kind) {
+    case "ipv4PacketInfo":
+      if (
+        message.interfaceIndex === undefined ||
+        message.selectedAddress === undefined ||
+        message.destinationAddress === undefined
+      )
+        break;
+      return {
+        kind: message.kind,
+        interfaceIndex: message.interfaceIndex,
+        selectedAddress: message.selectedAddress,
+        destinationAddress: message.destinationAddress,
+      };
+    case "ipv6PacketInfo":
+      if (
+        message.interfaceIndex === undefined ||
+        message.destinationAddress === undefined
+      )
+        break;
+      return {
+        kind: message.kind,
+        interfaceIndex: message.interfaceIndex,
+        destinationAddress: message.destinationAddress,
+      };
+    case "ipv4Ttl":
+    case "ipv4TypeOfService":
+    case "ipv6HopLimit":
+    case "ipv6TrafficClass":
+    case "receiveQueueOverflow":
+      if (message.value === undefined) break;
+      return { kind: message.kind, value: message.value };
+    case "timestampNanoseconds": {
+      if (message.seconds === undefined || message.nanoseconds === undefined)
+        break;
+      const seconds = BigInt(message.seconds);
+      return {
+        kind: message.kind,
+        seconds,
+        nanoseconds: message.nanoseconds,
+        timestamp: seconds * 1_000_000_000n + BigInt(message.nanoseconds),
+      };
+    }
+    case "ipv4ExtendedError":
+    case "ipv6ExtendedError":
+      if (
+        message.errno === undefined ||
+        message.origin === undefined ||
+        message.errorType === undefined ||
+        message.errorCode === undefined ||
+        message.info === undefined ||
+        message.extendedData === undefined
+      )
+        break;
+      return {
+        kind: message.kind,
+        errno: message.errno,
+        origin: message.origin,
+        type: message.errorType,
+        code: message.errorCode,
+        info: message.info,
+        data: message.extendedData,
+        ...(message.offender === undefined
+          ? {}
+          : { offender: message.offender }),
+      };
+    case "unknown":
+      if (
+        message.level === undefined ||
+        message.messageType === undefined ||
+        message.data === undefined
+      )
+        break;
+      return {
+        kind: message.kind,
+        level: message.level,
+        type: message.messageType,
+        data: message.data,
+      };
+  }
+  throw internalError(
+    "receiveMessage",
+    "native control message was incomplete or unknown",
+  );
+}
+
+function validateIpv4Address(
+  value: unknown,
+  operation: string,
+  name: string,
+): asserts value is string {
+  if (typeof value !== "string" || !isIPv4(value)) {
+    throw invalidArgument(
+      operation,
+      `${name} must be a dotted-decimal IPv4 address`,
+    );
+  }
+}
+
+function isIpv4MulticastAddress(address: string): boolean {
+  const firstOctet = Number(address.slice(0, address.indexOf(".")));
+  return firstOctet >= 224 && firstOctet <= 239;
+}
+
+function validateIpv6Address(
+  value: unknown,
+  operation: string,
+  name: string,
+): asserts value is string {
+  if (typeof value !== "string" || value.includes("%") || !isIPv6(value)) {
+    throw invalidArgument(
+      operation,
+      `${name} must be an IPv6 address without a zone suffix`,
+    );
+  }
+}
+
+function validateIpv6MessageAddress(
+  value: unknown,
+  operation: string,
+): asserts value is Ipv6MessageAddress {
+  if (typeof value !== "object" || value === null)
+    throw invalidArgument(operation, "address must be an IPv6 message address");
+  const candidate = value as Record<string, unknown>;
+  if (candidate.family !== "ipv6")
+    throw invalidArgument(operation, "address family must be ipv6");
+  validateIpv6Address(candidate.address, operation, "address");
+  validateIntegerRange(
+    candidate.scopeId ?? 0,
+    0,
+    0xffff_ffff,
+    operation,
+    "scopeId",
+  );
+  validateIntegerRange(
+    candidate.flowInfo ?? 0,
+    0,
+    0x000f_ffff,
+    operation,
+    "flowInfo",
+  );
+  const first = Number.parseInt(candidate.address.split(":", 1)[0] ?? "", 16);
+  if ((first & 0xffc0) === 0xfe80 && (candidate.scopeId ?? 0) === 0) {
+    throw invalidArgument(
+      operation,
+      "link-local IPv6 addresses require a nonzero scopeId",
+    );
+  }
+}
+
+function validatePacketMessageAddress(
+  value: unknown,
+  operation: string,
+  outbound: boolean,
+): asserts value is PacketMessageAddress {
+  if (typeof value !== "object" || value === null)
+    throw invalidArgument(
+      operation,
+      "address must be a packet message address",
+    );
+  const candidate = value as Record<string, unknown>;
+  if (candidate.family !== "packet")
+    throw invalidArgument(operation, "address family must be packet");
+  validateIntegerRange(
+    candidate.interfaceIndex,
+    1,
+    0x7fff_ffff,
+    operation,
+    "interfaceIndex",
+  );
+  validateIntegerRange(candidate.protocol, 1, 0xffff, operation, "protocol");
+  if (
+    candidate.address !== undefined &&
+    (!(candidate.address instanceof Uint8Array) ||
+      candidate.address.byteLength > 8)
+  ) {
+    throw invalidArgument(
+      operation,
+      "packet hardware address must be a Uint8Array of at most eight bytes",
+    );
+  }
+  if (outbound && candidate.hardwareType !== undefined)
+    throw invalidArgument(operation, "hardwareType is receive metadata only");
+  if (outbound && candidate.packetType !== undefined)
+    throw invalidArgument(operation, "packetType is receive metadata only");
+}
+
+function validateOptionName(
+  value: unknown,
+  operation: string,
+): asserts value is RawSocketOptionName {
+  if (
+    value !== "broadcast" &&
+    value !== "ipTtl" &&
+    value !== "ipTypeOfService" &&
+    value !== "receiveBufferSize" &&
+    value !== "sendBufferSize" &&
+    value !== "receivePacketInfo" &&
+    value !== "receiveTtl" &&
+    value !== "receiveTypeOfService" &&
+    value !== "receiveTimestampNanoseconds" &&
+    value !== "receiveQueueOverflow" &&
+    value !== "receiveErrors" &&
+    value !== "bindToDevice" &&
+    value !== "ipv6Only" &&
+    value !== "ipv6UnicastHops" &&
+    value !== "ipv6TrafficClass" &&
+    value !== "ipv6MulticastHops" &&
+    value !== "receiveHopLimit" &&
+    value !== "receiveTrafficClass" &&
+    value !== "headerIncluded" &&
+    value !== "freebind" &&
+    value !== "transparent" &&
+    value !== "priority" &&
+    value !== "mark" &&
+    value !== "pathMtuDiscovery" &&
+    value !== "multicastTtl" &&
+    value !== "multicastLoop" &&
+    value !== "ipv6ChecksumOffset" &&
+    value !== "busyPollMicroseconds"
+  ) {
+    throw invalidArgument(operation, "unsupported raw socket option");
+  }
+}
+
+function validateOptionFamily(
+  name: RawSocketOptionName,
+  family: RawSocketFamily,
+  operation: string,
+): void {
+  if (
+    family === "packet" &&
+    name !== "receiveBufferSize" &&
+    name !== "sendBufferSize" &&
+    name !== "busyPollMicroseconds"
+  ) {
+    throw unsupportedError(
+      operation,
+      `option ${name} is not a typed packet option`,
+    );
+  }
+  const ipv4Only: readonly RawSocketOptionName[] = [
+    "broadcast",
+    "ipTtl",
+    "ipTypeOfService",
+    "receiveTtl",
+    "receiveTypeOfService",
+    "headerIncluded",
+    "freebind",
+    "transparent",
+    "multicastTtl",
+  ];
+  const ipv6Only: readonly RawSocketOptionName[] = [
+    "ipv6Only",
+    "ipv6UnicastHops",
+    "ipv6TrafficClass",
+    "ipv6MulticastHops",
+    "receiveHopLimit",
+    "receiveTrafficClass",
+    "ipv6ChecksumOffset",
+  ];
+  if (
+    (family === "ipv4" && ipv6Only.includes(name)) ||
+    (family === "ipv6" && ipv4Only.includes(name))
+  ) {
+    throw invalidArgument(
+      operation,
+      `option ${name} is incompatible with ${family}`,
+    );
+  }
+  if (operation === "setOption" && name === "ipv6Only") {
+    throw unsupportedError(
+      operation,
+      "Linux raw IPv6 sockets expose ipv6Only as an effective read-only value",
+    );
+  }
+}
+
+function validateOptionValue(
+  name: unknown,
+  value: unknown,
+): number | undefined {
+  validateOptionName(name, "setOption");
+  if (name === "bindToDevice") {
+    if (value === null) return undefined;
+    if (
+      typeof value !== "string" ||
+      Buffer.byteLength(value) < 1 ||
+      Buffer.byteLength(value) > 15 ||
+      value.includes("\0")
+    ) {
+      throw invalidArgument(
+        "setOption",
+        "bindToDevice must be null or a 1 through 15 byte non-NUL string",
+      );
+    }
+    return undefined;
+  }
+  if (isBooleanOption(name)) {
+    if (typeof value !== "boolean") {
+      throw invalidArgument("setOption", `${name} must be a boolean`);
+    }
+    return value ? 1 : 0;
+  }
+
+  const minimum =
+    name === "ipTypeOfService" ||
+    name.startsWith("ipv6") ||
+    name === "priority" ||
+    name === "mark" ||
+    name === "pathMtuDiscovery" ||
+    name === "busyPollMicroseconds"
+      ? 0
+      : 1;
+  const maximum =
+    name === "receiveBufferSize" || name === "sendBufferSize"
+      ? MAX_SOCKET_BUFFER_SIZE
+      : name === "mark"
+        ? 0xffff_ffff
+        : name === "priority"
+          ? 0x7fff_ffff
+          : name === "busyPollMicroseconds"
+            ? 1_000_000
+            : name === "pathMtuDiscovery"
+              ? 3
+              : name === "ipv6ChecksumOffset"
+                ? 65_535
+                : 255;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw invalidArgument(
+      "setOption",
+      `${name} must be an integer from ${String(minimum)} through ${String(maximum)}`,
+    );
+  }
+  return value;
+}
+
+function isBooleanOption(name: RawSocketOptionName): boolean {
+  return (
+    name === "broadcast" ||
+    name === "receivePacketInfo" ||
+    name === "receiveTtl" ||
+    name === "receiveTypeOfService" ||
+    name === "receiveTimestampNanoseconds" ||
+    name === "receiveQueueOverflow" ||
+    name === "receiveErrors" ||
+    name === "ipv6Only" ||
+    name === "receiveHopLimit" ||
+    name === "receiveTrafficClass" ||
+    name === "headerIncluded" ||
+    name === "freebind" ||
+    name === "transparent" ||
+    name === "multicastLoop"
+  );
+}
+
+function validatePacketLength(
+  value: unknown,
+  name: string,
+  maximum = MAX_PACKET_LENGTH,
+): void {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > maximum
+  ) {
+    throw invalidArgument(
+      "validatePacketBufferLength",
+      `${name} must be an integer from 1 through ${String(maximum)}`,
+    );
+  }
+}
+
+function isNativeErrorData(value: unknown): value is NativeErrorData {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<NativeErrorData>;
+  return (
+    typeof candidate.kind === "string" &&
+    typeof candidate.code === "string" &&
+    typeof candidate.operation === "string" &&
+    typeof candidate.message === "string"
+  );
+}
+
+function isRawSocketStatus(value: string): value is RawSocketStatus {
+  return value === "open" || value === "closing" || value === "closed";
+}
+
+function isRawSocketErrorKind(
+  error: unknown,
+  kind: RawSocketErrorKind,
+): error is RawSocketError {
+  return error instanceof RawSocketError && error.kind === kind;
+}
+
+function callIcmpCodec<Result>(operation: string, call: () => Result): Result {
+  try {
+    return call();
+  } catch (error) {
+    if (error instanceof RawSocketError) throw error;
+    if (error instanceof icmpCodec.IcmpInputError) {
+      throw invalidArgument(operation, error.message);
+    }
+    throw normalizeUnknownError(error, operation);
+  }
+}
+
+function validateIcmpTracerouteProbeOptions(
+  options: unknown,
+  operation = "createIcmpTracerouteProbe",
+): traceroute.IcmpTracerouteProbeOptions {
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(operation, "options must be an object");
+  }
+  const candidate = options as Record<string, unknown>;
+  const destination = validateIcmpTracerouteDestination(
+    candidate.destination,
+    operation,
+  );
+  const identifier = candidate.identifier;
+  const sequence = candidate.sequence;
+  const ttl = candidate.ttl;
+  validateIntegerRange(identifier, 0, 0xffff, operation, "identifier");
+  validateIntegerRange(sequence, 0, 0xffff, operation, "sequence");
+  validateIntegerRange(ttl, 1, 255, operation, "ttl");
+  const token = validateIcmpTracerouteBytes(
+    candidate.token,
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH,
+    operation,
+    "token",
+  );
+  const payload = validateIcmpTracerouteBytes(
+    candidate.payload ?? new Uint8Array(),
+    0,
+    traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    operation,
+    "payload",
+  );
+  const sentAt = candidate.sentAt;
+  if (typeof sentAt !== "bigint" || sentAt < 0n) {
+    throw invalidArgument(
+      operation,
+      "sentAt must be a nonnegative monotonic bigint",
+    );
+  }
+  return {
+    destination,
+    identifier,
+    sequence,
+    token,
+    payload,
+    ttl,
+    sentAt,
+  };
+}
+
+function validateIcmpTracerouteProbe(
+  probe: unknown,
+): traceroute.IcmpTracerouteProbe {
+  const options = validateIcmpTracerouteProbeOptions(
+    probe,
+    "classifyIcmpTracerouteResponse",
+  );
+  const candidate = probe as Record<string, unknown>;
+  const data = validateIcmpTracerouteBytes(
+    candidate.data,
+    options.token.byteLength,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH +
+      traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    "classifyIcmpTracerouteResponse",
+    "probe.data",
+  );
+  const expected = Buffer.concat([
+    Buffer.from(options.token),
+    Buffer.from(options.payload ?? new Uint8Array()),
+  ]);
+  if (!data.equals(expected)) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "probe.data must equal probe.token followed by probe.payload",
+    );
+  }
+  return traceroute.createIcmpTracerouteProbeInternal(options);
+}
+
+function validateIcmpTracerouteReceived(
+  received: unknown,
+): traceroute.IcmpTracerouteReceived {
+  if (typeof received !== "object" || received === null) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received must be an IcmpReceivedParseResult",
+    );
+  }
+  const candidate = received as Record<string, unknown>;
+  if (candidate.ok === false) return { ok: false };
+  const ipv4 = candidate.ipv4;
+  const packet = candidate.packet;
+  if (
+    candidate.ok !== true ||
+    typeof candidate.incomplete !== "boolean" ||
+    typeof ipv4 !== "object" ||
+    ipv4 === null ||
+    typeof (ipv4 as { sourceAddress?: unknown }).sourceAddress !== "string" ||
+    typeof packet !== "object" ||
+    packet === null ||
+    typeof (packet as { incomplete?: unknown }).incomplete !== "boolean" ||
+    typeof (packet as { checksumStatus?: unknown }).checksumStatus !==
+      "string" ||
+    typeof (packet as { message?: unknown }).message !== "object" ||
+    (packet as { message?: unknown }).message === null
+  ) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received must be an IcmpReceivedParseResult",
+    );
+  }
+  const message = (packet as { message: Record<string, unknown> }).message;
+  if (typeof message.kind !== "string") {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received packet message must have a valid kind",
+    );
+  }
+  if (
+    (message.kind === "echoReply" && !(message.data instanceof Uint8Array)) ||
+    ((message.kind === "timeExceeded" ||
+      message.kind === "destinationUnreachable" ||
+      message.kind === "parameterProblem" ||
+      message.kind === "redirect") &&
+      (typeof message.quote !== "object" || message.quote === null))
+  ) {
+    throw invalidArgument(
+      "classifyIcmpTracerouteResponse",
+      "received packet message is not structurally valid",
+    );
+  }
+  return candidate as unknown as traceroute.IcmpTracerouteReceived;
+}
+
+function normalizeTraceIcmpRouteOptions(
+  destination: unknown,
+  options: unknown,
+): traceroute.NormalizedTraceIcmpRouteOptions {
+  const operation = "traceIcmpRoute";
+  const checkedDestination = validateIcmpTracerouteDestination(
+    destination,
+    operation,
+  );
+  if (typeof options !== "object" || options === null) {
+    throw invalidArgument(operation, "options must be an object");
+  }
+  const candidate = options as Record<string, unknown>;
+  const firstHop = candidate.firstHop ?? 1;
+  const maxHops = candidate.maxHops ?? 30;
+  const probesPerHop = candidate.probesPerHop ?? 3;
+  const timeoutMilliseconds = candidate.timeoutMilliseconds ?? 3_000;
+  const overallTimeoutMilliseconds =
+    candidate.overallTimeoutMilliseconds ?? 300_000;
+  const maxInFlight = candidate.maxInFlight ?? 1;
+  const stopOnUnreachable = candidate.stopOnUnreachable ?? true;
+  validateIntegerRange(firstHop, 1, 255, operation, "firstHop");
+  validateIntegerRange(maxHops, 1, 255, operation, "maxHops");
+  if (maxHops < firstHop) {
+    throw invalidArgument(operation, "maxHops must not be less than firstHop");
+  }
+  validateIntegerRange(
+    probesPerHop,
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_PROBES_PER_HOP,
+    operation,
+    "probesPerHop",
+  );
+  validateIntegerRange(
+    timeoutMilliseconds,
+    1,
+    60_000,
+    operation,
+    "timeoutMilliseconds",
+  );
+  validateIntegerRange(
+    overallTimeoutMilliseconds,
+    1,
+    3_600_000,
+    operation,
+    "overallTimeoutMilliseconds",
+  );
+  validateIntegerRange(maxInFlight, 1, probesPerHop, operation, "maxInFlight");
+  if (typeof stopOnUnreachable !== "boolean") {
+    throw invalidArgument(operation, "stopOnUnreachable must be a boolean");
+  }
+  const payload = validateIcmpTracerouteBytes(
+    candidate.payload ?? new Uint8Array(),
+    0,
+    traceroute.MAX_ICMP_TRACEROUTE_PAYLOAD_LENGTH,
+    operation,
+    "payload",
+  );
+  const token = validateIcmpTracerouteBytes(
+    candidate.token ?? randomBytes(16),
+    1,
+    traceroute.MAX_ICMP_TRACEROUTE_TOKEN_LENGTH,
+    operation,
+    "token",
+  );
+  const identifierValue = candidate.identifier;
+  const initialSequenceValue = candidate.initialSequence;
+  const randomTuple =
+    identifierValue === undefined || initialSequenceValue === undefined
+      ? randomBytes(4)
+      : undefined;
+  const identifier = identifierValue ?? randomTuple?.readUInt16BE(0);
+  const initialSequence = initialSequenceValue ?? randomTuple?.readUInt16BE(2);
+  validateIntegerRange(identifier, 0, 0xffff, operation, "identifier");
+  validateIntegerRange(
+    initialSequence,
+    0,
+    0xffff,
+    operation,
+    "initialSequence",
+  );
+  const signal = candidate.signal;
+  validateSignal(signal, operation);
+  const onProgress = candidate.onProgress;
+  if (onProgress !== undefined && typeof onProgress !== "function") {
+    throw invalidArgument(operation, "onProgress must be a function");
+  }
+  return {
+    destination: checkedDestination,
+    firstHop,
+    maxHops,
+    probesPerHop,
+    timeoutNanoseconds: BigInt(timeoutMilliseconds) * 1_000_000n,
+    overallTimeoutNanoseconds: BigInt(overallTimeoutMilliseconds) * 1_000_000n,
+    payload,
+    token,
+    identifier,
+    initialSequence,
+    maxInFlight,
+    stopOnUnreachable,
+    signal: signal as AbortSignal | undefined,
+    onProgress: onProgress as
+      ((progress: traceroute.IcmpTracerouteProgress) => void) | undefined,
+  };
+}
+
+function validateIcmpTracerouteDestination(
+  destination: unknown,
+  operation: string,
+): traceroute.IcmpTracerouteIpv4Destination {
+  if (
+    typeof destination !== "object" ||
+    destination === null ||
+    (destination as { family?: unknown }).family !== "ipv4"
+  ) {
+    throw invalidArgument(
+      operation,
+      "destination must be an IPv4 message address",
+    );
+  }
+  const address = (destination as { address?: unknown }).address;
+  validateIpv4Address(address, operation, "destination.address");
+  return { family: "ipv4", address };
+}
+
+function validateIcmpTracerouteBytes(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+  operation: string,
+  name: string,
+): Buffer {
+  let snapshot: Buffer;
+  try {
+    snapshot = icmpCodec.snapshotByteInputInternal(value, maximumLength, name);
+  } catch {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array from ${String(minimumLength)} through ${String(maximumLength)} bytes`,
+    );
+  }
+  if (snapshot.byteLength < minimumLength) {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array from ${String(minimumLength)} through ${String(maximumLength)} bytes`,
+    );
+  }
+  return snapshot;
+}
+
+function snapshotIcmpBytes(
+  value: unknown,
+  maximumLength: number,
+  operation: string,
+  name: string,
+): Buffer {
+  try {
+    return icmpCodec.snapshotByteInputInternal(value, maximumLength, name);
+  } catch {
+    throw invalidArgument(
+      operation,
+      `${name} must be a Uint8Array no larger than ${String(maximumLength)} bytes`,
+    );
+  }
+}
+
+function snapshotIcmpSendFlags(
+  value: unknown,
+): readonly SendMessageFlag[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "flags must contain unique supported values",
+    );
+  }
+  const count = value.length;
+  if (!Number.isSafeInteger(count) || count < 0 || count > 1) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "flags must contain unique supported values",
+    );
+  }
+  const flags: unknown[] = [];
+  for (let index = 0; index < count; index += 1) flags.push(value[index]);
+  validateFlagList(flags, ["dontRoute"], "sendIcmpMessage");
+  return flags as readonly SendMessageFlag[];
+}
+
+function snapshotIcmpSendControl(value: unknown): SendControlMessage {
+  if (typeof value !== "object" || value === null) {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "control messages must be valid and unique by kind",
+    );
+  }
+  const candidate = value as Record<string, unknown>;
+  const kind = candidate.kind;
+  if (kind === "ipv4Ttl") {
+    const controlValue = candidate.value;
+    validateIntegerRange(
+      controlValue,
+      1,
+      255,
+      "sendIcmpMessage",
+      "ipv4Ttl.value",
+    );
+    return { kind, value: controlValue };
+  }
+  if (kind !== "ipv4PacketInfo") {
+    throw invalidArgument(
+      "sendIcmpMessage",
+      "control messages must use an IPv4 control kind",
+    );
+  }
+  const interfaceIndex = candidate.interfaceIndex;
+  const sourceAddress = candidate.sourceAddress;
+  if (interfaceIndex !== undefined) {
+    validateIntegerRange(
+      interfaceIndex,
+      0,
+      0x7fff_ffff,
+      "sendIcmpMessage",
+      "ipv4PacketInfo.interfaceIndex",
+    );
+  }
+  if (sourceAddress !== undefined) {
+    validateIpv4Address(
+      sourceAddress,
+      "sendIcmpMessage",
+      "ipv4PacketInfo.sourceAddress",
+    );
+  }
+  return {
+    kind,
+    ...(interfaceIndex === undefined ? {} : { interfaceIndex }),
+    ...(sourceAddress === undefined ? {} : { sourceAddress }),
+  };
+}
+
+function validateIcmpSocket(socket: RawSocket, operation: string): void {
+  if (socketInternals.get(socket) === undefined) {
+    throw invalidArgument(
+      operation,
+      "socket must be a RawSocket returned by this module",
+    );
+  }
+  if (socket.family !== "ipv4") {
+    throw invalidArgument(operation, "socket must use the ipv4 family");
+  }
+  if (socket.protocol !== IPPROTO_ICMP) {
+    throw invalidArgument(operation, "socket protocol must be IPPROTO_ICMP");
+  }
+}
+
+function validateIcmpReceivedMessageInput(
+  value: unknown,
+): ValidatedIcmpReceivedMessageInput {
+  if (typeof value !== "object" || value === null) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message must be a ReceivedMessage object",
+    );
+  }
+  const candidate = value as Record<string, unknown>;
+  const data = candidate.data;
+  const dataLength = candidate.dataLength;
+  const dataTruncated = candidate.dataTruncated;
+  const source = candidate.source;
+  const metadata = candidate.ipv4;
+  if (!(data instanceof Uint8Array)) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.data must be a Uint8Array",
+    );
+  }
+  validateIntegerRange(
+    dataLength,
+    0,
+    MAX_PACKET_LENGTH,
+    "parseIcmpReceivedMessage",
+    "message.dataLength",
+  );
+  if (typeof dataTruncated !== "boolean") {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.dataTruncated must be boolean",
+    );
+  }
+  let sourceAddress: string | undefined;
+  if (source !== undefined) {
+    if (
+      typeof source !== "object" ||
+      source === null ||
+      (source as { family?: unknown }).family !== "ipv4"
+    ) {
+      throw invalidArgument(
+        "parseIcmpReceivedMessage",
+        "message.source must be an IPv4 address when present",
+      );
+    }
+    const address = (source as { address?: unknown }).address;
+    validateIpv4Address(
+      address,
+      "parseIcmpReceivedMessage",
+      "message.source.address",
+    );
+    sourceAddress = address;
+  }
+  if (metadata === undefined) {
+    return { data, dataLength, dataTruncated, ipv4: undefined, sourceAddress };
+  }
+  if (typeof metadata !== "object" || metadata === null) {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.ipv4 must be IPv4 metadata when present",
+    );
+  }
+  const ipv4 = metadata as Record<string, unknown>;
+  const destinationAddress = ipv4.destinationAddress;
+  const protocol = ipv4.protocol;
+  const ttl = ipv4.ttl;
+  const typeOfService = ipv4.typeOfService;
+  const headerLength = ipv4.headerLength;
+  const totalLength = ipv4.totalLength;
+  const identification = ipv4.identification;
+  const fragmentOffset = ipv4.fragmentOffset;
+  const dontFragment = ipv4.dontFragment;
+  const moreFragments = ipv4.moreFragments;
+  validateIpv4Address(
+    destinationAddress,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.destinationAddress",
+  );
+  validateIntegerRange(
+    protocol,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.protocol",
+  );
+  validateIntegerRange(
+    ttl,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.ttl",
+  );
+  validateIntegerRange(
+    typeOfService,
+    0,
+    255,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.typeOfService",
+  );
+  validateIntegerRange(
+    headerLength,
+    20,
+    60,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.headerLength",
+  );
+  validateIntegerRange(
+    totalLength,
+    20,
+    MAX_PACKET_LENGTH,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.totalLength",
+  );
+  validateIntegerRange(
+    identification,
+    0,
+    0xffff,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.identification",
+  );
+  validateIntegerRange(
+    fragmentOffset,
+    0,
+    0x1fff,
+    "parseIcmpReceivedMessage",
+    "message.ipv4.fragmentOffset",
+  );
+  if (typeof dontFragment !== "boolean" || typeof moreFragments !== "boolean") {
+    throw invalidArgument(
+      "parseIcmpReceivedMessage",
+      "message.ipv4 fragment flags must be boolean",
+    );
+  }
+  return {
+    data,
+    dataLength,
+    dataTruncated,
+    sourceAddress,
+    ipv4: {
+      destinationAddress,
+      protocol,
+      ttl,
+      typeOfService,
+      headerLength,
+      totalLength,
+      identification,
+      fragmentOffset,
+      dontFragment,
+      moreFragments,
+    },
+  };
+}
+
+function normalizeErrorKind(value: string): RawSocketErrorKind {
+  switch (value) {
+    case "aborted":
+    case "internal":
+    case "invalidArgument":
+    case "invalidState":
+    case "queueFull":
+    case "reactorClosed":
+    case "receiverActive":
+    case "socketClosed":
+    case "system":
+    case "malformedControl":
+    case "unsupported":
+      return value;
+    default:
+      return "internal";
+  }
+}
+
+function abortedError(operation: string): RawSocketError {
+  return new RawSocketError({
+    kind: "aborted",
+    code: "ERR_ABORTED",
+    operation,
+    message: "the operation was aborted",
+  });
+}
+
+function invalidArgument(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "invalidArgument",
+    code: "ERR_INVALID_ARGUMENT",
+    operation,
+    message,
+  });
+}
+
+function invalidState(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "invalidState",
+    code: "ERR_INVALID_STATE",
+    operation,
+    message,
+  });
+}
+
+function receiverActive(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "receiverActive",
+    code: "ERR_RECEIVER_ACTIVE",
+    operation,
+    message,
+  });
+}
+
+function internalError(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "internal",
+    code: "ERR_INTERNAL",
+    operation,
+    message,
+  });
+}
+
+function socketClosedError(operation: string): RawSocketError {
+  return new RawSocketError({
+    kind: "socketClosed",
+    code: "ERR_SOCKET_CLOSED",
+    operation,
+    message: "the socket is closing or closed",
+  });
+}
+
+function unsupportedError(operation: string, message: string): RawSocketError {
+  return new RawSocketError({
+    kind: "unsupported",
+    code: "ERR_UNSUPPORTED",
+    operation,
+    message,
+  });
+}
+
+function normalizeUnknownError(
+  error: unknown,
+  operation: string,
+): RawSocketError {
+  return error instanceof RawSocketError
+    ? error
+    : new RawSocketError(errorDataFromUnknown(error, operation));
+}
+
+function errorDataFromUnknown(
+  error: unknown,
+  operation: string,
+): NativeErrorData {
+  return {
+    kind: "internal",
+    code: "ERR_NATIVE_BOUNDARY",
+    operation,
+    message:
+      error instanceof Error
+        ? error.message
+        : "unknown native boundary failure",
+  };
+}

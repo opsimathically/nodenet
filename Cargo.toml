@@ -1,0 +1,14 @@
+[workspace]
+members = [
+  "crates/nodenet-linux-context",
+  "crates/nodenet-protocols",
+  "crates/nodenetscanner-engine",
+  "crates/nodenetscanner-native",
+  "crates/nodenetraw-native",
+]
+resolver = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

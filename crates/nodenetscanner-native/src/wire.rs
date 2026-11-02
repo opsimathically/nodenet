@@ -1,0 +1,1897 @@
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv6Addr};
+use std::time::Instant;
+
+use nodenet_linux_context::RoutePlanKind;
+use nodenet_protocols::{
+    ArpEthernetIpv4Operation, ArpEthernetIpv4Packet, CorrelationEvidenceKind, CorrelationToken,
+    ETHER_TYPE_ARP, ETHER_TYPE_IPV4, ETHER_TYPE_IPV6, EthernetFrame, EthernetHeader,
+    EvidenceStrength, Icmpv4Message, Icmpv6Message, Icmpv6Packet, IpAddress, IpProtocol,
+    Ipv4Address, Ipv4Packet, Ipv6Packet, MacAddress, NdpContext, NdpMessage, NdpOption, NdpPacket,
+    ParseMode, ParsedArpPacket, ParsedIcmpv4Message, ParsedIcmpv6Message, ParsedNdpMessage,
+    ParsedNdpOption, Port, ProbeIdentity, ResponseTuple, SessionSecret, TcpFlags, TcpSegment,
+    TransportChecksumContext, UdpChecksumMode, UdpDatagram, UdpProbeBuildContext, UpperLayerState,
+    VlanStack, VlanTag, VlanTagProtocol, build_udp_catalogue_request, classify_echo_reply,
+    classify_quoted_response, classify_tcp_reply, classify_udp_reply, compute_transport_checksum,
+    parse_arp_packet, parse_ethernet_frame, parse_icmpv4_message, parse_icmpv6_message,
+    parse_ipv4_packet, parse_ipv6_packet, parse_ndp_message, parse_tcp_segment,
+    parse_udp_catalogue_response, parse_udp_datagram,
+};
+use nodenetscanner_engine::{
+    EmissionPurpose, EvidenceEvent, EvidenceKind, IcmpEvidence, LogicalProbe, ProbeEmission,
+    ProbeFamily, UdpProbeVariant, UdpServiceConfidence, UdpServiceEvidence,
+};
+
+use crate::error::ScannerError;
+use crate::model::{
+    SessionOptions, UdpProgramRequest, UdpRequestCorrelation, VlanOverride, to_protocol_address,
+};
+use crate::socket::{PacketMessage, PortableSockets, RawFamily, RawMessage};
+
+const PACKET_OUTGOING: u8 = 4;
+const SESSION_COUNT: u64 = 4;
+const ICMP_LANE_MASK: u32 = 0x3fff_ffff;
+const MAX_SERVICE_PARSER_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+const MAX_SERVICE_PARSER_BYTES_PER_TARGET_PER_TICK: usize = 256 * 1024;
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteBinding {
+    pub generation: u64,
+    pub kind: RoutePlanKind,
+    pub interface_index: u32,
+    pub source: IpAddr,
+    pub destination: IpAddr,
+    pub next_hop: IpAddr,
+    pub source_mac: Option<[u8; 6]>,
+    pub destination_mac: Option<[u8; 6]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProbeWire {
+    probe: LogicalProbe,
+    identity: ProbeIdentity,
+    token: CorrelationToken,
+    route: RouteBindingKey,
+    purpose: EmissionPurpose,
+    udp_variant: Option<UdpProbeVariant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RouteBindingKey {
+    probe_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ObservedEvidence {
+    pub event: EvidenceEvent,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WireProgress {
+    pub sent: u64,
+    pub invalid: u64,
+    pub retried: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceivePath {
+    Ethernet,
+    RawIp,
+}
+
+pub(crate) struct WireState {
+    secret: SessionSecret,
+    session_slot: u8,
+    options: SessionOptions,
+    routes: HashMap<u64, RouteBinding>,
+    probes: HashMap<u64, ProbeWire>,
+    learned_neighbors: HashMap<(u32, IpAddr), [u8; 6]>,
+    terminal_deadlines: HashMap<u64, Instant>,
+    icmp_lanes_by_probe: HashMap<u64, u32>,
+    occupied_icmp_lanes: HashSet<u32>,
+    next_icmp_lane: u32,
+    source_lanes_by_probe: HashMap<u64, u64>,
+    source_probes_by_lane: HashMap<u64, u64>,
+    occupied_source_lanes: HashSet<u64>,
+    packet_evidence: HashSet<(u64, EvidenceKind)>,
+    raw_evidence: HashSet<(u64, EvidenceKind)>,
+    next_source_lane: u64,
+    service_parser_bytes: usize,
+    service_parser_bytes_by_target: HashMap<IpAddress, usize>,
+    progress: WireProgress,
+}
+
+impl WireState {
+    pub(crate) fn new(secret: [u8; 32], session_slot: u8, options: SessionOptions) -> Self {
+        Self {
+            secret: SessionSecret::from_os_random(secret),
+            session_slot,
+            options,
+            routes: HashMap::new(),
+            probes: HashMap::new(),
+            learned_neighbors: HashMap::new(),
+            terminal_deadlines: HashMap::new(),
+            icmp_lanes_by_probe: HashMap::new(),
+            occupied_icmp_lanes: HashSet::new(),
+            next_icmp_lane: 0,
+            source_lanes_by_probe: HashMap::new(),
+            source_probes_by_lane: HashMap::new(),
+            occupied_source_lanes: HashSet::new(),
+            packet_evidence: HashSet::new(),
+            raw_evidence: HashSet::new(),
+            next_source_lane: 0,
+            service_parser_bytes: 0,
+            service_parser_bytes_by_target: HashMap::new(),
+            progress: WireProgress::default(),
+        }
+    }
+
+    pub(crate) const fn progress(&self) -> WireProgress {
+        self.progress
+    }
+
+    pub(crate) fn begin_receive_tick(&mut self) {
+        self.service_parser_bytes = 0;
+        self.service_parser_bytes_by_target.clear();
+    }
+
+    fn charge_service_parser(&mut self, target: IpAddress, bytes: usize) -> bool {
+        let target_bytes = self
+            .service_parser_bytes_by_target
+            .get(&target)
+            .copied()
+            .unwrap_or(0);
+        let Some(session_total) = self.service_parser_bytes.checked_add(bytes) else {
+            return false;
+        };
+        let Some(target_total) = target_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if session_total > MAX_SERVICE_PARSER_BYTES_PER_TICK
+            || target_total > MAX_SERVICE_PARSER_BYTES_PER_TARGET_PER_TICK
+        {
+            return false;
+        }
+        self.service_parser_bytes = session_total;
+        self.service_parser_bytes_by_target
+            .insert(target, target_total);
+        true
+    }
+
+    pub(crate) fn mark_terminal(&mut self, logical_ids: impl IntoIterator<Item = u64>) {
+        let deadline = Instant::now()
+            .checked_add(self.options.late_grace)
+            .unwrap_or_else(Instant::now);
+        for logical_id in logical_ids {
+            let matches: Vec<u64> = self
+                .probes
+                .iter()
+                .filter_map(|(wire_id, probe)| {
+                    (probe.probe.logical_id == logical_id).then_some(*wire_id)
+                })
+                .collect();
+            if matches.is_empty() {
+                self.terminal_deadlines.insert(logical_id, Instant::now());
+            } else {
+                let settled_programme = matches.iter().any(|wire_id| *wire_id != logical_id);
+                let probe_deadline = if settled_programme {
+                    Instant::now()
+                } else {
+                    deadline
+                };
+                for wire_id in matches {
+                    self.terminal_deadlines.insert(wire_id, probe_deadline);
+                }
+            }
+        }
+        self.prune_terminal();
+    }
+
+    pub(crate) fn prune_terminal(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<u64> = self
+            .terminal_deadlines
+            .iter()
+            .filter_map(|(probe_id, deadline)| (now >= *deadline).then_some(*probe_id))
+            .collect();
+        for probe_id in expired {
+            self.terminal_deadlines.remove(&probe_id);
+            let logical_id = self
+                .probes
+                .get(&probe_id)
+                .map_or(probe_id, |probe| probe.probe.logical_id);
+            self.probes.remove(&probe_id);
+            self.packet_evidence.retain(|(id, _)| *id != probe_id);
+            self.raw_evidence.retain(|(id, _)| *id != probe_id);
+            if let Some(lane) = self.icmp_lanes_by_probe.remove(&probe_id) {
+                self.occupied_icmp_lanes.remove(&lane);
+            }
+            if let Some(lane) = self.source_lanes_by_probe.remove(&probe_id) {
+                self.occupied_source_lanes.remove(&lane);
+                self.source_probes_by_lane.remove(&lane);
+            }
+            if !self
+                .probes
+                .values()
+                .any(|probe| probe.probe.logical_id == logical_id)
+            {
+                self.routes.remove(&logical_id);
+            }
+        }
+    }
+
+    pub(crate) fn retire_physical(&mut self, probe_id: u64) {
+        self.terminal_deadlines.remove(&probe_id);
+        self.probes.remove(&probe_id);
+        self.packet_evidence.retain(|(id, _)| *id != probe_id);
+        self.raw_evidence.retain(|(id, _)| *id != probe_id);
+        if let Some(lane) = self.icmp_lanes_by_probe.remove(&probe_id) {
+            self.occupied_icmp_lanes.remove(&lane);
+        }
+        if let Some(lane) = self.source_lanes_by_probe.remove(&probe_id) {
+            self.occupied_source_lanes.remove(&lane);
+            self.source_probes_by_lane.remove(&lane);
+        }
+    }
+
+    pub(crate) fn insert_route(&mut self, probe_id: u64, mut route: RouteBinding) {
+        if route.destination_mac.is_none() {
+            route.destination_mac = self
+                .learned_neighbors
+                .get(&(route.interface_index, route.next_hop))
+                .copied();
+        }
+        self.routes.insert(probe_id, route);
+    }
+
+    pub(crate) fn route_resolution(
+        &self,
+        probe_id: u64,
+        family: ProbeFamily,
+    ) -> Option<(u64, Option<ProbeFamily>)> {
+        let route = self.routes.get(&probe_id)?;
+        let neighbor_setup = if route.destination_mac.is_none()
+            && matches!(
+                route.kind,
+                RoutePlanKind::EthernetOnLink | RoutePlanKind::EthernetGateway
+            )
+            && !matches!(family, ProbeFamily::Arp | ProbeFamily::Ndp)
+        {
+            Some(if route.next_hop.is_ipv4() {
+                ProbeFamily::Arp
+            } else {
+                ProbeFamily::Ndp
+            })
+        } else {
+            None
+        };
+        Some((route.generation, neighbor_setup))
+    }
+
+    pub(crate) fn emit(
+        &mut self,
+        sockets: &PortableSockets,
+        emission: ProbeEmission,
+    ) -> Result<(), ScannerError> {
+        let route = self
+            .routes
+            .get(&emission.probe.logical_id)
+            .cloned()
+            .ok_or_else(|| ScannerError::internal("emit probe", "route binding is missing"))?;
+        let (identity, icmp_identifier, icmp_sequence) =
+            self.identity(emission.probe_id, emission.probe, &route)?;
+        let token = self.secret.derive(identity);
+        let packet = match emission.purpose {
+            EmissionPurpose::NeighborSetup(family) => Self::build_discovery(family, &route)?,
+            EmissionPurpose::Probe => self.build_probe(
+                emission.probe_id,
+                emission.probe,
+                emission.udp_variant,
+                &route,
+                token,
+                icmp_identifier,
+                icmp_sequence,
+            )?,
+            EmissionPurpose::TcpResetCleanup => {
+                return Ok(());
+            }
+        };
+        match route.kind {
+            RoutePlanKind::Local | RoutePlanKind::Loopback => {
+                sockets.send_raw(route.destination, &packet)?;
+            }
+            RoutePlanKind::EthernetOnLink
+            | RoutePlanKind::EthernetGateway
+            | RoutePlanKind::Multicast => {
+                let destination_mac =
+                    packet_destination_mac(emission.probe, emission.purpose, &route)?;
+                let ether_type = match route.destination {
+                    IpAddr::V4(_)
+                        if matches!(
+                            emission.purpose,
+                            EmissionPurpose::NeighborSetup(ProbeFamily::Arp)
+                        ) || emission.probe.family == ProbeFamily::Arp =>
+                    {
+                        ETHER_TYPE_ARP
+                    }
+                    IpAddr::V4(_) => ETHER_TYPE_IPV4,
+                    IpAddr::V6(_) => ETHER_TYPE_IPV6,
+                };
+                let source_mac = route.source_mac.ok_or_else(|| {
+                    ScannerError::unsupported(
+                        "emit Ethernet probe",
+                        "interface has no six-byte hardware address",
+                    )
+                })?;
+                let frame = EthernetFrame {
+                    header: EthernetHeader {
+                        destination: MacAddress::new(destination_mac),
+                        source: MacAddress::new(source_mac),
+                        vlan: vlan_stack(self.options.vlan.as_ref())?,
+                        ether_type,
+                    },
+                    payload: &packet,
+                }
+                .build()?;
+                sockets.send_packet(route.interface_index, destination_mac, &frame)?;
+            }
+        }
+        self.progress.sent = self.progress.sent.saturating_add(1);
+        if emission.transmission > 1 {
+            self.progress.retried = self.progress.retried.saturating_add(1);
+        }
+        self.probes.insert(
+            emission.probe_id,
+            ProbeWire {
+                probe: emission.probe,
+                identity,
+                token,
+                route: RouteBindingKey {
+                    probe_id: emission.probe.logical_id,
+                },
+                purpose: emission.purpose,
+                udp_variant: emission.udp_variant,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn process_packet(&mut self, message: &PacketMessage) -> Vec<ObservedEvidence> {
+        if message.packet_type == PACKET_OUTGOING {
+            return Vec::new();
+        }
+        let Ok(frame) = parse_ethernet_frame(&message.data) else {
+            self.progress.invalid = self.progress.invalid.saturating_add(1);
+            return Vec::new();
+        };
+        let observations = match frame.header.ether_type {
+            value if value == ETHER_TYPE_ARP => {
+                self.process_arp(message.interface_index, frame.payload)
+            }
+            value if value == ETHER_TYPE_IPV4 || value == ETHER_TYPE_IPV6 => self.process_ip(
+                frame.payload,
+                message.checksum_not_ready,
+                ReceivePath::Ethernet,
+            ),
+            _ => Vec::new(),
+        };
+        self.suppress_cross_path_duplicates(observations, ReceivePath::Ethernet)
+    }
+
+    pub(crate) fn process_raw(&mut self, message: &RawMessage) -> Vec<ObservedEvidence> {
+        let observations = match message.family {
+            RawFamily::Ipv4 => self.process_ip(&message.data, false, ReceivePath::RawIp),
+            RawFamily::Ipv6 => {
+                let candidates: Vec<(u64, RouteBinding)> = self
+                    .probes
+                    .iter()
+                    .filter_map(|(id, probe)| {
+                        let route = self.routes.get(&probe.route.probe_id)?;
+                        (route.destination == message.source
+                            && route.destination.is_ipv6()
+                            && receive_path_matches(route.kind, ReceivePath::RawIp))
+                        .then_some((*id, route.clone()))
+                    })
+                    .collect();
+                let mut output = Vec::new();
+                for (probe_id, route) in candidates {
+                    output.extend(self.process_transport(
+                        to_protocol_address(message.source),
+                        to_protocol_address(route.source),
+                        message.protocol.number(message.family),
+                        &message.data,
+                        u8::MAX,
+                        Some(probe_id),
+                        false,
+                        ReceivePath::RawIp,
+                    ));
+                }
+                output
+            }
+        };
+        self.suppress_cross_path_duplicates(observations, ReceivePath::RawIp)
+    }
+
+    fn process_ip(
+        &mut self,
+        packet: &[u8],
+        checksum_not_ready: bool,
+        receive_path: ReceivePath,
+    ) -> Vec<ObservedEvidence> {
+        let version = packet.first().map(|value| value >> 4);
+        match version {
+            Some(4) => {
+                let Ok(parsed) = parse_ipv4_packet(packet, ParseMode::Strict) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return Vec::new();
+                };
+                let UpperLayerState::Reachable {
+                    protocol, payload, ..
+                } = parsed.upper_layer
+                else {
+                    return Vec::new();
+                };
+                self.process_transport(
+                    IpAddress::V4(parsed.source),
+                    IpAddress::V4(parsed.destination),
+                    protocol.get(),
+                    payload,
+                    parsed.time_to_live,
+                    None,
+                    checksum_not_ready,
+                    receive_path,
+                )
+            }
+            Some(6) => {
+                let Ok(parsed) = parse_ipv6_packet(packet, ParseMode::Strict) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return Vec::new();
+                };
+                let UpperLayerState::Reachable {
+                    protocol, payload, ..
+                } = parsed.upper_layer
+                else {
+                    return Vec::new();
+                };
+                self.process_transport(
+                    IpAddress::V6(parsed.source),
+                    IpAddress::V6(parsed.destination),
+                    protocol.get(),
+                    payload,
+                    parsed.hop_limit,
+                    None,
+                    checksum_not_ready,
+                    receive_path,
+                )
+            }
+            _ => {
+                self.progress.invalid = self.progress.invalid.saturating_add(1);
+                Vec::new()
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "wire-order dispatch keeps receive metadata, checksum, quote, and correlation checks adjacent"
+    )]
+    fn process_transport(
+        &mut self,
+        source: IpAddress,
+        destination: IpAddress,
+        protocol: u8,
+        payload: &[u8],
+        hop_limit: u8,
+        only_probe: Option<u64>,
+        checksum_not_ready: bool,
+        receive_path: ReceivePath,
+    ) -> Vec<ObservedEvidence> {
+        let checksum_context = checksum_context(source, destination);
+        let normalized_payload =
+            complete_offloaded_checksum(payload, checksum_context, protocol, checksum_not_ready);
+        let payload = normalized_payload.as_deref().unwrap_or(payload);
+        let mut output = Vec::new();
+        match protocol {
+            6 => {
+                let Ok(segment) = parse_tcp_segment(payload, checksum_context) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return output;
+                };
+                let tuple = ResponseTuple {
+                    source,
+                    destination,
+                    source_port: segment.source_port,
+                    destination_port: segment.destination_port,
+                };
+                for (probe_id, probe) in self.transport_candidates(
+                    only_probe,
+                    Some(segment.destination_port.get()),
+                    receive_path,
+                ) {
+                    if let Ok(evidence) =
+                        classify_tcp_reply(probe.identity, probe.token, tuple, segment)
+                    {
+                        output.push(observed(probe_id, evidence.kind, evidence.strength, None));
+                        break;
+                    }
+                }
+            }
+            17 => {
+                let Ok(datagram) = parse_udp_datagram(payload, checksum_context) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return output;
+                };
+                let tuple = ResponseTuple {
+                    source,
+                    destination,
+                    source_port: datagram.source_port,
+                    destination_port: datagram.destination_port,
+                };
+                for (probe_id, probe) in self.transport_candidates(
+                    only_probe,
+                    Some(datagram.destination_port.get()),
+                    receive_path,
+                ) {
+                    if let Ok(evidence) = classify_udp_reply(probe.identity, tuple) {
+                        let service_context = probe.udp_variant.and_then(|variant| {
+                            let route = self.routes.get(&probe.route.probe_id)?;
+                            let request = self
+                                .options
+                                .udp_program
+                                .request_at(route.destination, variant.request_index)?;
+                            Some((
+                                request.catalogue_probe?,
+                                request.maximum_response_bytes,
+                                request.maximum_parser_bytes,
+                                route.source,
+                                route.destination,
+                            ))
+                        });
+                        let service = service_context.and_then(
+                            |(
+                                catalogue_probe,
+                                maximum_response,
+                                maximum_parser,
+                                route_source,
+                                route_destination,
+                            )| {
+                                if datagram.payload.len() > maximum_response
+                                    || datagram.payload.len() > maximum_parser
+                                    || !self.charge_service_parser(source, datagram.payload.len())
+                                {
+                                    return None;
+                                }
+                                let context = UdpProbeBuildContext {
+                                    source: to_protocol_address(route_source),
+                                    destination: to_protocol_address(route_destination),
+                                    source_port: datagram.destination_port.get(),
+                                    destination_port: datagram.source_port.get(),
+                                };
+                                let request_bytes = build_udp_catalogue_request(
+                                    catalogue_probe,
+                                    probe.token.payload_token(),
+                                    context,
+                                )
+                                .ok()?;
+                                let matched = parse_udp_catalogue_response(
+                                    catalogue_probe,
+                                    &request_bytes,
+                                    datagram.payload,
+                                )
+                                .ok()?;
+                                Some(UdpServiceEvidence {
+                                    family: matched.service_family,
+                                    confidence: match matched.confidence {
+                                        3 => UdpServiceConfidence::TransactionCorrelated,
+                                        2 => UdpServiceConfidence::Parsed,
+                                        _ => UdpServiceConfidence::Signature,
+                                    },
+                                    metadata: matched.metadata,
+                                })
+                            },
+                        );
+                        let strength = if service.as_ref().is_some_and(|value| {
+                            value.confidence == UdpServiceConfidence::TransactionCorrelated
+                        }) {
+                            protocol_strength(probe.udp_variant.and_then(|v| {
+                                v.catalogue_probe_id
+                                    .map(nodenetscanner_engine::ProbeVariantId::get)
+                            }))
+                        } else {
+                            evidence.strength
+                        };
+                        output.push(observed_service(probe_id, evidence.kind, strength, service));
+                        break;
+                    }
+                }
+            }
+            1 => {
+                let candidates = self.transport_candidates(only_probe, None, receive_path);
+                let Ok(packet) = parse_icmpv4_message(payload) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return output;
+                };
+                for (probe_id, probe) in candidates {
+                    match packet.message {
+                        ParsedIcmpv4Message::EchoReply {
+                            identifier,
+                            sequence,
+                            payload,
+                        } => {
+                            if let Ok(evidence) = classify_echo_reply(
+                                probe.identity,
+                                source,
+                                destination,
+                                identifier,
+                                sequence,
+                                payload,
+                                probe.token,
+                            ) {
+                                output.push(observed(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    None,
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv4Message::DestinationUnreachable {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    4,
+                                    3,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv4Message::TimeExceeded {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    4,
+                                    11,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv4Message::ParameterProblem {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    4,
+                                    12,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            58 => {
+                if payload
+                    .first()
+                    .is_some_and(|kind| matches!(kind, 133..=137))
+                {
+                    if receive_path == ReceivePath::RawIp {
+                        return output;
+                    }
+                    return self.process_ndp(source, destination, hop_limit, payload);
+                }
+                let candidates = self.transport_candidates(only_probe, None, receive_path);
+                let Ok(packet) = parse_icmpv6_message(payload, checksum_context) else {
+                    self.progress.invalid = self.progress.invalid.saturating_add(1);
+                    return output;
+                };
+                for (probe_id, probe) in candidates {
+                    match packet.message {
+                        ParsedIcmpv6Message::EchoReply {
+                            identifier,
+                            sequence,
+                            payload,
+                        } => {
+                            if let Ok(evidence) = classify_echo_reply(
+                                probe.identity,
+                                source,
+                                destination,
+                                identifier,
+                                sequence,
+                                payload,
+                                probe.token,
+                            ) {
+                                output.push(observed(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    None,
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::DestinationUnreachable {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    1,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::PacketTooBig {
+                            ref quoted_packet, ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    2,
+                                    0,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::TimeExceeded {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    3,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        ParsedIcmpv6Message::ParameterProblem {
+                            code,
+                            ref quoted_packet,
+                            ..
+                        } => {
+                            if let Ok(quote) = quoted_packet
+                                && let Ok(evidence) =
+                                    classify_quoted_response(probe.identity, *quote, probe.token)
+                            {
+                                output.push(observed_icmp(
+                                    probe_id,
+                                    evidence.kind,
+                                    evidence.strength,
+                                    6,
+                                    4,
+                                    code,
+                                    source == probe.identity.destination(),
+                                ));
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        output
+    }
+
+    fn transport_candidates(
+        &self,
+        only_probe: Option<u64>,
+        destination_port: Option<u16>,
+        receive_path: ReceivePath,
+    ) -> Vec<(u64, ProbeWire)> {
+        if let Some(probe_id) = only_probe {
+            return self
+                .probes
+                .get(&probe_id)
+                .copied()
+                .filter(|probe| self.probe_matches_receive_path(*probe, receive_path))
+                .map(|probe| vec![(probe_id, probe)])
+                .unwrap_or_default();
+        }
+        if let Some(destination_port) = destination_port {
+            return self
+                .source_lane_for_port(destination_port)
+                .and_then(|lane| self.source_probes_by_lane.get(&lane).copied())
+                .and_then(|probe_id| {
+                    self.probes
+                        .get(&probe_id)
+                        .copied()
+                        .filter(|probe| self.probe_matches_receive_path(*probe, receive_path))
+                        .map(|probe| (probe_id, probe))
+                })
+                .into_iter()
+                .collect();
+        }
+        self.probes
+            .iter()
+            .filter(|(_, probe)| self.probe_matches_receive_path(**probe, receive_path))
+            .map(|(probe_id, probe)| (*probe_id, *probe))
+            .collect()
+    }
+
+    fn probe_matches_receive_path(&self, probe: ProbeWire, receive_path: ReceivePath) -> bool {
+        self.routes
+            .get(&probe.route.probe_id)
+            .is_some_and(|route| receive_path_matches(route.kind, receive_path))
+    }
+
+    fn suppress_cross_path_duplicates(
+        &mut self,
+        observations: Vec<ObservedEvidence>,
+        receive_path: ReceivePath,
+    ) -> Vec<ObservedEvidence> {
+        let (seen_here, seen_elsewhere) = match receive_path {
+            ReceivePath::Ethernet => (&mut self.packet_evidence, &self.raw_evidence),
+            ReceivePath::RawIp => (&mut self.raw_evidence, &self.packet_evidence),
+        };
+        observations
+            .into_iter()
+            .filter(|observation| {
+                let key = (observation.event.probe_id, observation.event.kind);
+                if seen_elsewhere.contains(&key) {
+                    return false;
+                }
+                seen_here.insert(key);
+                true
+            })
+            .collect()
+    }
+
+    fn source_lane_for_port(&self, port: u16) -> Option<u64> {
+        let span = self
+            .options
+            .source_port_end
+            .checked_sub(self.options.source_port_start)
+            .map(|value| u64::from(value) + 1)?;
+        let ports_per_session = span / SESSION_COUNT;
+        let slot_start = u64::from(self.session_slot).checked_mul(ports_per_session)?;
+        let offset = u64::from(port.checked_sub(self.options.source_port_start)?);
+        offset
+            .checked_sub(slot_start)
+            .filter(|lane| *lane < ports_per_session)
+    }
+
+    fn process_arp(&mut self, interface_index: u32, payload: &[u8]) -> Vec<ObservedEvidence> {
+        let Ok(ParsedArpPacket::EthernetIpv4(packet)) = parse_arp_packet(payload) else {
+            self.progress.invalid = self.progress.invalid.saturating_add(1);
+            return Vec::new();
+        };
+        if packet.operation != ArpEthernetIpv4Operation::Reply {
+            return Vec::new();
+        }
+        let sender = IpAddr::V4(packet.sender_protocol_address.into());
+        let mac = packet.sender_hardware_address.octets();
+        self.learn_neighbor(interface_index, sender, mac);
+        self.probes
+            .iter()
+            .filter_map(|(probe_id, probe)| {
+                let route = self.routes.get(&probe.route.probe_id)?;
+                (route.interface_index == interface_index
+                    && route.next_hop == sender
+                    && (probe.probe.family == ProbeFamily::Arp
+                        || matches!(
+                            probe.purpose,
+                            EmissionPurpose::NeighborSetup(ProbeFamily::Arp)
+                        )))
+                .then(|| {
+                    observed(
+                        *probe_id,
+                        CorrelationEvidenceKind::ArpReply,
+                        EvidenceStrength::TupleCorrelatedUnauthenticated,
+                        None,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn process_ndp(
+        &mut self,
+        source: IpAddress,
+        destination: IpAddress,
+        hop_limit: u8,
+        payload: &[u8],
+    ) -> Vec<ObservedEvidence> {
+        let (IpAddress::V6(source_v6), IpAddress::V6(destination_v6)) = (source, destination)
+        else {
+            return Vec::new();
+        };
+        let Ok(packet) = parse_ndp_message(
+            payload,
+            NdpContext {
+                source: source_v6,
+                destination: destination_v6,
+                hop_limit,
+            },
+        ) else {
+            self.progress.invalid = self.progress.invalid.saturating_add(1);
+            return Vec::new();
+        };
+        let ParsedNdpMessage::NeighborAdvertisement { target, .. } = packet.message else {
+            return Vec::new();
+        };
+        let mac = packet.options.iter().find_map(|option| match option {
+            ParsedNdpOption::TargetLinkLayerAddress(value) if value.len() == 6 => {
+                value.try_into().ok()
+            }
+            _ => None,
+        });
+        let target = IpAddr::V6(target.into());
+        let Some(mac) = mac else {
+            return Vec::new();
+        };
+        let interfaces: Vec<u32> = self
+            .routes
+            .values()
+            .filter(|route| route.next_hop == target)
+            .map(|route| route.interface_index)
+            .collect();
+        for interface in interfaces {
+            self.learn_neighbor(interface, target, mac);
+        }
+        self.probes
+            .iter()
+            .filter_map(|(probe_id, probe)| {
+                let route = self.routes.get(&probe.route.probe_id)?;
+                (route.next_hop == target
+                    && (probe.probe.family == ProbeFamily::Ndp
+                        || matches!(
+                            probe.purpose,
+                            EmissionPurpose::NeighborSetup(ProbeFamily::Ndp)
+                        )))
+                .then(|| {
+                    observed(
+                        *probe_id,
+                        CorrelationEvidenceKind::NeighborAdvertisement,
+                        EvidenceStrength::TupleCorrelatedUnauthenticated,
+                        None,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn learn_neighbor(&mut self, interface_index: u32, target: IpAddr, mac: [u8; 6]) {
+        self.learned_neighbors
+            .insert((interface_index, target), mac);
+        for route in self.routes.values_mut() {
+            if route.interface_index == interface_index && route.next_hop == target {
+                route.destination_mac = Some(mac);
+            }
+        }
+    }
+
+    fn identity(
+        &mut self,
+        probe_id: u64,
+        probe: LogicalProbe,
+        route: &RouteBinding,
+    ) -> Result<(ProbeIdentity, u16, u16), ScannerError> {
+        let protocol = match probe.family {
+            ProbeFamily::Arp => 0,
+            ProbeFamily::Ndp | ProbeFamily::Icmpv6Echo => 58,
+            ProbeFamily::Icmpv4Echo => 1,
+            ProbeFamily::TcpSyn => 6,
+            ProbeFamily::Udp => 17,
+        };
+        let source_port = if probe.family.uses_ports() {
+            self.source_port(probe_id)?
+        } else {
+            0
+        };
+        let destination_port = probe.port.map_or(0, nodenet_protocols::ProbePort::get);
+        let (icmp_identifier, icmp_sequence) = if matches!(
+            probe.family,
+            ProbeFamily::Icmpv4Echo | ProbeFamily::Icmpv6Echo
+        ) {
+            self.icmp_correlation_fields(probe_id)?
+        } else {
+            (0, 0)
+        };
+        let identity = ProbeIdentity::new(
+            IpProtocol::new(protocol),
+            probe.attempt,
+            to_protocol_address(route.source),
+            to_protocol_address(route.destination),
+            Port::new(source_port),
+            Port::new(destination_port),
+            icmp_identifier,
+            icmp_sequence,
+            probe_id,
+        )
+        .map_err(|error| ScannerError::invalid("create correlation identity", error.to_string()))?;
+        Ok((identity, icmp_identifier, icmp_sequence))
+    }
+
+    fn source_port(&mut self, probe_id: u64) -> Result<u16, ScannerError> {
+        // The scheduler and wire layer observe the same grace duration but on
+        // adjacent instants. Reap again at allocation time so a lane whose
+        // grace expired during the current scheduler drive cannot cause a
+        // spurious one-tick capacity failure.
+        self.prune_terminal();
+        let span = self
+            .options
+            .source_port_end
+            .checked_sub(self.options.source_port_start)
+            .map(|value| u64::from(value) + 1)
+            .ok_or_else(|| {
+                ScannerError::internal("allocate source port", "source-port range is reversed")
+            })?;
+        let ports_per_session = span / SESSION_COUNT;
+        if self.session_slot >= 4 || ports_per_session == 0 {
+            return Err(ScannerError::internal(
+                "allocate source port",
+                "scanner session slot or source-port partition is invalid",
+            ));
+        }
+        let lane = if let Some(lane) = self.source_lanes_by_probe.get(&probe_id) {
+            *lane
+        } else {
+            let search_limit = self.occupied_source_lanes.len().saturating_add(1);
+            let mut selected = None;
+            for _ in 0..search_limit {
+                let candidate = self.next_source_lane % ports_per_session;
+                self.next_source_lane = candidate.saturating_add(1) % ports_per_session;
+                if self.occupied_source_lanes.insert(candidate) {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            let lane = selected.ok_or_else(|| {
+                ScannerError::resource(
+                    "allocate source port",
+                    "the session source-port correlation space is exhausted",
+                )
+            })?;
+            self.source_lanes_by_probe.insert(probe_id, lane);
+            self.source_probes_by_lane.insert(lane, probe_id);
+            lane
+        };
+        let slot_start = u64::from(self.session_slot) * ports_per_session;
+        let offset = slot_start + lane;
+        let offset = u16::try_from(offset).map_err(|_| {
+            ScannerError::internal("allocate source port", "source-port offset overflowed")
+        })?;
+        self.options
+            .source_port_start
+            .checked_add(offset)
+            .ok_or_else(|| ScannerError::internal("allocate source port", "source port overflowed"))
+    }
+
+    fn icmp_correlation_fields(&mut self, probe_id: u64) -> Result<(u16, u16), ScannerError> {
+        self.prune_terminal();
+        if self.session_slot >= 4 {
+            return Err(ScannerError::internal(
+                "allocate ICMP identifier",
+                "scanner session slot is outside the four-session correlation space",
+            ));
+        }
+        let lane = if let Some(lane) = self.icmp_lanes_by_probe.get(&probe_id) {
+            *lane
+        } else {
+            let search_limit = self.occupied_icmp_lanes.len().saturating_add(1);
+            let mut selected = None;
+            for _ in 0..search_limit {
+                let candidate = self.next_icmp_lane & ICMP_LANE_MASK;
+                self.next_icmp_lane = candidate.wrapping_add(1) & ICMP_LANE_MASK;
+                if self.occupied_icmp_lanes.insert(candidate) {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            let lane = selected.ok_or_else(|| {
+                ScannerError::resource(
+                    "allocate ICMP identifier",
+                    "the session ICMP correlation space is exhausted",
+                )
+            })?;
+            self.icmp_lanes_by_probe.insert(probe_id, lane);
+            lane
+        };
+        let session_bits = u16::from(self.session_slot) << 14;
+        let lane_high = u16::try_from(lane >> 16).map_err(|_| {
+            ScannerError::internal("allocate ICMP identifier", "ICMP lane high bits overflowed")
+        })?;
+        let sequence = u16::try_from(lane & 0xffff).map_err(|_| {
+            ScannerError::internal("allocate ICMP identifier", "ICMP lane low bits overflowed")
+        })?;
+        Ok((session_bits | lane_high, sequence))
+    }
+
+    fn build_discovery(family: ProbeFamily, route: &RouteBinding) -> Result<Vec<u8>, ScannerError> {
+        match (family, route.source, route.next_hop) {
+            (ProbeFamily::Arp, IpAddr::V4(source), IpAddr::V4(target)) => {
+                let source_mac = route.source_mac.ok_or_else(|| {
+                    ScannerError::unsupported("build ARP", "interface has no Ethernet address")
+                })?;
+                Ok(ArpEthernetIpv4Packet {
+                    operation: ArpEthernetIpv4Operation::Request,
+                    sender_hardware_address: MacAddress::new(source_mac),
+                    sender_protocol_address: Ipv4Address::from(source),
+                    target_hardware_address: MacAddress::new([0; 6]),
+                    target_protocol_address: Ipv4Address::from(target),
+                }
+                .build())
+            }
+            (ProbeFamily::Ndp, IpAddr::V6(source), IpAddr::V6(target)) => {
+                build_neighbor_solicitation(source, target, route.source_mac)
+            }
+            _ => Err(ScannerError::unsupported(
+                "build neighbor discovery",
+                "address family does not match discovery protocol",
+            )),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "physical identity, programme selection, route, and ICMP fields are independently audited inputs"
+    )]
+    fn build_probe(
+        &mut self,
+        wire_id: u64,
+        probe: LogicalProbe,
+        udp_variant: Option<UdpProbeVariant>,
+        route: &RouteBinding,
+        token: CorrelationToken,
+        icmp_identifier: u16,
+        icmp_sequence: u16,
+    ) -> Result<Vec<u8>, ScannerError> {
+        if matches!(probe.family, ProbeFamily::Arp | ProbeFamily::Ndp) {
+            return Self::build_discovery(probe.family, route);
+        }
+        let source_port = if probe.family.uses_ports() {
+            self.source_port(wire_id)?
+        } else {
+            0
+        };
+        let payload_token = token.payload_token();
+        let transport = match probe.family {
+            ProbeFamily::Icmpv4Echo => Icmpv4Message::EchoRequest {
+                identifier: icmp_identifier,
+                sequence: icmp_sequence,
+                payload: &payload_token,
+            }
+            .build()?,
+            ProbeFamily::Icmpv6Echo => Icmpv6Packet {
+                checksum_context: transport_context(route.source, route.destination)?,
+                message: Icmpv6Message::EchoRequest {
+                    identifier: icmp_identifier,
+                    sequence: icmp_sequence,
+                    payload: &payload_token,
+                },
+            }
+            .build()?,
+            ProbeFamily::TcpSyn => TcpSegment {
+                checksum_context: transport_context(route.source, route.destination)?,
+                source_port: Port::new(source_port),
+                destination_port: Port::new(
+                    probe
+                        .port
+                        .ok_or_else(|| {
+                            ScannerError::internal("build TCP SYN", "destination port missing")
+                        })?
+                        .get(),
+                ),
+                sequence_number: token.tcp_sequence(),
+                acknowledgment_number: 0,
+                flags: TcpFlags::SYN,
+                window_size: 64_240,
+                urgent_pointer: 0,
+                options: &[],
+                payload: &[],
+            }
+            .build()?,
+            ProbeFamily::Udp => {
+                let request = self
+                    .options
+                    .udp_program
+                    .request_at(
+                        route.destination,
+                        udp_variant.map_or(0, |variant| variant.request_index),
+                    )
+                    .ok_or_else(|| {
+                        ScannerError::internal(
+                            "build UDP",
+                            "UDP request programme is missing for the destination family",
+                        )
+                    })?;
+                let payload = if let Some(catalogue_probe) = request.catalogue_probe {
+                    build_udp_catalogue_request(
+                        catalogue_probe,
+                        payload_token,
+                        UdpProbeBuildContext {
+                            source: to_protocol_address(route.source),
+                            destination: to_protocol_address(route.destination),
+                            source_port,
+                            destination_port: probe
+                                .port
+                                .ok_or_else(|| {
+                                    ScannerError::internal("build UDP", "destination port missing")
+                                })?
+                                .get(),
+                        },
+                    )
+                    .map_err(|error| {
+                        ScannerError::internal("build UDP protocol request", format!("{error:?}"))
+                    })?
+                } else {
+                    compose_udp_request_payload(request, &payload_token)
+                };
+                UdpDatagram {
+                    checksum_context: transport_context(route.source, route.destination)?,
+                    checksum_mode: UdpChecksumMode::Compute,
+                    source_port: Port::new(source_port),
+                    destination_port: Port::new(
+                        probe
+                            .port
+                            .ok_or_else(|| {
+                                ScannerError::internal("build UDP", "destination port missing")
+                            })?
+                            .get(),
+                    ),
+                    payload: &payload,
+                }
+                .build()?
+            }
+            ProbeFamily::Arp | ProbeFamily::Ndp => unreachable!("discovery handled above"),
+        };
+        let protocol = match probe.family {
+            ProbeFamily::Icmpv4Echo => IpProtocol::new(1),
+            ProbeFamily::Icmpv6Echo => IpProtocol::new(58),
+            ProbeFamily::TcpSyn => IpProtocol::new(6),
+            ProbeFamily::Udp => IpProtocol::new(17),
+            ProbeFamily::Arp | ProbeFamily::Ndp => unreachable!("discovery handled above"),
+        };
+        build_ip_packet(
+            route.source,
+            route.destination,
+            protocol,
+            wire_id,
+            &transport,
+        )
+    }
+}
+
+fn compose_udp_request_payload(request: &UdpProgramRequest, token: &[u8; 16]) -> Vec<u8> {
+    let prefix_length = if request.correlation == UdpRequestCorrelation::PrefixToken {
+        token.len()
+    } else {
+        0
+    };
+    let mut payload = Vec::with_capacity(prefix_length + request.payload.len());
+    if request.correlation == UdpRequestCorrelation::PrefixToken {
+        payload.extend_from_slice(token);
+    }
+    payload.extend_from_slice(&request.payload);
+    payload
+}
+
+fn complete_offloaded_checksum(
+    payload: &[u8],
+    context: TransportChecksumContext,
+    protocol: u8,
+    checksum_not_ready: bool,
+) -> Option<Vec<u8>> {
+    let offset = match (checksum_not_ready, protocol) {
+        (true, 6) if payload.len() >= 18 => 16,
+        (true, 17) if payload.len() >= 8 => 6,
+        _ => return None,
+    };
+    let mut completed = payload.to_vec();
+    completed[offset..offset + 2].fill(0);
+    let mut checksum = compute_transport_checksum(context, IpProtocol::new(protocol), &completed)?;
+    if protocol == 17 && checksum == 0 {
+        checksum = u16::MAX;
+    }
+    completed[offset..offset + 2].copy_from_slice(&checksum.to_be_bytes());
+    Some(completed)
+}
+
+fn build_ip_packet(
+    source: IpAddr,
+    destination: IpAddr,
+    protocol: IpProtocol,
+    probe_id: u64,
+    payload: &[u8],
+) -> Result<Vec<u8>, ScannerError> {
+    match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => Ok(Ipv4Packet {
+            dscp: 0,
+            ecn: 0,
+            identification: u16::try_from(probe_id & 0xffff).unwrap_or_default(),
+            dont_fragment: true,
+            more_fragments: false,
+            fragment_offset: 0,
+            time_to_live: 64,
+            protocol,
+            source: source.into(),
+            destination: destination.into(),
+            options: &[],
+            payload,
+        }
+        .build()?),
+        (IpAddr::V6(source), IpAddr::V6(destination)) => Ok(Ipv6Packet {
+            traffic_class: 0,
+            flow_label: u32::try_from(probe_id & 0x000f_ffff).unwrap_or_default(),
+            hop_limit: 64,
+            source: source.into(),
+            destination: destination.into(),
+            extensions: &[],
+            upper_layer_protocol: protocol,
+            payload,
+        }
+        .build()?),
+        _ => Err(ScannerError::invalid(
+            "build IP packet",
+            "source and destination families differ",
+        )),
+    }
+}
+
+fn build_neighbor_solicitation(
+    source: Ipv6Addr,
+    target: Ipv6Addr,
+    source_mac: Option<[u8; 6]>,
+) -> Result<Vec<u8>, ScannerError> {
+    let target_octets = target.octets();
+    let mut destination = [0_u8; 16];
+    destination[0] = 0xff;
+    destination[1] = 0x02;
+    destination[11] = 0x01;
+    destination[12] = 0xff;
+    destination[13..16].copy_from_slice(&target_octets[13..16]);
+    let destination = Ipv6Addr::from(destination);
+    let option = source_mac.map(NdpOption::SourceLinkLayerAddress);
+    let options = option.as_slice();
+    let ndp = NdpPacket {
+        context: NdpContext {
+            source: source.into(),
+            destination: destination.into(),
+            hop_limit: u8::MAX,
+        },
+        message: NdpMessage::NeighborSolicitation {
+            target: target.into(),
+        },
+        options,
+    }
+    .build()?;
+    Ok(Ipv6Packet {
+        traffic_class: 0,
+        flow_label: 0,
+        hop_limit: u8::MAX,
+        source: source.into(),
+        destination: destination.into(),
+        extensions: &[],
+        upper_layer_protocol: IpProtocol::new(58),
+        payload: &ndp,
+    }
+    .build()?)
+}
+
+fn transport_context(
+    source: IpAddr,
+    destination: IpAddr,
+) -> Result<TransportChecksumContext, ScannerError> {
+    match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => Ok(TransportChecksumContext::Ipv4 {
+            source: source.into(),
+            destination: destination.into(),
+        }),
+        (IpAddr::V6(source), IpAddr::V6(destination)) => Ok(TransportChecksumContext::Ipv6 {
+            source: source.into(),
+            destination: destination.into(),
+        }),
+        _ => Err(ScannerError::invalid(
+            "build transport",
+            "source and destination families differ",
+        )),
+    }
+}
+
+fn checksum_context(source: IpAddress, destination: IpAddress) -> TransportChecksumContext {
+    match (source, destination) {
+        (IpAddress::V4(source), IpAddress::V4(destination)) => TransportChecksumContext::Ipv4 {
+            source,
+            destination,
+        },
+        (IpAddress::V6(source), IpAddress::V6(destination)) => TransportChecksumContext::Ipv6 {
+            source,
+            destination,
+        },
+        _ => unreachable!("parsed packet addresses always share a family"),
+    }
+}
+
+fn vlan_stack(value: Option<&VlanOverride>) -> Result<VlanStack, ScannerError> {
+    value.map_or(Ok(VlanStack::None), |value| {
+        Ok(VlanStack::One(VlanTag::new(
+            VlanTagProtocol::Dot1Q,
+            value.priority,
+            value.drop_eligible,
+            value.identifier,
+        )?))
+    })
+}
+
+fn packet_destination_mac(
+    probe: LogicalProbe,
+    purpose: EmissionPurpose,
+    route: &RouteBinding,
+) -> Result<[u8; 6], ScannerError> {
+    if matches!(purpose, EmissionPurpose::NeighborSetup(ProbeFamily::Arp))
+        || probe.family == ProbeFamily::Arp
+    {
+        return Ok([0xff; 6]);
+    }
+    if matches!(purpose, EmissionPurpose::NeighborSetup(ProbeFamily::Ndp))
+        || probe.family == ProbeFamily::Ndp
+    {
+        let IpAddr::V6(target) = route.next_hop else {
+            return Err(ScannerError::invalid("build NDP", "NDP requires IPv6"));
+        };
+        let octets = target.octets();
+        return Ok([0x33, 0x33, 0xff, octets[13], octets[14], octets[15]]);
+    }
+    route.destination_mac.ok_or_else(|| {
+        ScannerError::unsupported("emit Ethernet probe", "next-hop link address is unresolved")
+    })
+}
+
+fn observed(
+    probe_id: u64,
+    kind: CorrelationEvidenceKind,
+    strength: EvidenceStrength,
+    icmp_code: Option<u8>,
+) -> ObservedEvidence {
+    let kind = match kind {
+        CorrelationEvidenceKind::TcpSynAcknowledgment => EvidenceKind::TcpSynAcknowledgment,
+        CorrelationEvidenceKind::TcpReset => EvidenceKind::TcpReset,
+        CorrelationEvidenceKind::EchoReply => EvidenceKind::EchoReply,
+        CorrelationEvidenceKind::UdpReply => EvidenceKind::UdpReply,
+        CorrelationEvidenceKind::ArpReply => EvidenceKind::ArpReply,
+        CorrelationEvidenceKind::NeighborAdvertisement => EvidenceKind::NeighborAdvertisement,
+        CorrelationEvidenceKind::IcmpErrorQuote => match icmp_code {
+            Some(3 | 4) => EvidenceKind::IcmpPortUnreachable,
+            Some(0 | 1 | 2 | 5 | 6 | 7 | 9 | 10 | 13) => EvidenceKind::ExplicitUnreachable,
+            _ => EvidenceKind::IcmpOtherError,
+        },
+    };
+    ObservedEvidence {
+        event: EvidenceEvent {
+            probe_id,
+            kind,
+            strength,
+            icmp: None,
+            udp_service: None,
+        },
+    }
+}
+
+fn observed_icmp(
+    probe_id: u64,
+    kind: CorrelationEvidenceKind,
+    strength: EvidenceStrength,
+    family: u8,
+    message_type: u8,
+    code: u8,
+    emitter_is_target: bool,
+) -> ObservedEvidence {
+    let kind = match (family, message_type, code) {
+        (4, 3, 3) | (6, 1, 4) => EvidenceKind::IcmpPortUnreachable,
+        (4, 3, 0 | 1 | 2 | 5 | 6 | 7 | 9 | 10 | 13) | (6, 1, 0..=7) => {
+            EvidenceKind::ExplicitUnreachable
+        }
+        _ if kind == CorrelationEvidenceKind::IcmpErrorQuote => EvidenceKind::IcmpOtherError,
+        _ => EvidenceKind::IcmpOtherError,
+    };
+    ObservedEvidence {
+        event: EvidenceEvent {
+            probe_id,
+            kind,
+            strength,
+            icmp: Some(IcmpEvidence {
+                family,
+                message_type,
+                code,
+                emitter_is_target,
+                quote_strength: strength,
+            }),
+            udp_service: None,
+        },
+    }
+}
+
+fn observed_service(
+    probe_id: u64,
+    kind: CorrelationEvidenceKind,
+    strength: EvidenceStrength,
+    udp_service: Option<UdpServiceEvidence>,
+) -> ObservedEvidence {
+    let mut value = observed(probe_id, kind, strength, None);
+    value.event.udp_service = udp_service;
+    value
+}
+
+fn protocol_strength(probe_id: Option<u16>) -> EvidenceStrength {
+    match probe_id {
+        Some(1 | 6 | 7 | 8 | 10 | 14 | 16) => EvidenceStrength::ProtocolTransaction16,
+        Some(3 | 4 | 11 | 15) => EvidenceStrength::ProtocolTransaction32,
+        Some(2 | 5 | 12 | 36 | 37) => EvidenceStrength::ProtocolTransaction64,
+        _ => EvidenceStrength::TupleCorrelatedUnauthenticated,
+    }
+}
+
+const fn receive_path_matches(kind: RoutePlanKind, receive_path: ReceivePath) -> bool {
+    match receive_path {
+        // AF_PACKET can surface Linux local/loopback traffic with a synthetic
+        // link header as well as ordinary Ethernet traffic. Accept it for any
+        // resolved route; the strict parser still rejects non-frame bytes.
+        ReceivePath::Ethernet => true,
+        // Raw protocol sockets also receive remote Ethernet replies. Restrict
+        // those copies to the routes that actually require the raw-IP path.
+        ReceivePath::RawIp => matches!(kind, RoutePlanKind::Local | RoutePlanKind::Loopback),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_options(source_port_start: u16, source_port_end: u16) -> SessionOptions {
+        SessionOptions {
+            udp_program: crate::model::UdpProbeProgram::default(),
+            source_address: None,
+            interface: None,
+            vlan: None,
+            source_port_start,
+            source_port_end,
+            seed: 0,
+            late_grace: std::time::Duration::ZERO,
+            result_schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn exact_custom_udp_payload_is_not_prefixed_or_mutated() {
+        let request = UdpProgramRequest {
+            catalogue_probe_id: None,
+            payload: vec![0, 1, 2, 0xff],
+            correlation: UdpRequestCorrelation::Tuple,
+            catalogue_probe: None,
+            maximum_response_bytes: 0,
+            maximum_parser_bytes: 0,
+            maximum_state_lifetime_ms: 0,
+            service_family: None,
+            eligibility: nodenetscanner_engine::UdpVariantEligibility::AnyPort,
+        };
+        assert_eq!(
+            compose_udp_request_payload(&request, &[0xaa; 16]),
+            request.payload
+        );
+    }
+
+    #[test]
+    fn raw_receive_is_local_only_while_packet_receive_covers_linux_local_delivery() {
+        for kind in [RoutePlanKind::Local, RoutePlanKind::Loopback] {
+            assert!(receive_path_matches(kind, ReceivePath::RawIp));
+            assert!(receive_path_matches(kind, ReceivePath::Ethernet));
+        }
+        for kind in [
+            RoutePlanKind::EthernetOnLink,
+            RoutePlanKind::EthernetGateway,
+            RoutePlanKind::Multicast,
+        ] {
+            assert!(receive_path_matches(kind, ReceivePath::Ethernet));
+            assert!(!receive_path_matches(kind, ReceivePath::RawIp));
+        }
+    }
+
+    #[test]
+    fn cross_path_duplicates_are_suppressed_without_hiding_same_path_repeats() {
+        let mut wire = WireState::new([0; 32], 0, session_options(49_152, 65_535));
+        let evidence = observed(
+            7,
+            CorrelationEvidenceKind::TcpReset,
+            EvidenceStrength::StrongTcpSequence32,
+            None,
+        );
+        assert_eq!(
+            wire.suppress_cross_path_duplicates(vec![evidence.clone()], ReceivePath::Ethernet)
+                .len(),
+            1
+        );
+        assert_eq!(
+            wire.suppress_cross_path_duplicates(vec![evidence.clone()], ReceivePath::RawIp)
+                .len(),
+            0
+        );
+        assert_eq!(
+            wire.suppress_cross_path_duplicates(vec![evidence], ReceivePath::Ethernet)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn phase_59_transactional_probes_publish_protocol_strength() {
+        assert_eq!(
+            protocol_strength(Some(36)),
+            EvidenceStrength::ProtocolTransaction64
+        );
+        assert_eq!(
+            protocol_strength(Some(37)),
+            EvidenceStrength::ProtocolTransaction64
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_udp_payload_retains_the_token_prefix() {
+        let request = UdpProgramRequest {
+            catalogue_probe_id: None,
+            payload: vec![1, 2, 3],
+            correlation: UdpRequestCorrelation::PrefixToken,
+            catalogue_probe: None,
+            maximum_response_bytes: 0,
+            maximum_parser_bytes: 0,
+            maximum_state_lifetime_ms: 0,
+            service_family: None,
+            eligibility: nodenetscanner_engine::UdpVariantEligibility::AnyPort,
+        };
+        let payload = compose_udp_request_payload(&request, &[0xaa; 16]);
+        assert_eq!(&payload[..16], &[0xaa; 16]);
+        assert_eq!(&payload[16..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn service_parser_work_is_bounded_per_target_and_session_each_tick() {
+        let mut wire = WireState::new([7; 32], 0, session_options(49_152, 65_535));
+        let first = IpAddress::V4(Ipv4Address::new([192, 0, 2, 1]));
+        assert!(wire.charge_service_parser(first, 256 * 1024));
+        assert!(!wire.charge_service_parser(first, 1));
+        for suffix in 2..=16 {
+            let target = IpAddress::V4(Ipv4Address::new([192, 0, 2, suffix]));
+            assert!(wire.charge_service_parser(target, 256 * 1024));
+        }
+        let final_target = IpAddress::V4(Ipv4Address::new([192, 0, 2, 17]));
+        assert!(!wire.charge_service_parser(final_target, 1));
+        wire.begin_receive_tick();
+        assert!(wire.charge_service_parser(first, 1));
+    }
+
+    #[test]
+    fn solicited_node_packet_is_checksum_valid_and_strictly_parseable() {
+        let packet = build_neighbor_solicitation(
+            "fe80::1".parse().unwrap(),
+            "fe80::abcd".parse().unwrap(),
+            Some([0, 1, 2, 3, 4, 5]),
+        )
+        .unwrap();
+        let parsed = parse_ipv6_packet(&packet, ParseMode::Strict).unwrap();
+        assert_eq!(parsed.hop_limit, u8::MAX);
+    }
+
+    #[test]
+    fn vlan_override_builds_one_checked_dot1q_tag() {
+        let stack = vlan_stack(Some(&VlanOverride {
+            identifier: 7,
+            priority: 3,
+            drop_eligible: true,
+        }))
+        .unwrap();
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn explicit_offload_status_completes_a_private_transport_copy() {
+        let context = TransportChecksumContext::Ipv4 {
+            source: "192.0.2.2".parse::<std::net::Ipv4Addr>().unwrap().into(),
+            destination: "192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap().into(),
+        };
+        let mut segment = TcpSegment {
+            checksum_context: context,
+            source_port: Port::new(443),
+            destination_port: Port::new(49_152),
+            sequence_number: 1,
+            acknowledgment_number: 2,
+            flags: TcpFlags::SYN | TcpFlags::ACK,
+            window_size: 1,
+            urgent_pointer: 0,
+            options: &[],
+            payload: &[],
+        }
+        .build()
+        .unwrap();
+        segment[16..18].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(parse_tcp_segment(&segment, context).is_err());
+        let completed = complete_offloaded_checksum(&segment, context, 6, true).unwrap();
+        assert!(parse_tcp_segment(&completed, context).is_ok());
+        assert_eq!(segment[16..18], 1_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn icmp_lanes_are_stable_and_disjoint_across_four_sessions() {
+        let mut seen = HashSet::new();
+        for slot in 0..4 {
+            let mut wire = WireState::new([u8::MAX; 32], slot, session_options(49_152, 65_535));
+            for probe_id in [0, 1, u64::MAX] {
+                let fields = wire.icmp_correlation_fields(probe_id).unwrap();
+                assert_eq!(wire.icmp_correlation_fields(probe_id).unwrap(), fields);
+                assert!(seen.insert(fields));
+                assert_eq!(fields.0 >> 14, u16::from(slot));
+            }
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    #[test]
+    fn expired_icmp_lanes_return_to_the_bounded_allocator() {
+        let mut wire = WireState::new([7; 32], 0, session_options(49_152, 65_535));
+        wire.icmp_correlation_fields(42).unwrap();
+        assert_eq!(wire.icmp_lanes_by_probe.len(), 1);
+        wire.mark_terminal([42]);
+        assert!(wire.icmp_lanes_by_probe.is_empty());
+        assert!(wire.occupied_icmp_lanes.is_empty());
+    }
+
+    #[test]
+    fn odd_source_port_ranges_are_partitioned_without_session_overlap() {
+        let mut ports = HashSet::new();
+        for slot in 0..4 {
+            let mut wire = WireState::new([0; 32], slot, session_options(60_000, 60_004));
+            let port = wire.source_port(0).unwrap();
+            assert_eq!(wire.source_port(0).unwrap(), port);
+            assert!(wire.source_port(1).is_err());
+            assert_eq!(port, 60_000 + u16::from(slot));
+            ports.insert(port);
+        }
+        assert_eq!(ports, HashSet::from([60_000, 60_001, 60_002, 60_003]));
+    }
+
+    #[test]
+    fn source_port_lanes_do_not_collide_and_return_after_terminal_grace() {
+        let mut wire = WireState::new([0; 32], 0, session_options(60_000, 60_007));
+        let first = wire.source_port(7).unwrap();
+        let second = wire.source_port(15).unwrap();
+        assert_ne!(
+            first, second,
+            "wire IDs with the same modulo need distinct lanes"
+        );
+        assert!(wire.source_port(23).is_err());
+        wire.mark_terminal([7]);
+        assert_eq!(wire.source_port(23).unwrap(), first);
+        let lane = wire.source_lane_for_port(first).unwrap();
+        assert_eq!(wire.source_probes_by_lane.get(&lane), Some(&23));
+    }
+
+    #[test]
+    fn allocation_reaps_a_lane_that_expired_after_the_prior_receive_tick() {
+        let mut wire = WireState::new([0; 32], 0, session_options(60_000, 60_003));
+        let first = wire.source_port(7).unwrap();
+        wire.terminal_deadlines.insert(7, Instant::now());
+
+        assert_eq!(wire.source_port(8).unwrap(), first);
+        assert!(!wire.source_lanes_by_probe.contains_key(&7));
+    }
+
+    #[test]
+    fn physical_retirement_releases_lane_but_preserves_logical_route() {
+        let mut wire = WireState::new([0; 32], 0, session_options(60_000, 60_007));
+        wire.insert_route(
+            1,
+            RouteBinding {
+                generation: 1,
+                kind: RoutePlanKind::Local,
+                interface_index: 1,
+                source: "127.0.0.1".parse().unwrap(),
+                destination: "127.0.0.1".parse().unwrap(),
+                next_hop: "127.0.0.1".parse().unwrap(),
+                source_mac: None,
+                destination_mac: None,
+            },
+        );
+        wire.source_port(100).unwrap();
+        wire.retire_physical(100);
+        assert!(wire.source_lanes_by_probe.is_empty());
+        assert!(wire.source_probes_by_lane.is_empty());
+        assert!(wire.routes.contains_key(&1));
+        wire.mark_terminal([1]);
+        assert!(!wire.routes.contains_key(&1));
+    }
+
+    #[test]
+    fn cached_unresolved_routes_keep_neighbor_setup_until_session_learning() {
+        let mut wire = WireState::new([0; 32], 0, session_options(49_152, 65_535));
+        let probe_id = 42;
+        wire.insert_route(
+            probe_id,
+            RouteBinding {
+                generation: 7,
+                kind: RoutePlanKind::EthernetOnLink,
+                interface_index: 3,
+                source: "192.0.2.1".parse().unwrap(),
+                destination: "192.0.2.2".parse().unwrap(),
+                next_hop: "192.0.2.2".parse().unwrap(),
+                source_mac: Some([0, 1, 2, 3, 4, 5]),
+                destination_mac: None,
+            },
+        );
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::TcpSyn),
+            Some((7, Some(ProbeFamily::Arp)))
+        );
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::Arp),
+            Some((7, None))
+        );
+
+        wire.learn_neighbor(3, "192.0.2.2".parse().unwrap(), [6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            wire.route_resolution(probe_id, ProbeFamily::TcpSyn),
+            Some((7, None))
+        );
+    }
+}

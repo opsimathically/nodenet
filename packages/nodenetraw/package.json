@@ -1,0 +1,89 @@
+{
+  "name": "@opsimathically/nodenetraw",
+  "version": "0.1.0-rc.6",
+  "description": "Linux raw sockets for Node.js, implemented in Rust through Node-API",
+  "license": "MIT",
+  "keywords": [
+    "linux",
+    "raw-socket",
+    "networking",
+    "napi",
+    "rust"
+  ],
+  "homepage": "https://github.com/opsimathically/nodenet/tree/main/packages/nodenetraw#readme",
+  "bugs": "https://github.com/opsimathically/nodenet/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opsimathically/nodenet.git",
+    "directory": "packages/nodenetraw"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=26.0.0",
+    "npm": ">=11.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "build/native/binding.cjs",
+    "dist",
+    "release-policy.json",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "prepublishOnly": "node scripts/refuse-direct-publish.mjs",
+    "build": "npm run build:native && npm run build:typescript",
+    "build:native": "napi build --manifest-path ../../crates/nodenetraw-native/Cargo.toml --platform --output-dir build/native --js binding.cjs --dts binding.d.ts -- --locked",
+    "build:native:release": "napi build --manifest-path ../../crates/nodenetraw-native/Cargo.toml --platform --release --strip --use-napi-cross --output-dir build/native --js binding.cjs --dts binding.d.ts -- --locked",
+    "build:typescript": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --config ../../eslint.config.mjs --max-warnings 0",
+    "lint:fix": "eslint . --config ../../eslint.config.mjs --fix --max-warnings 0",
+    "format": "prettier --config ../../.prettierrc.json --ignore-path ../../.prettierignore --write .",
+    "format:check": "prettier --config ../../.prettierrc.json --ignore-path ../../.prettierignore --check .",
+    "rust:fmt": "cargo fmt --manifest-path ../../crates/nodenetraw-native/Cargo.toml --check",
+    "rust:clippy": "cargo clippy --manifest-path ../../crates/nodenetraw-native/Cargo.toml --all-targets --locked -- -D warnings",
+    "rust:test": "cargo test --manifest-path ../../crates/nodenetraw-native/Cargo.toml --locked",
+    "test": "npm run build && npm run test:types && node --test test/*.test.mjs",
+    "test:types": "tsc -p test/types/tsconfig.json --noEmit",
+    "test:privileged": "sh test/run-privileged.sh root",
+    "test:namespace": "sh test/run-privileged.sh namespace",
+    "benchmark:namespace": "npm run build:native:release && npm run build:typescript && sh test/run-benchmark-namespace.sh",
+    "test:phase9:stress": "sh test/run-privileged.sh namespace ring-stress",
+    "test:phase11:stress": "sh test/run-privileged.sh root event-stress",
+    "test:phase15:stress": "sh test/run-privileged.sh root traceroute-stress",
+    "test:phase17:namespace": "sh test/run-privileged.sh namespace phase17-protocol",
+    "hardening:verify": "node scripts/verify-release.mjs",
+    "hardening:stress": "npm run test:phase9:stress",
+    "fuzz": "cargo +nightly fuzz run surface --fuzz-dir ../../crates/nodenetraw-native/fuzz -- -max_total_time=60",
+    "release:assemble": "node scripts/assemble-release.mjs",
+    "release:verify-artifact": "node scripts/verify-native-artifact.mjs",
+    "release:consumer-test": "node scripts/test-release-consumer.mjs",
+    "release:reproducibility": "node scripts/verify-reproducible-build.mjs",
+    "ci": "npm run format:check && npm run lint && npm run typecheck && npm run rust:fmt && npm run rust:clippy && npm run rust:test && npm test && npm run hardening:verify"
+  },
+  "napi": {
+    "binaryName": "nodenetraw",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  }
+}

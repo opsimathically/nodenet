@@ -1,0 +1,21 @@
+**/build/
+**/dist/
+**/target/
+node_modules/
+**/coverage/
+**/release/
+**/fuzz/artifacts/
+**/fuzz/corpus/
+*.log
+*.node
+
+# Local configuration and instantiated workspace guidance
+.env
+.env.*
+!.env.example
+/AGENTS.md
+/AGENTS.override.md
+/.agents/
+/.codex/
+/ai_project_data/
+/ai_documentation/
